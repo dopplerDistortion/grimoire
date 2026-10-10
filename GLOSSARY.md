@@ -53,8 +53,16 @@ Whoever made a change in grimoire: always a person, plus the agent client and se
 _Avoid_: Author, user, caller
 
 **Session**:
-One conversation an agent client runs, known by the client's own id for it; work a subagent does belongs to the session that launched it, and clearing or forking a conversation starts a new session.
+One top-level conversation an agent client runs, known by the client's own id for it and made of one or more contexts; work a subagent does belongs to the session that launched it, and clearing or forking a conversation starts a new session.
 _Avoid_: Thread, chat, conversation
+
+**Context**:
+The main line of a session, or one subagent or thread inside it, each with its own transcript; a knowledge chore runs in one, and an excerpt is cut from one.
+_Avoid_: Conversation, thread, agent
+
+**Binding**:
+The tie between an attempt and a context that claimed it, ended it, or wrote to its issue naming its handle; only a bound context's work goes into the attempt's trace, and every other write on the issue is plain activity.
+_Avoid_: Participation, membership, association
 
 ### Knowledge
 
@@ -67,7 +75,7 @@ The raw record of one attempt, written once when the attempt ends and never edit
 _Avoid_: Log, trajectory, rollout, history
 
 **Purge**:
-A human's deliberate removal of a trace or a skill proposal from the dotfolder, the only way either ever goes away.
+A human's deliberate removal of a trace, a skill proposal, or an excerpt still waiting on an open attempt from the dotfolder; the only way a trace or a skill proposal ever goes away.
 _Avoid_: Delete, redact, prune
 
 **Quarantine**:
@@ -75,11 +83,11 @@ A human's mark on a trace or pattern page that keeps it out of knowledge chores 
 _Avoid_: Ban, hide, suspend
 
 **Transcript**:
-An agent client's own full record of one session, kept by the client outside grimoire; grimoire reads transcripts but never stores them.
+An agent client's own full record of one context of a session, kept by the client outside grimoire; grimoire reads transcripts but never stores them.
 _Avoid_: Session file, rollout, conversation log
 
 **Excerpt**:
-The bounded, redacted step log of one session's work within an attempt, cut mechanically from its transcript and kept inside the trace.
+The bounded, redacted step log of one bound context's work within an attempt, cut mechanically from its transcript, waiting with the attempt while it is open and then kept inside the trace.
 _Avoid_: Summary, snippet, transcript
 
 **Debrief**:
