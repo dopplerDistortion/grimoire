@@ -18,6 +18,10 @@ _Avoid_: Data dir, grimoire folder, store
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config
 
+**Skill stub**:
+A pointer file that makes one evolved skill visible to one agent client's own skill discovery, carrying the skill's name and description but not its text.
+_Avoid_: Skill mirror, skill copy, skill shim
+
 ### Tracking
 
 **Issue**:
@@ -67,5 +71,13 @@ A wiki page describing one recurring failure mode or successful strategy, with i
 _Avoid_: Lesson, insight, note
 
 **Skill**:
-A procedure document for agents working in the host repo, evolved by the knowledge layer from the wiki.
+A procedure document an agent client loads in the host repo, whoever wrote it.
 _Avoid_: Prompt, rule, instruction
+
+**Evolved skill**:
+A skill the knowledge layer owns and evolves from the wiki, kept in the dotfolder.
+_Avoid_: Generated skill, grimoire skill, learned skill
+
+**Eject**:
+A human's move of an evolved skill out of the dotfolder into an agent client's own skill folder, after which it is an ordinary skill the knowledge layer never touches.
+_Avoid_: Export, release, detach
