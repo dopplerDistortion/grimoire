@@ -30,7 +30,7 @@ Used by `/wayfinder`. The **map** is a single issue with **sub-issues** as ticke
 - **Blocking**: Linear's native **blocks / blocked by** relations (`save_issue` with `blockedBy` / `blocks`; append-only, remove with `removeBlockedBy`). A ticket is unblocked when every blocker is in a completed or canceled state.
 - **Frontier query**: `list_issues` with `parentId: <map>`, open states only; drop any with an assignee, and any whose `get_issue(includeRelations)` shows an open blocker; lowest identifier wins.
 - **Claim**: `save_issue` with `assignee: "me"`, the session's first write.
-- **Resolve**: `save_comment` with the answer, then `save_issue` with `state: "Done"`, then append a context pointer (`- [<ticket title>](<url>): <gist>`) to the map's Decisions-so-far via `patch` `insert_before` the `## Not yet specified` heading.
+- **Resolve**: `save_comment` with the answer, then `save_issue` with `state: "Done"`, then append a context pointer (`- [<ticket title>](<url>): <gist>`) to the map's Decisions-so-far via `patch` `insert_before` the `## Not yet specified` heading. Do all three **before** merging your PR. Merging a branch named after the ticket makes Linear's GitHub integration close the ticket immediately, so the resolution comment would land after the close.
 - **Research assets**: findings go to `docs/research/<name>.md` on a `research/<name>` branch, linked from the ticket, and merged to `main` through a PR like any other change (see below).
 
 ## Commits and pull requests
@@ -52,5 +52,6 @@ Every session that changes repo files finishes by committing, opening a PR, and 
   ```
 
   Write the body with the `pr` skill and end it with the `🤖 Generated with [Claude Code](https://claude.com/claude-code)` line.
+- **Order**: resolve the ticket on the tracker first (comment, Done, map pointer), then merge. Never open a PR on the **map's** branch name: merging it closes the map.
 - **Merge it yourself**: `gh_api PUT /repos/dopplerDistortion/grimoire/pulls/<n>/merge merge.json` with `{"merge_method":"squash"}`. If the merge fails because of a conflict, catch up again, push, and retry.
 - **Link it**: add the PR to the Linear ticket (`save_issue` with `links`), call the T3 tool `link_pull_request`, and put the PR URL and its merge result in your report.
