@@ -10,11 +10,11 @@ ADR 0001 gives each trace excerpts cut from the transcripts of the agent work be
 - In Claude Code, grimoire's own `PreToolUse` hook puts the session, transcript path, tool-use id and subagent ids into a reserved key. A hint counts only when its tool-use id matches the client's own per-call `_meta`.
 - Codex's per-call `_meta` names the session, the thread and the call.
 - Without either, the spawn environment and the tool-use id are joined to the transcript at cut time.
-- Every binding write leaves a machine-local seen-here row, so sweeps find Codex sessions and Claude sessions without the hook too.
+- Every binding write leaves a machine-local seen-here row in the live store (ADR 0007), so sweeps find Codex sessions and Claude sessions without the hook too.
 
 **Ending an attempt.** The ending call validates first. It then cuts outside the store lock, within 10 seconds. Finally, one atomic write ends the attempt and seals its trace. A replay never cuts again.
 
-**Pending capture records.** Until the attempt ends, each bound context's latest cut waits with the open attempt, so an end on another clone still includes it. The record holds the facts (skill reads with their versions, commits with their creation evidence, and statuses) and, by default, the excerpt text.
+**Pending capture records.** Until the attempt ends, each bound context's latest cut waits with the open attempt on the tracker branch (ADR 0007), so an end on another clone still includes it. The record holds the facts (skill reads with their versions, commits with their creation evidence, and statuses) and, by default, the excerpt text. A record cut before the end is still admitted if it syncs later. A cut made after the end is dropped.
 
 **Sweeps.** Sweeps run at every `grimoire mcp` start and dashboard start, and every 30 minutes inside long-lived processes. They cut contexts that have been idle for 30 minutes. A later cut replaces a record only if it reaches further into the transcript.
 
