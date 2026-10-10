@@ -12,3 +12,5 @@ The knowledge layer learns from traces, and a trace has to be complete in git, b
 
 - Anything committed stays in git history. A purged trace leaves the dotfolder, but removing it from history needs a history rewrite, and other clones and forks keep their copies.
 - Redaction is best-effort: secret scanners trade recall against false positives. GitHub push protection is the backstop for common token types. Personal data and proprietary tool output are not caught, which is why the off switch exists and `init` states plainly that excerpts will be committed.
+
+_Amended by ADR 0007: traces are committed on the tracker branch, not in the checkout's `.grimoire/`. A purged trace leaves the tracker's tip, and history still keeps it._
