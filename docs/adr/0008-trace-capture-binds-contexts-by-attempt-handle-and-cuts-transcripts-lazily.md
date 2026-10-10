@@ -2,19 +2,19 @@
 
 ADR 0001 gives each trace excerpts cut from the transcripts of the agent work behind it, on the machine where that work ran. Grimoire has no daemon, and its MCP server can't tell which session called (ADR 0003). Both clients' session-end hooks get one to three seconds, and neither documents what happens on a crash. So capture never waits for a session to end. Grimoire observes every binding call, and cuts transcripts at two points: in the call that ends the attempt, and in sweeps its own processes run.
 
-**Binding is by handle.** A context binds to an attempt only through a write that carries the attempt's handle: the claim, the ending call, or an `update` or `comment` that names it. Every other write on the issue is activity. A matching person is not enough, because a developer's parallel sessions share one git identity, and ADR 0004 tells them apart only by handle.
+**Binding is by handle.** A context binds to an attempt only through a write that carries the attempt's handle: the claim, the ending call, or an `update` or `comment` that names it. An abandoned release recovers a dead claim and binds nothing. Every other write on the issue is activity. A matching person is not enough, because a developer's parallel sessions share one git identity, and ADR 0004 tells them apart only by handle.
 
 **Each excerpt comes from the context that did the work.** That is the context that made the binding calls, so a subagent's own transcript is cut when a subagent did the work. This amends ADR 0001's "one excerpt per session" and Traces' "main session only".
 
 **Identity is observed, never claimed.**
-- In Claude Code, grimoire's own `PreToolUse` hook puts the session, transcript path, tool-use id and subagent ids into a reserved key. A hint counts only when its tool-use id matches the client's own per-call `_meta`.
+- In Claude Code, grimoire's own `PreToolUse` hook puts the session, transcript path, tool-use id and subagent ids into a reserved key. A hint counts only when its tool-use id matches the client's own per-call `_meta`. If a call carries no `_meta`, it counts once the cut finds that id in the transcript.
 - Codex's per-call `_meta` names the session, the thread and the call.
 - Without either, the spawn environment and the tool-use id are joined to the transcript at cut time.
-- Every binding write leaves a machine-local seen-here row in the live store (ADR 0007), so sweeps find Codex sessions and Claude sessions without the hook too.
+- Every binding write leaves a machine-local seen-here row in the live store (ADR 0007), so sweeps find Codex sessions and Claude sessions without the hook too. The row is only a hint, and a binding without one is found by an id search.
 
-**Ending an attempt.** The ending call validates first. It then cuts outside the store lock, within 10 seconds. Finally, one atomic write ends the attempt and seals its trace. A replay never cuts again.
+**Ending an attempt.** The ending call validates first. It then cuts, within 10 seconds, before its tracker commit. Finally, one tracker commit ends the attempt and seals its trace. A replay never cuts again.
 
-**Pending capture records.** Until the attempt ends, each bound context's latest cut waits with the open attempt on the tracker branch (ADR 0007), so an end on another clone still includes it. The record holds the facts (skill reads with their versions, commits with their creation evidence, and statuses) and, by default, the excerpt text. A record cut before the end is still admitted if it syncs later. A cut made after the end is dropped.
+**Pending capture records.** Until the attempt ends, each bound context's latest cut waits with the open attempt on the tracker branch (ADR 0007), so an end on another clone still includes it. The record holds the facts (skill reads with their versions, commits with their creation evidence, and statuses) and, by default, the excerpt text. A record cut before the end is still admitted if it syncs later. A cut made after the end is dropped. So that a record admitted late completes the trace without editing anything sealed, the attempt's end record keeps only attempt-level facts, and per-context entries are read from the records themselves.
 
 **Sweeps.** Sweeps run at every `grimoire mcp` start and dashboard start, and every 30 minutes inside long-lived processes. They cut contexts that have been idle for 30 minutes. A later cut replaces a record only if it reaches further into the transcript.
 
@@ -23,7 +23,7 @@ ADR 0001 gives each trace excerpts cut from the transcripts of the agent work be
 **One setting, three values:**
 - `excerpts` (the default);
 - `facts`: no excerpt text is committed, but skill reads and commits are still recorded, because ADR 0005's scorecards can't be backfilled;
-- `none`: grimoire never opens a transcript.
+- `none`: grimoire never opens a transcript. Only `skill_read` events and commit trailers count.
 
 ## Considered Options
 
@@ -52,10 +52,16 @@ ADR 0001 gives each trace excerpts cut from the transcripts of the agent work be
   - the reserved key reaching the handler through the MCP SDK;
   - `/clear` starting a new transcript file;
   - Codex subagent threads writing their own transcripts;
-  - detecting a fork's copied history.
-- **Commit timing.** Excerpt text is committed while the attempt is still open, not only when the trace is sealed. Purge covers those pending records, and `init` says so.
+  - detecting a fork's copied history;
+  - `_meta.callId` being present in every Codex that sends `sessionId`.
+- **Commit timing.** Excerpt text is committed and synced while the attempt is still open, not only when the trace is sealed. Purge covers those pending records, but pushed history keeps them, and `init` says so.
 - **Accepted losses:**
   - a context that worked without ever passing the handle;
   - a session on a machine where no grimoire process runs within the client's retention (30 days by default in Claude Code);
   - a cut made after the attempt has already ended on another clone.
-- **Changes to other decisions.** `update` and `comment` gain an optional `attempt` (ADR 0003's interface). Wiki exposure is checked at every binding write, not only at the claim (ADR 0006).
+- **Changes to other decisions:**
+  - ADR 0001: one excerpt per bound context, not per session, and a three-valued setting.
+  - ADR 0004: `update` and `comment` gain an optional `attempt`.
+  - ADR 0005: skill versions are identified and matched on normalized text, and the offered record is the version matching the opening checkout's text.
+  - ADR 0006: wiki exposure is checked at every binding write, not only at the claim.
+  - ADR 0007: the actor and attempt trailers carry the capture evidence and the named handle. The end record keeps only attempt-level facts. A single session record can be purged with its own tombstone.

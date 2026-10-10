@@ -61,15 +61,15 @@ Whoever made a change in grimoire: always a person, plus the agent client, sessi
 _Avoid_: Author, user, caller
 
 **Session**:
-One top-level conversation an agent client runs, known by the client's own id for it and made of one or more contexts; work a subagent does belongs to the session that launched it, and clearing or forking a conversation starts a new session.
+One top-level run of an agent client, known by the client's own id for it and made of one or more contexts; work a subagent does belongs to the session that launched it, and clearing or forking a session starts a new one.
 _Avoid_: Thread, chat, conversation
 
 **Context**:
-The main line of a session, or one subagent or thread inside it, each with its own transcript; a knowledge chore runs in one, and an excerpt is cut from one.
+The main line of a session, or one subagent inside it (in Codex, a subagent thread), each with its own transcript; a knowledge chore runs in one, and an excerpt is cut from one.
 _Avoid_: Conversation, thread, agent
 
 **Binding**:
-The tie between an attempt and a context that claimed it, ended it, or wrote to its issue naming its handle; only a bound context's work goes into the attempt's trace, and every other write on the issue is plain activity.
+The tie between an attempt and a context that claimed it, ended it, or wrote to its issue naming the attempt; only bound contexts have their transcripts cut into the attempt's trace, and every other write on the issue is recorded only as activity.
 _Avoid_: Participation, membership, association
 
 ### Knowledge
@@ -83,7 +83,7 @@ The raw record of one attempt, sealed when the attempt ends and never edited aft
 _Avoid_: Log, trajectory, rollout, history
 
 **Purge**:
-A human's deliberate removal of a trace, a skill proposal, or an excerpt still waiting on an open attempt from the live store; the only way a trace or a skill proposal ever goes away.
+A human's deliberate removal, from the live store, of a trace, a skill proposal, or one context's excerpt and facts still waiting on an open attempt; the only way a trace or a skill proposal ever goes away.
 _Avoid_: Delete, redact, prune
 
 **Quarantine**:
