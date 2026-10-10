@@ -18,6 +18,10 @@ _Avoid_: Data dir, grimoire folder, store
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config
 
+**Agent client**:
+A program that runs an AI agent's sessions on a developer's machine and through which the agent talks to grimoire, such as Claude Code or Codex.
+_Avoid_: Harness, IDE, host, agent (for the program itself)
+
 **Skill stub**:
 A pointer file that makes one evolved skill visible to one agent client's own skill discovery, carrying the skill's name and description but not its text.
 _Avoid_: Skill mirror, skill copy, skill shim
@@ -31,6 +35,26 @@ _Avoid_: Ticket, task, card
 **Attempt**:
 One worker's run at one issue, agent or human, from claiming it (or closing it unclaimed) until it is closed, released, or reassigned; an issue has one or more attempts.
 _Avoid_: Run, rollout, episode, session
+
+**Claim**:
+Taking an open, unassigned issue to work it yourself, which opens an attempt; it fails if anyone already holds the issue, including another of your own sessions.
+_Avoid_: Grab, pick up, self-assign
+
+**Release**:
+Giving up a claim without closing the issue, which ends the attempt as a fail.
+_Avoid_: Unclaim, unassign, drop
+
+**Assignee**:
+The person who holds an issue's open attempt: always a human, known by their git identity, even while an agent works the issue on their behalf; an issue with no open attempt has none.
+_Avoid_: Owner, agent, worker
+
+**Actor**:
+Whoever made a change in grimoire: always a person, plus the agent client and session when an agent made it on that person's behalf, as observed by grimoire rather than claimed by the agent.
+_Avoid_: Author, user, caller
+
+**Session**:
+One conversation an agent client runs, known by the client's own id for it; work a subagent does belongs to the session that launched it, and clearing or forking a conversation starts a new session.
+_Avoid_: Thread, chat, conversation
 
 ### Knowledge
 
@@ -55,7 +79,7 @@ The bounded, redacted step log of one session's work within an attempt, cut mech
 _Avoid_: Summary, snippet, transcript
 
 **Debrief**:
-An agent's own short account of an attempt, posted on the issue as the attempt ends: what was tried, what failed, what worked, and what the next worker should know.
+A worker's own short account of an attempt, posted on the issue as the attempt ends: what was tried, what failed, what worked, and what the next worker should know; agents are asked for one, humans may write one.
 _Avoid_: Retro, summary, report, work log
 
 **Outcome**:
