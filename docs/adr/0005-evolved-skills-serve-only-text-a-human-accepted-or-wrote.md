@@ -46,3 +46,5 @@ Each decision records its actor and its basis. The basis is human review in v1, 
 - A restore drops every later version built on the change it undoes. The human sees which versions before confirming, and dropped versions may be proposed again.
 - Traces must record which skill *version* each attempt was offered at its start and read during it, plus the state of the delivery switch. This sharpens ADR 0002's "which evolved skills the attempt read", and it can't be backfilled once traces are written.
 - The controls are procedural. A local agent with a shell can still forge records, so host-repo review of `.grimoire/` changes is the backstop.
+
+_Amended by ADR 0008: skill versions are identified and matched on normalized text (BOM stripped, LF line endings), and the offered versions come from the ledger, never from bytes on disk._

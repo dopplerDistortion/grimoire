@@ -36,3 +36,5 @@ A knowledge chore reads the wiki and untrusted trace text, so two things must ho
 - The Codex chore role still sees the user's other MCP servers. With the shell off, grimoire's admission check is the enforcement there.
 - Every input costs a tool round-trip under the result budget of about 24 KB, so a compile batch is read in several pages.
 - A chore run's lease expires after an hour without a chore call. This differs from claims (ADR 0004): chores are cheap to repeat, and duplicate runs merge by union.
+
+_Amended by ADR 0008: a marked session or process flags every attempt it opens or later binds to, not only the ones it opens. Every binding write checks the marks._

@@ -23,3 +23,5 @@ This departs from GitHub and Linear, where assigning is an unconditional set tha
 - A crashed session's claim stays in place until someone releases it as abandoned, and that attempt's outcome is fail. This matches ADR 0001, which sets no inactivity timeout.
 - Claims are exclusive only among writers on one machine. Across clones, conflicting claims are settled when the clones merge, so readers must cope with an issue that has two open attempts.
 - An agent told that an issue is already claimed moves on to another issue, unless the user named that issue. Even then it continues only by explicitly taking over the existing attempt's handle.
+
+_Amended by ADR 0008: `update` and `comment` may also name the open attempt's handle. Naming it binds the writing context to the attempt, and naming a handle you don't hold fails with `NOT_ASSIGNEE`._
