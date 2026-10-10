@@ -1,10 +1,12 @@
 # Working agents get evolved skills through pointer stubs, never the wiki
 
-The knowledge layer produces a wiki and evolved skills. Only the evolved skills reach the agents that work in a host repo: no instruction, MCP surface or skill body points an agent at the wiki. WikiSkill found that giving agents wiki access during training rollouts lowered scores (63.7% → 60.9%), and the paper suspects it also made the resulting traces less useful for evolving skills.
+The knowledge layer produces a wiki and evolved skills. Only the evolved skills reach the agents that work in a host repo: no instruction, hook output, MCP surface or skill body points an agent at the wiki during issue work. WikiSkill found that giving agents wiki access during training rollouts lowered scores (63.7% → 60.9%), and the paper suspects it also made the resulting traces less useful for evolving skills.
+
+The one exception is a knowledge chore, which has to read the wiki. Grimoire hands chore work only to a context that holds no open attempt: a forked skill context in Claude Code, or otherwise a session with no open attempt or the opt-in runner. If a session ran a chore in its main context and later opens an attempt, that attempt's trace is marked as wiki-exposed.
 
 Each evolved skill's text lives in `.grimoire/skills/<name>/SKILL.md`. For each one, grimoire's own code writes a small stub per client, at `.claude/skills/grimoire-<name>/SKILL.md` and `.agents/skills/grimoire-<name>/SKILL.md`. The stub copies only the `name` and `description` and tells the agent to read the real file. Both clients can then match skills by description natively, and every LLM-written word stays inside the dotfolder.
 
-Evolved skills grant nothing. Grimoire keeps only `name`, `description` and the markdown body, so a prompt injection carried from a trace into a skill can never become an auto-approved command.
+Evolved skills grant nothing. Grimoire keeps only `name`, `description` and the markdown body, so a prompt injection carried from a trace into a skill can never become an auto-approved command. Skills that grimoire ships are versioned with the package and keep any client extras they need. Their names are reserved, so an evolved skill can never take one.
 
 ## Considered Options
 

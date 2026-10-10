@@ -70,6 +70,10 @@ _Avoid_: Knowledge base, notes, memory
 A wiki page describing one recurring failure mode or successful strategy, with its workaround.
 _Avoid_: Lesson, insight, note
 
+**Knowledge chore**:
+A unit of knowledge-layer LLM work that grimoire queues for an agent already on the machine, whose result grimoire checks and writes itself; the only work in which an agent reads the wiki.
+_Avoid_: Job, background task, maintenance run
+
 **Skill**:
 A procedure document an agent client loads in the host repo, whoever wrote it.
 _Avoid_: Prompt, rule, instruction
