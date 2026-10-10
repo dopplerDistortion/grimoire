@@ -14,3 +14,5 @@ The knowledge layer learns from traces, and a trace has to be complete in git, b
 - Redaction is best-effort: secret scanners trade recall against false positives. GitHub push protection is the backstop for common token types. Personal data and proprietary tool output are not caught, which is why the off switch exists and `init` states plainly that excerpts will be committed.
 
 _Amended by ADR 0007: traces are committed on the tracker branch, not in the checkout's `.grimoire/`. A purged trace leaves the tracker's tip, and history still keeps it._
+
+_Amended by ADR 0008: a trace carries one excerpt per bound context, cut from the context that did the work, not one per session. The off switch is one setting with three values: `excerpts`, `facts` (skill reads and commits are recorded but no excerpt text) and `none`._

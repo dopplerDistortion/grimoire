@@ -45,3 +45,5 @@ All of a clone's worktrees must share one live issue state, so that a claim made
   - Trees are sharded two levels deep by id.
 - **Purge has limits.** A purged trace leaves the tracker's tip, but pushed history keeps it (ADR 0001). Purge can rewrite only the unpushed part of the tracker.
 - **Forks without push access** can't share tracker state with upstream.
+
+_Amended by ADR 0008: `Grimoire-Actor` also carries the context, call id, spawn-env id, process nonce and any chore-exposure basis. `Grimoire-Attempt` carries the handle the caller named, on claim, update, comment and ending ops only. `end.md` keeps only attempt-level fields, and per-context entries are read from the frozen session records. A single session record's purge writes its own tombstone._
