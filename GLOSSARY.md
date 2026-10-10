@@ -11,8 +11,16 @@ A repository that grimoire has been installed into; each host repo has exactly o
 _Avoid_: Target project, consumer project, workspace
 
 **Dotfolder**:
-The `.grimoire/` directory at the root of a host repo, holding all of grimoire's state and configuration for that repo.
+The `.grimoire/` directory at the root of a host repo's checkout, holding grimoire's install configuration, its manifest, and the files agents and humans read straight from the checkout, such as evolved skills; issue state lives in the live store instead.
 _Avoid_: Data dir, grimoire folder, store
+
+**Live store**:
+Grimoire's one working state for a host repo on one machine: the tracker branch plus never-committed machine-local data, both kept in the clone's git common directory so that every worktree reads and writes the same state.
+_Avoid_: Database, cache, data dir, dotfolder
+
+**Tracker branch**:
+The git branch on which grimoire alone commits a host repo's issues, attempts, traces, outcomes and knowledge records; it is never checked out or merged into code, and clones exchange it by ordinary git fetch and push.
+_Avoid_: Sync branch, data branch, issues branch, ledger
 
 **Pointer file**:
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
@@ -63,11 +71,11 @@ The part of grimoire that turns the experience of working issues into a wiki and
 _Avoid_: Memory, brain, knowledge base
 
 **Trace**:
-The raw record of one attempt, written once when the attempt ends and never edited after, complete in git without needing anything left on the machine where the work happened; it outlives edits to its issue and the issue itself.
+The raw record of one attempt, sealed when the attempt ends and never edited after, complete in git without needing anything left on the machine where the work happened; it outlives edits to its issue and the issue itself.
 _Avoid_: Log, trajectory, rollout, history
 
 **Purge**:
-A human's deliberate removal of a trace or a skill proposal from the dotfolder, the only way either ever goes away.
+A human's deliberate removal of a trace or a skill proposal from the live store, the only way either ever goes away.
 _Avoid_: Delete, redact, prune
 
 **Quarantine**:
