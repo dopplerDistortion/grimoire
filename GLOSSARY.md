@@ -99,8 +99,8 @@ A wiki page describing one recurring failure mode or successful strategy, with i
 _Avoid_: Lesson, insight, note
 
 **Knowledge chore**:
-A unit of knowledge-layer LLM work that grimoire queues for an agent already on the machine, whose result grimoire checks and writes itself; the only work in which an agent reads the wiki.
-_Avoid_: Job, background task, maintenance run
+A unit of knowledge-layer LLM work that grimoire offers, while it is due, to an agent already on the machine, whose result grimoire checks and writes itself; the only work in which an agent reads the wiki.
+_Avoid_: Job, background task, maintenance run, queue item
 
 **Wiki Maintainer**:
 The knowledge chore that compiles a batch of traces into the wiki's pattern pages.
@@ -109,6 +109,14 @@ _Avoid_: Compiler, curator, summarizer
 **Skill Proposer**:
 The knowledge chore that drafts at most one skill proposal from the wiki, the traces it cites, and the skill ledger.
 _Avoid_: Optimizer, skill writer, skill generator
+
+**Chore run**:
+One pickup of a due knowledge chore by one context, from its start until its result is accepted or it fails, is abandoned or expires; it records what grimoire served it and what it consumed.
+_Avoid_: Job, lease, execution, invocation
+
+**Runner**:
+A per-machine opt-in that lets grimoire itself start an agent client's headless mode to do due knowledge chores unattended, on that person's own login.
+_Avoid_: Worker, daemon, background agent, bot
 
 **Skill**:
 A procedure document an agent client loads in the host repo, whoever wrote it.
