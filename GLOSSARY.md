@@ -18,6 +18,10 @@ _Avoid_: Data dir, grimoire folder, store
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config
 
+**Agent client**:
+A program that runs an AI agent's sessions on a developer's machine and through which the agent talks to grimoire, such as Claude Code or Codex.
+_Avoid_: Harness, IDE, host, agent (for the program itself)
+
 ### Tracking
 
 **Issue**:
@@ -27,6 +31,14 @@ _Avoid_: Ticket, task, card
 **Attempt**:
 One worker's run at one issue, agent or human, from claiming it (or closing it unclaimed) until it is closed, released, or reassigned; an issue has one or more attempts.
 _Avoid_: Run, rollout, episode, session
+
+**Assignee**:
+The person an issue is assigned to: always a human, known by their git identity, even while an agent works the issue on their behalf.
+_Avoid_: Owner, agent, worker
+
+**Actor**:
+Whoever made a change in grimoire: always a person, plus the agent client and session when an agent made it on that person's behalf, as observed by grimoire rather than claimed by the agent.
+_Avoid_: Author, user, caller
 
 ### Knowledge
 
