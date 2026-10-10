@@ -67,8 +67,12 @@ The raw record of one attempt, written once when the attempt ends and never edit
 _Avoid_: Log, trajectory, rollout, history
 
 **Purge**:
-A human's deliberate removal of a trace from the dotfolder, the only way a trace ever goes away.
+A human's deliberate removal of a trace or a skill proposal from the dotfolder, the only way either ever goes away.
 _Avoid_: Delete, redact, prune
+
+**Quarantine**:
+A human's mark on a trace or pattern page that keeps it out of knowledge chores and out of a skill proposal's evidence, without purging it or rolling back the wiki.
+_Avoid_: Ban, hide, suspend
 
 **Transcript**:
 An agent client's own full record of one session, kept by the client outside grimoire; grimoire reads transcripts but never stores them.
@@ -98,6 +102,14 @@ _Avoid_: Lesson, insight, note
 A unit of knowledge-layer LLM work that grimoire queues for an agent already on the machine, whose result grimoire checks and writes itself; the only work in which an agent reads the wiki.
 _Avoid_: Job, background task, maintenance run
 
+**Wiki Maintainer**:
+The knowledge chore that compiles a batch of traces into the wiki's pattern pages.
+_Avoid_: Compiler, curator, summarizer
+
+**Skill Proposer**:
+The knowledge chore that drafts at most one skill proposal from the wiki, the traces it cites, and the skill ledger.
+_Avoid_: Optimizer, skill writer, skill generator
+
 **Skill**:
 A procedure document an agent client loads in the host repo, whoever wrote it.
 _Avoid_: Prompt, rule, instruction
@@ -109,3 +121,19 @@ _Avoid_: Generated skill, grimoire skill, learned skill
 **Eject**:
 A human's move of an evolved skill out of the dotfolder into an agent client's own skill folder, after which it is an ordinary skill the knowledge layer never touches.
 _Avoid_: Export, release, detach
+
+**Skill proposal**:
+One suggested change to exactly one evolved skill, creating it or patching it, drafted by the Skill Proposer together with its evidence; it never changes once written, and it changes nothing until a human accepts it.
+_Avoid_: Suggestion, candidate, change request, PR
+
+**Skill version**:
+One exact text of an evolved skill, identified by that text alone, so the same words are always the same version.
+_Avoid_: Revision, snapshot, release
+
+**Restore**:
+A human's forward change that makes an earlier skill version of an evolved skill current again, recorded as a new change rather than by undoing git history.
+_Avoid_: Rollback, revert
+
+**Skill ledger**:
+The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, and every change to an evolved skill.
+_Avoid_: Skill impact, changelog, audit log, history
