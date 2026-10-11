@@ -628,6 +628,37 @@ describe('a local git that stops answering', () => {
     },
   );
 
+  test('a git whose kill is slow to start, as on a loaded machine: BUSY still comes within the budget, and the git is killed', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const pidFile = path.join(world.root, 'wedged-pids');
+    const wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
+    // Starting a process blocks the thread that starts it; on a loaded Windows machine, for hundreds of ms.
+    const spawnGit = vi.mocked(childProcess.spawn).getMockImplementation()!;
+    vi.mocked(childProcess.spawn).mockImplementation(((name: string, ...rest: unknown[]) => {
+      if (name === 'taskkill') for (const until = Date.now() + 800; Date.now() < until; );
+      return (spawnGit as (...args: unknown[]) => childProcess.ChildProcess)(name, ...rest);
+    }) as unknown as typeof childProcess.spawn);
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    try {
+      const started = Date.now();
+      const failure: unknown = await store.transact(keyWrite('slow kill'), () => ({ result: null })).catch((error: unknown) => error);
+      const took = Date.now() - started;
+
+      expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
+      expect(took).toBeLessThan(BUDGET_MS + 500);
+      const killed = (await pidsIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
+      expect(killed.length).toBeGreaterThan(0);
+      await vi.waitFor(() => expect(killed.filter(alive)).toEqual([]), { timeout: 5_000 });
+    } finally {
+      wedged.restore();
+      await store.close();
+      await killPidsIn(pidFile);
+    }
+  });
+
   test('a ref updater that stops answering and is slow to exit once killed: BUSY still comes within the budget', async ({ world, grimoire }) => {
     void grimoire; // initializes the tracker
     const before = (await trackerTip(world.a))!;

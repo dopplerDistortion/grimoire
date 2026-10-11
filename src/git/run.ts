@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { GrimoireError } from '../errors';
 
 /**
@@ -79,11 +80,7 @@ export function killTree(child: ChildProcess, options: { group?: boolean } = {})
   if (pid === undefined) return;
   // Gone already, so its pid may name another process now; a group may still hold its children.
   if (!options.group && (child.exitCode !== null || child.signalCode !== null)) return;
-  if (process.platform === 'win32') {
-    const kill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    kill.on('error', () => child.kill());
-    return;
-  }
+  if (process.platform === 'win32') return reaper.kill(child);
   try {
     if (options.group) process.kill(-pid, 'SIGKILL');
     else child.kill('SIGKILL');
@@ -91,6 +88,86 @@ export function killTree(child: ChildProcess, options: { group?: boolean } = {})
     // Already gone.
   }
 }
+
+/** `taskkill` for `child`'s whole tree, started on this thread; `child.kill()` when it can't start. */
+function taskkill(child: ChildProcess): void {
+  const kill = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  kill.on('error', () => child.kill());
+}
+
+const REAPER_THREAD = `
+const { parentPort } = require('node:worker_threads');
+const { spawn } = require('node:child_process');
+parentPort.on('message', ({ id, pid }) => {
+  let told = false;
+  const tell = (started) => {
+    if (!told) parentPort.postMessage({ id, started });
+    told = true;
+  };
+  const kill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  kill.on('spawn', () => tell(true));
+  kill.on('error', () => tell(false));
+});
+`;
+
+/**
+ * Starts Windows kills (`taskkill`) on a thread of its own. Starting a
+ * process blocks the thread that starts it, on a loaded machine for hundreds
+ * of milliseconds: on grimoire's own thread, a kill would hold up whatever
+ * waits behind it, first of all the BUSY it gives. The thread starts with the
+ * first kill and keeps Node alive only while a kill is on its way; a kill
+ * still on its way when Node exits, or when the thread can't run, is started
+ * here instead.
+ */
+class Reaper {
+  private thread: Worker | null = null;
+  private readonly pending = new Map<number, ChildProcess>();
+  private nextId = 0;
+  private hooked = false;
+
+  kill(child: ChildProcess): void {
+    const thread = this.start();
+    if (!thread) return taskkill(child);
+    const id = ++this.nextId;
+    this.pending.set(id, child);
+    thread.ref();
+    thread.postMessage({ id, pid: child.pid });
+  }
+
+  private start(): Worker | null {
+    if (this.thread) return this.thread;
+    let thread: Worker;
+    try {
+      thread = new Worker(REAPER_THREAD, { eval: true });
+    } catch {
+      return null;
+    }
+    thread.on('message', ({ id, started }: { id: number; started: boolean }) => {
+      const child = this.pending.get(id);
+      this.pending.delete(id);
+      if (child && !started) child.kill();
+      if (this.pending.size === 0) thread.unref();
+    });
+    const gone = () => {
+      if (this.thread === thread) this.thread = null;
+      this.flush();
+    };
+    thread.on('error', gone);
+    thread.on('exit', gone);
+    if (!this.hooked) process.on('exit', () => this.flush());
+    this.hooked = true;
+    this.thread = thread;
+    return thread;
+  }
+
+  /** Starts here every kill the thread hasn't said it started. */
+  private flush(): void {
+    for (const child of this.pending.values()) taskkill(child);
+    this.pending.clear();
+  }
+}
+
+const reaper = new Reaper();
 
 export interface GitRun {
   code: number | null;
