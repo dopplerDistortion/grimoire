@@ -95,6 +95,18 @@ function stateOf(issue: IssueRecord | undefined): RelationState {
   return issue.status === 'done' || issue.status === 'canceled' ? issue.status : 'open';
 }
 
+/**
+ * The live issue a stored relation (`parent`, `blocked_by`) names: the id
+ * itself, or for the bare id of a resolved collision, the record its
+ * forwarding record names. Undefined for a dangling id.
+ */
+export function relatedIssue(view: TrackerView, id: string): IssueRecord | undefined {
+  const issue = view.issue(id);
+  if (issue) return issue;
+  const forward = view.forwardOf(id);
+  return forward === undefined ? undefined : view.issue(forward);
+}
+
 /** The facts of an open attempt. */
 export function openAttemptFacts(record: AttemptRecord): OpenAttemptFacts {
   let lastActivityAt = record.start.at;
@@ -141,7 +153,7 @@ export function derivations(view: TrackerView, staleBefore = Number.NEGATIVE_INF
     list.push(issue);
   }
   const cache = new Map<string, Derived>();
-  const state = (id: string) => stateOf(view.issue(id));
+  const state = (id: string) => stateOf(relatedIssue(view, id));
   const derived: Derivations = {
     state,
     of(id) {

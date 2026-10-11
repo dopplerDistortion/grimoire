@@ -35,10 +35,14 @@ import {
   ATTEMPTS_DIR,
   COMMENTS_DIR,
   commentFile,
+  conflictsDir,
   CONFLICTS_DIR,
   DELETED_DIR,
+  deletedFile,
   FORMAT_FILE,
+  forwardFile,
   FORWARDS_DIR,
+  issueDir,
   ISSUES_DIR,
   issueFile,
   outcomeFile,
@@ -46,10 +50,11 @@ import {
   SETTINGS_FILE,
 } from './layout';
 import { parseConflict, type ConflictRecord } from './conflict';
-import { lineValue, parseLines } from './lines';
 import { parseMarker, type Marker } from './marker';
 import { BoundedMap, type FileEdit, type ObjectSource, type TrackerObjects, type VirtualObjects } from './objects';
 import { parseIssue, serializeIssue, type IssueRecord } from './record';
+import { parseForward, parseTombstone, serializeForward, serializeTombstone, type Tombstone } from './retired';
+import { parseSetting, serializeSettings, settingLine, settingLines, type StoreSetting } from './settings';
 
 /** What every read sees: the tracker at one tip. */
 export interface TrackerView {
@@ -78,6 +83,12 @@ export interface TrackerView {
   attempt(handle: string): AttemptRecord | undefined;
   /** The issue's fold conflict records, oldest first: what folds set aside until a human resolves it. */
   conflicts(id: string): readonly ConflictRecord[];
+  /** The store settings (`settings.yml`) by key, unknown keys included; lines that aren't a setting are left out. */
+  settings(): ReadonlyMap<string, StoreSetting>;
+  /** The record a forwarding record (`forwards/<id>.md`) maps the bare id to, or undefined. */
+  forwardOf(id: string): string | undefined;
+  /** The delete tombstone (`deleted/<id>.md`) that retired the id, or undefined. */
+  deletion(id: string): Tombstone | undefined;
 }
 
 /** A comment a write adds; the draft picks its id and time. */
@@ -129,10 +140,39 @@ export interface TrackerDraft extends TrackerView {
   sealAttempt(handle: string, end: NewEnd): void;
   /** Writes the attempt's outcome record. */
   putOutcome(handle: string, outcome: NewOutcome): void;
+  /**
+   * Deletes a live issue (spec §3, Delete): its whole directory goes, comments
+   * and conflict records included, and `deleted/<id>.md` records who and when.
+   * Its attempts and outcomes stay. The caller strips the id from other
+   * issues' `blocked_by`.
+   */
+  deleteIssue(id: string, by: string): void;
+  /** Removes every fold conflict record of a live issue: a human resolved it. */
+  clearConflicts(id: string): void;
+  /** Sets a store setting: its value, the round's instant as `at`, and `by`. */
+  putSetting(key: string, value: unknown, by: string): void;
+  /** Writes the forwarding record that maps the bare id `id` to the live record `to`. */
+  putForward(id: string, to: string, by: string): void;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
   return a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** The settings among raw `settings.yml` lines (lines that aren't `{value, at, by}` are left out). */
+function settingsOf(lines: ReadonlyMap<string, string>): Map<string, StoreSetting> {
+  const settings = new Map<string, StoreSetting>();
+  for (const [key, raw] of lines) {
+    const setting = parseSetting(raw);
+    if (setting) settings.set(key, setting);
+  }
+  return settings;
+}
+
+/** `link_base` + the record's path, or the bare id when no `link_base` is set (spec §3, Links). */
+function linkOf(settings: ReadonlyMap<string, StoreSetting>, id: string): string {
+  const base = settings.get('link_base')?.value;
+  return typeof base === 'string' && base !== '' ? base + issueFile(id) : id;
 }
 
 function byOpening(a: AttemptRecord, b: AttemptRecord): number {
@@ -154,9 +194,12 @@ export interface SnapshotParts {
   readonly records: ReadonlyMap<string, IssueRecord>;
   /** Each live issue's `issue.md` blob. */
   readonly issueBlobs: ReadonlyMap<string, string>;
-  readonly settings: ReadonlyMap<string, unknown>;
-  /** Ids gone from the live view but never reused: deleted and forwarded. */
-  readonly retiredIds: ReadonlySet<string>;
+  /** `settings.yml`, or null when the tracker has none. */
+  readonly settingsBytes: Buffer | null;
+  /** Deleted ids, with their tombstones. */
+  readonly deleted: ReadonlyMap<string, Tombstone>;
+  /** Forwarded bare ids, with the record each forwards to (empty when the record doesn't say). */
+  readonly forwards: ReadonlyMap<string, string>;
   /** Each issue's comment files, in comment order. */
   readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>;
   /** Each issue's attempts, in opening order. */
@@ -172,11 +215,16 @@ export class Snapshot implements TrackerView {
   readonly source: ObjectSource;
   readonly virtual: VirtualObjects | null;
   readonly marker: Marker | null;
+  /** Ids gone from the live view but never reused: deleted and forwarded. */
   readonly retiredIds: ReadonlySet<string>;
   readonly ids: ReadonlySet<string>;
+  /** `settings.yml`'s raw line values, by key (every line, settings or not). */
+  readonly settingLines: ReadonlyMap<string, string>;
   private readonly records: ReadonlyMap<string, IssueRecord>;
   private readonly issueBlobs: ReadonlyMap<string, string>;
-  private readonly settings: ReadonlyMap<string, unknown>;
+  private readonly settingMap: ReadonlyMap<string, StoreSetting>;
+  private readonly deleted: ReadonlyMap<string, Tombstone>;
+  private readonly forwards: ReadonlyMap<string, string>;
   private readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>;
   private readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>;
   private readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
@@ -190,10 +238,13 @@ export class Snapshot implements TrackerView {
     this.source = parts.source;
     this.virtual = parts.virtual;
     this.marker = parts.marker;
-    this.retiredIds = parts.retiredIds;
+    this.deleted = parts.deleted;
+    this.forwards = parts.forwards;
+    this.retiredIds = new Set([...parts.deleted.keys(), ...parts.forwards.keys()]);
     this.records = parts.records;
     this.issueBlobs = parts.issueBlobs;
-    this.settings = parts.settings;
+    this.settingLines = settingLines(parts.settingsBytes);
+    this.settingMap = settingsOf(this.settingLines);
     this.commentFiles = parts.commentFiles;
     this.attemptLists = parts.attemptLists;
     this.conflictLists = parts.conflictLists;
@@ -216,16 +267,27 @@ export class Snapshot implements TrackerView {
   }
 
   resolveRead(ref: string, field = 'ref'): string {
-    return resolveReadRef(ref, this.ids, field);
+    return resolveReadRef(ref, this.ids, field, this);
   }
 
   resolveWrite(ref: string, field = 'id'): string {
-    return resolveWriteRef(ref, this.ids, field);
+    return resolveWriteRef(ref, this.ids, field, this);
   }
 
   link(id: string): string {
-    const base = this.settings.get('link_base');
-    return typeof base === 'string' && base !== '' ? base + issueFile(id) : id;
+    return linkOf(this.settingMap, id);
+  }
+
+  settings(): ReadonlyMap<string, StoreSetting> {
+    return this.settingMap;
+  }
+
+  forwardOf(id: string): string | undefined {
+    return this.forwards.get(id) || undefined;
+  }
+
+  deletion(id: string): Tombstone | undefined {
+    return this.deleted.get(id);
   }
 
   comments(id: string): readonly CommentEntry[] {
@@ -277,6 +339,14 @@ export class Draft implements TrackerDraft {
   private readonly outcomes = new Map<string, AttemptOutcome>();
   /** Activity entries this round adds, by attempt handle. */
   private readonly activity = new Map<string, DraftActivity[]>();
+  /** Issues this round deletes, with who deletes them. */
+  private readonly deletedHere = new Map<string, string>();
+  /** Issues whose conflict records this round removes. */
+  private readonly resolvedHere = new Set<string>();
+  /** Store settings this round sets. */
+  private readonly settingsHere = new Map<string, StoreSetting>();
+  /** Forwarding records this round writes, by bare id. */
+  private readonly forwardsHere = new Map<string, { to: string; by: string }>();
   private commentMs: number | null = null;
   private commentN = 0;
 
@@ -296,30 +366,48 @@ export class Draft implements TrackerDraft {
   }
 
   issue(id: string): IssueRecord | undefined {
+    if (this.deletedHere.has(id)) return undefined;
     return this.written.get(id) ?? this.base.issue(id);
   }
 
   issues(): readonly IssueRecord[] {
-    if (this.written.size === 0) return this.base.issues();
+    if (this.written.size === 0 && this.deletedHere.size === 0) return this.base.issues();
     const merged = new Map(this.base.issues().map((r) => [r.id, r]));
     for (const [id, record] of this.written) merged.set(id, record);
+    for (const id of this.deletedHere.keys()) merged.delete(id);
     return [...merged.values()].sort(byOrder);
   }
 
   private liveIds(): ReadonlySet<string> {
-    return new Set([...this.base.ids, ...this.written.keys()]);
+    const ids = new Set([...this.base.ids, ...this.written.keys()]);
+    for (const id of this.deletedHere.keys()) ids.delete(id);
+    return ids;
   }
 
   resolveRead(ref: string, field = 'ref'): string {
-    return resolveReadRef(ref, this.liveIds(), field);
+    return resolveReadRef(ref, this.liveIds(), field, this);
   }
 
   resolveWrite(ref: string, field = 'id'): string {
-    return resolveWriteRef(ref, this.liveIds(), field);
+    return resolveWriteRef(ref, this.liveIds(), field, this);
   }
 
   link(id: string): string {
-    return this.base.link(id);
+    return linkOf(this.settings(), id);
+  }
+
+  settings(): ReadonlyMap<string, StoreSetting> {
+    if (this.settingsHere.size === 0) return this.base.settings();
+    return new Map([...this.base.settings(), ...this.settingsHere]);
+  }
+
+  forwardOf(id: string): string | undefined {
+    return this.forwardsHere.get(id)?.to ?? this.base.forwardOf(id);
+  }
+
+  deletion(id: string): Tombstone | undefined {
+    const by = this.deletedHere.get(id);
+    return by !== undefined ? { by, at: this.now.toISOString(), extra: {} } : this.base.deletion(id);
   }
 
   comments(id: string): readonly CommentEntry[] {
@@ -364,7 +452,26 @@ export class Draft implements TrackerDraft {
   }
 
   conflicts(id: string): readonly ConflictRecord[] {
-    return this.base.conflicts(id);
+    return this.resolvedHere.has(id) || this.deletedHere.has(id) ? [] : this.base.conflicts(id);
+  }
+
+  deleteIssue(id: string, by: string): void {
+    if (!this.issue(id)) throw notFound('id', id);
+    this.deletedHere.set(id, by);
+  }
+
+  clearConflicts(id: string): void {
+    if (!this.issue(id)) throw notFound('id', id);
+    this.resolvedHere.add(id);
+  }
+
+  putSetting(key: string, value: unknown, by: string): void {
+    this.settingsHere.set(key, { value, at: this.now.toISOString(), by });
+  }
+
+  putForward(id: string, to: string, by: string): void {
+    if (!this.issue(to)) throw notFound('keep', to);
+    this.forwardsHere.set(id, { to, by });
   }
 
   private openAttemptsOf(issue: string): AttemptRecord[] {
@@ -497,7 +604,21 @@ export class Draft implements TrackerDraft {
   /** The file edits this round's commit makes. */
   edits(): Map<string, FileEdit> {
     const edits = new Map<string, FileEdit>();
-    for (const record of this.written.values()) edits.set(issueFile(record.id), serializeIssue(record));
+    for (const record of this.written.values()) {
+      if (!this.deletedHere.has(record.id)) edits.set(issueFile(record.id), serializeIssue(record));
+    }
+    const at = this.now.toISOString();
+    for (const [id, by] of this.deletedHere) {
+      edits.set(issueDir(id), null);
+      edits.set(deletedFile(id), serializeTombstone({ by, at, extra: {} }));
+    }
+    for (const id of this.resolvedHere) if (!this.deletedHere.has(id)) edits.set(conflictsDir(id), null);
+    if (this.settingsHere.size > 0) {
+      const lines = new Map(this.base.settingLines);
+      for (const [key, setting] of this.settingsHere) lines.set(key, settingLine(setting));
+      edits.set(SETTINGS_FILE, serializeSettings(lines));
+    }
+    for (const [id, { to, by }] of this.forwardsHere) edits.set(forwardFile(id), serializeForward({ to, by, at, extra: {} }));
     const commentBytes = new Map<string, Buffer>();
     for (const [issue, comments] of this.added) {
       for (const { id, ...comment } of comments) {
@@ -551,6 +672,7 @@ class LoaderMemos {
   readonly records = new BoundedMap<string, IssueRecord>(50_000);
   readonly attemptsByTree = new BoundedMap<string, readonly LoadedAttempt[]>(8_192);
   readonly outcomesByTree = new BoundedMap<string, readonly LoadedOutcome[]>(8_192);
+  readonly tombstonesByTree = new BoundedMap<string, ReadonlyMap<string, Tombstone>>(64);
 }
 
 /** Builds snapshots from tracker trees, memoizing every subtree by oid. */
@@ -595,23 +717,15 @@ export class SnapshotLoader {
       const entry = find(name);
       return entry?.mode === TREE_MODE ? entry.oid : null;
     };
-    const [issues, markerBytes, settingsBytes, retired, attempts, outcomes] = await Promise.all([
+    const [issues, markerBytes, settingsBytes, deleted, forwards, attempts, outcomes] = await Promise.all([
       this.issuesUnder(subtree(ISSUES_DIR), 0),
       this.blobOf(find(FORMAT_FILE)),
       this.blobOf(find(SETTINGS_FILE)),
-      this.retiredIn(tree),
+      this.deletedIn(tree),
+      this.forwardsIn(tree),
       this.sharded(subtree(ATTEMPTS_DIR), 0, this.attemptsByTree, (issue, oid) => this.attemptsOf(issue, oid)),
       this.sharded(subtree(OUTCOMES_DIR), 0, this.outcomesByTree, (issue, oid) => this.outcomesOf(issue, oid)),
     ]);
-    const settings = new Map<string, unknown>();
-    if (settingsBytes) {
-      for (const { key, raw } of parseLines(settingsBytes.toString('utf8'))) {
-        const entry = lineValue(raw);
-        if (entry !== null && typeof entry === 'object' && 'value' in entry) {
-          settings.set(key, (entry as { value: unknown }).value);
-        }
-      }
-    }
     const verdicts = new Map(outcomes.map((o) => [`${o.issue}/${o.attempt}`, o.outcome]));
     const attemptLists = new Map<string, AttemptRecord[]>();
     for (const loaded of attempts) {
@@ -629,8 +743,9 @@ export class SnapshotLoader {
       marker: markerBytes ? parseMarker(markerBytes.toString('utf8')) : null,
       records: new Map(issues.map(({ record }) => [record.id, record])),
       issueBlobs: new Map(issues.map(({ record, oid }) => [record.id, oid])),
-      settings,
-      retiredIds: retired,
+      settingsBytes,
+      deleted,
+      forwards,
       commentFiles: new Map(issues.map(({ record, comments }) => [record.id, comments])),
       attemptLists,
       conflictLists: new Map(issues.map(({ record, conflicts }) => [record.id, conflicts])),
@@ -655,6 +770,31 @@ export class SnapshotLoader {
       this.objects.dirAt(tree, FORWARDS_DIR),
     ]);
     return new Set([...deleted, ...forwards].map((entry) => entry.name.replace(/\.md$/, '')));
+  }
+
+  /** The delete tombstones under `deleted/`, by id (memoized by the directory's oid). */
+  private async deletedIn(tree: string): Promise<ReadonlyMap<string, Tombstone>> {
+    const dir = await this.objects.entryAt(tree, DELETED_DIR);
+    if (!dir || dir.mode !== TREE_MODE) return new Map();
+    let tombstones = this.memos.tombstonesByTree.get(dir.oid);
+    if (!tombstones) {
+      const files = (await this.objects.tree(dir.oid)).filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'));
+      const parsed = await Promise.all(
+        files.map(async (e) => [e.name.slice(0, -3), parseTombstone(await this.objects.blob(e.oid))] as const),
+      );
+      tombstones = new Map(parsed);
+      this.memos.tombstonesByTree.set(dir.oid, tombstones);
+    }
+    return tombstones;
+  }
+
+  /** The forwarding records under `forwards/`: each bare id with the record it forwards to. */
+  private async forwardsIn(tree: string): Promise<Map<string, string>> {
+    const entries = (await this.objects.dirAt(tree, FORWARDS_DIR)).filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'));
+    const parsed = await Promise.all(
+      entries.map(async (e) => [e.name.slice(0, -3), parseForward(await this.objects.blob(e.oid)).to] as const),
+    );
+    return new Map(parsed);
   }
 
   /**

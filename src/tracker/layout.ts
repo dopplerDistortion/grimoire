@@ -66,7 +66,22 @@ export function outcomeFile(issue: string, attempt: string): string {
 
 export const CONFLICTS_DIR = 'conflicts';
 
+/** `issues/<a>/<b>/<id>/conflicts`: the issue's fold conflict records. */
+export function conflictsDir(issue: string): string {
+  return `${issueDir(issue)}/${CONFLICTS_DIR}`;
+}
+
 /** `issues/<a>/<b>/<id>/conflicts/<hash>.md` */
 export function conflictFile(issue: string, name: string): string {
-  return `${issueDir(issue)}/${CONFLICTS_DIR}/${name}.md`;
+  return `${conflictsDir(issue)}/${name}.md`;
+}
+
+/** `deleted/<id>.md`: the delete tombstone. */
+export function deletedFile(id: string): string {
+  return `${DELETED_DIR}/${id}.md`;
+}
+
+/** `forwards/<id>.md`: the forwarding record of a resolved id collision. */
+export function forwardFile(id: string): string {
+  return `${FORWARDS_DIR}/${id}.md`;
 }

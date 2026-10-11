@@ -7,6 +7,9 @@ import { define, oneLine, writer } from './op';
 import { s } from './schema';
 import type { ShowResult } from './show';
 import type { UpdateResult } from './update';
+import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, ReopenResult } from './human-ops';
+import type { ResolveResult } from './resolve';
+import type { SettingsResult, SettingsSetResult } from './settings';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -48,8 +51,8 @@ export const create = define({
           : {}),
       },
       async (draft) => {
-        if (parent) draft.resolveWrite(parent, 'parent');
-        for (const blocker of blockers) draft.resolveWrite(blocker.id, blocker.field);
+        const parentId = parent === null ? null : draft.resolveWrite(parent, 'parent');
+        const blockerIds = blockers.map((blocker) => draft.resolveWrite(blocker.id, blocker.field));
         const id = await draft.mintIssueId();
         const at = draft.now.toISOString();
         draft.putIssue({
@@ -58,8 +61,8 @@ export const create = define({
           title: input.title,
           status: 'open',
           labels: sortedUnique(input.labels ?? []),
-          parent,
-          blocked_by: sortedUnique(blockers.map((b) => b.id)),
+          parent: parentId,
+          blocked_by: sortedUnique(blockerIds),
           links: [],
           created_at: at,
           created_by: author.email,
@@ -108,4 +111,12 @@ export interface OpResults {
   claim: ClaimResult;
   release: EndResult;
   close: EndResult;
+  settings_get: SettingsResult;
+  assign: AssignResult;
+  reassign: ReassignResult;
+  reopen: ReopenResult;
+  delete: DeleteResult;
+  resolve: ResolveResult;
+  outcome_set: OutcomeSetResult;
+  settings_set: SettingsSetResult;
 }

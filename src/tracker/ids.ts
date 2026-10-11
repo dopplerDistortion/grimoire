@@ -55,28 +55,49 @@ export function parseWriteRef(input: string, field: string): string {
 }
 
 /** The records a collision kept apart under the bare `id`, sorted; empty when there was none. */
-function collisionSides(id: string, ids: ReadonlySet<string>): string[] {
+export function collisionSides(id: string, ids: Iterable<string>): string[] {
   return [...ids].filter((other) => other !== id && bareId(other) === id).sort();
+}
+
+/** What ids that left the live view say: deleted ones, and bare ids a forwarding record maps to a record. */
+export interface RetiredIds {
+  /** The record a forwarding record (`forwards/<id>.md`) maps the bare id to, or undefined. */
+  forwardOf(id: string): string | undefined;
+  /** The delete tombstone that retired the id, or undefined. */
+  deletion(id: string): { readonly by: string; readonly at: string } | undefined;
+}
+
+const NONE_RETIRED: RetiredIds = { forwardOf: () => undefined, deletion: () => undefined };
+
+/**
+ * The live record a full id names: itself, or the one side of a collision, or
+ * the side its forwarding record names. Several unforwarded sides give
+ * AMBIGUOUS_REF (until `resolve`), and a deleted or unknown id NOT_FOUND.
+ */
+function liveRecord(input: string, id: string, ids: ReadonlySet<string>, retired: RetiredIds, field: string): string {
+  if (ids.has(id)) return id;
+  const forward = retired.forwardOf(id);
+  if (forward !== undefined && ids.has(forward)) return forward;
+  const sides = collisionSides(id, ids);
+  if (sides.length === 1) return sides[0]!;
+  if (sides.length > 1) throw ambiguous(input, sides);
+  throw notFound(field, id, retired.deletion(id));
 }
 
 /**
  * The live id a write names among `ids`. A bare id whose records a
- * cross-clone collision kept apart gives AMBIGUOUS_REF, until `resolve`.
+ * cross-clone collision kept apart gives AMBIGUOUS_REF, until `resolve`
+ * writes its forwarding record.
  */
-export function resolveWriteRef(input: string, ids: ReadonlySet<string>, field: string): string {
-  const id = parseWriteRef(input, field);
-  if (ids.has(id)) return id;
-  const sides = collisionSides(id, ids);
-  if (sides.length === 1) return sides[0]!;
-  if (sides.length > 1) throw ambiguous(input, sides);
-  throw notFound(field, id);
+export function resolveWriteRef(input: string, ids: ReadonlySet<string>, field: string, retired = NONE_RETIRED): string {
+  return liveRecord(input, parseWriteRef(input, field), ids, retired, field);
 }
 
 /**
  * The id a read names among `ids`: a full id, a unique prefix of at least
  * three characters, or any text (a link, say) holding exactly one full id.
  */
-export function resolveReadRef(input: string, ids: ReadonlySet<string>, field: string): string {
+export function resolveReadRef(input: string, ids: ReadonlySet<string>, field: string, retired = NONE_RETIRED): string {
   const token = bareSuffix(input, field);
   if (token === null) {
     const found = [...new Set(input.toLowerCase().match(ID_PATTERN) ?? [])];
@@ -84,12 +105,7 @@ export function resolveReadRef(input: string, ids: ReadonlySet<string>, field: s
       throw invalid({ [field]: `"${input}" names no issue; use an id like gr-${'x'.repeat(ID_LENGTH)} or a prefix of at least ${MIN_PREFIX} characters` });
     }
     if (found.length > 1) throw ambiguous(input, found);
-    const id = found[0]!;
-    if (ids.has(id)) return id;
-    const sides = collisionSides(id, ids);
-    if (sides.length === 1) return sides[0]!;
-    if (sides.length > 1) throw ambiguous(input, sides);
-    throw notFound(field, id);
+    return liveRecord(input, found[0]!, ids, retired, field);
   }
   if (token.suffix.length < MIN_PREFIX) {
     throw invalid({ [field]: `"${input}" is too short; a prefix needs at least ${MIN_PREFIX} characters` });
@@ -98,11 +114,27 @@ export function resolveReadRef(input: string, ids: ReadonlySet<string>, field: s
   if (ids.has(full)) return full;
   const matches = [...ids].filter((id) => id.startsWith(full)).sort();
   if (matches.length === 1) return matches[0]!;
-  if (matches.length > 1) throw ambiguous(input, matches);
+  if (matches.length > 1) {
+    // Every match a side of one collision: its forwarding record, if any, picks the record.
+    const bare = bareId(matches[0]!);
+    const forward = matches.every((id) => bareId(id) === bare) ? retired.forwardOf(bare) : undefined;
+    if (forward !== undefined && ids.has(forward)) return forward;
+    throw ambiguous(input, matches);
+  }
+  if (full.length >= ID_PREFIX.length + ID_LENGTH) return liveRecord(input, full, ids, retired, field);
   throw notFound(field, full);
 }
 
-export function notFound(field: string, id: string): GrimoireError {
+/** NOT_FOUND for an id no live record has; a deleted one says so (its id is never reused). */
+export function notFound(field: string, id: string, deleted?: { readonly by: string; readonly at: string }): GrimoireError {
+  if (deleted) {
+    const { by, at } = deleted;
+    return new GrimoireError('NOT_FOUND', `${id} was deleted by ${by || 'someone'}${at ? ` at ${at}` : ''}; deleted ids are never reused`, {
+      field,
+      ref: id,
+      deleted: { by, at },
+    });
+  }
   return new GrimoireError('NOT_FOUND', `no issue ${id}`, { field, ref: id });
 }
 

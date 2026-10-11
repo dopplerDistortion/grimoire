@@ -471,7 +471,7 @@ describe('ends and outcomes', () => {
     await fetchTracker(world.b);
     await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, alice);
     // A human on b recovers what looks like a dead claim.
-    const humanBob = { ...bob, surface: 'cli' as const };
+    const humanBob = { ...bob, surface: 'cli' as const, tty: true };
     expect(await bobCore.call('release', { id, attempt, abandoned: true }, humanBob)).toMatchObject({ ok: true });
     await bobPublishes(world);
     await fetchTrackerFrom(world.b, world.a);

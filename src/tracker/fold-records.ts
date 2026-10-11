@@ -8,6 +8,7 @@ import { parseEnd, parseOutcome } from './attempt';
 import { canonicalJson, lineValue, parseLines } from './lines';
 import { mergeText } from './merge-text';
 import { parseIssue, serializeIssue, type IssueLink, type IssueRecord } from './record';
+import { parseSetting, serializeSettings, settingLines } from './settings';
 
 /** Orders two ISO times; unparsable ones compare as text. */
 function compareTimes(x: string, y: string): number {
@@ -213,16 +214,13 @@ const byKey = ([x]: [string, string], [y]: [string, string]) => (x < y ? -1 : x 
  * the same way (spec §5).
  */
 export function foldSettings(base: Buffer | null, a: Buffer, b: Buffer): Buffer {
-  const at = (raw: string) => {
-    const value = lineValue(raw) as { at?: unknown } | null;
-    return value && typeof value === 'object' && typeof value.at === 'string' ? value.at : '';
-  };
-  const merged = foldKeyed(keyedLines(base), keyedLines(a), keyedLines(b), (_key, x, y) => {
+  const at = (raw: string) => parseSetting(raw)?.at ?? '';
+  const merged = foldKeyed(settingLines(base), settingLines(a), settingLines(b), (_key, x, y) => {
     const order = compareTimes(at(x), at(y));
     if (order !== 0) return order > 0 ? x : y;
     return Buffer.compare(Buffer.from(x, 'utf8'), Buffer.from(y, 'utf8')) <= 0 ? x : y;
   });
-  return Buffer.from([...merged].sort(byKey).map(([key, raw]) => `${key}: ${raw}\n`).join(''), 'utf8');
+  return serializeSettings(merged);
 }
 
 /** Orders semver strings by their numeric parts (anything unparsable sorts first). */
