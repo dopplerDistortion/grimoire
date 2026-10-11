@@ -1,6 +1,7 @@
 // The call context every operation takes (spec §2.1), and the Actor the core
 // derives from it (spec §7). Surfaces build the context from what they
 // observe; no model-supplied parameter ever carries identity.
+import { idValue, observedEvidence } from '../capture/evidence';
 
 export type Surface = 'mcp' | 'cli' | 'dashboard' | 'hook' | 'runner';
 
@@ -37,6 +38,8 @@ export interface Evidence {
   readonly context?: string;
   readonly callId?: string;
   readonly spawnEnvId?: string;
+  /** A Claude subagent's `agent_type`, from a validated hint only. Never written to a trailer. */
+  readonly agentType?: string;
   readonly choreExposure?: string;
 }
 
@@ -118,14 +121,18 @@ export function humanSurface(ctx: CallContext): boolean {
 /**
  * The Actor of a call (spec §7, Actors). MCP, hook and runner calls are agent
  * actors; CLI calls are agent actors only under an agent marker; dashboard
- * calls are human.
+ * calls are human. The agent facts are the observed evidence (spec §14): an
+ * MCP call's validated hint or `_meta`, the spawn env, the shell env. Ids
+ * only: a value that could be a filesystem path is never kept, and a client
+ * name that could be one gives way to the surface's name.
  */
 export function actorOf(ctx: CallContext): Actor {
   const markers = ctx.evidence?.agentMarkers ?? [];
   const kind =
     ctx.surface === 'dashboard' || (ctx.surface === 'cli' && markers.length === 0) ? 'human' : 'agent';
-  const client = ctx.surface === 'dashboard' ? 'dashboard' : (ctx.client?.name ?? ctx.surface);
-  const evidence = kind === 'agent' ? (ctx.evidence ?? {}) : {};
+  const named = ctx.client?.name;
+  const client = ctx.surface === 'dashboard' ? 'dashboard' : named !== undefined && idValue(named) ? named : ctx.surface;
+  const evidence: Evidence = kind === 'agent' ? observedEvidence(ctx) : {};
   const actor: Record<string, string> = { kind, client };
   if (evidence.session) actor.session = evidence.session;
   if (evidence.context) actor.context = evidence.context;

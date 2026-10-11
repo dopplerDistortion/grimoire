@@ -86,10 +86,15 @@ export const reassign = define({
         );
       }
       const ending = open[0]!.record;
-      sealOpenAttempt(draft, ending.id, { ended: 'reassign', by, binds: false });
+      // An ending call binds (spec §14 Binding): the commit names the attempt it ended, never the one it opens.
+      sealOpenAttempt(draft, ending.id, { ended: 'reassign', by, binds: true });
       checkClaimable(draft, id, author.email);
       const attempt = draft.openAttempt(id, { assignee, actor: by, opened: 'assign', wiki_exposed: false });
-      return { result: { id, ended: ending.id, attempt: attempt.id, assignee, since: attempt.start.at }, issue: id };
+      return {
+        result: { id, ended: ending.id, attempt: attempt.id, assignee, since: attempt.start.at },
+        issue: id,
+        attempt: ending.id,
+      };
     });
     return write.result;
   },

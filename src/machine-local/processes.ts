@@ -52,7 +52,10 @@ export interface ProcessFilter {
 }
 
 export interface ProcessRegistration {
+  /** The record as last written. */
   readonly record: ProcessRecord;
+  /** Rewrites the record with facts learnt after registering (a server's client); returns it. */
+  update(changes: Partial<Pick<ProcessRecord, 'client' | 'path_source'>>): Promise<ProcessRecord>;
   unregister(): Promise<void>;
 }
 
@@ -84,8 +87,16 @@ export class ProcessRecords {
     };
     const file = path.join(this.dir, `${pid}-${record.nonce}.json`);
     await writeFileAtomic(file, `${JSON.stringify(record)}\n`);
+    let current = record;
     return {
-      record,
+      get record() {
+        return current;
+      },
+      update: async (changes) => {
+        current = { ...current, ...changes };
+        await writeFileAtomic(file, `${JSON.stringify(current)}\n`);
+        return current;
+      },
       unregister: async () => {
         await removeFile(file);
       },

@@ -3,7 +3,10 @@
 // envelope; an error means nothing changed.
 import { GrimoireError, type ErrorBody } from '../errors';
 import { openTracker, type TrackerStore } from '../tracker';
-import { actorOf, type CallContext } from './context';
+import { actorOf, type Actor, type CallContext } from './context';
+import { observedEvidence } from '../capture/evidence';
+import { recordSeenHere } from '../capture/seen-here';
+import { MachineLocalStore } from '../machine-local/store';
 import { create, labels, type OpDefinition, type OpResults, type SurfacePolicy } from './ops';
 import { show } from './show';
 import { comment } from './comment';
@@ -159,12 +162,19 @@ function checkInstallFormat(format: number | null, pin: string | null): void {
   );
 }
 
+/** A binding write an op made: a commit naming an attempt's handle (spec §14 Binding). */
+interface BindingWrite {
+  readonly handle: string;
+  readonly issue: string;
+}
+
 /**
- * The tracker an op writes through: every commit that seals an attempt asks
- * for the automatic sync itself (spec §4: every attempt-ending write), so no
- * op that ends attempts can forget to.
+ * The tracker an op writes through. Every commit that seals an attempt asks
+ * for the automatic sync itself (spec §4: every attempt-ending write), and
+ * every commit that names a handle is a binding write, whose seen-here row
+ * the core leaves once the op is done (spec §14): no op can forget either.
  */
-function syncingOnSeal(tracker: TrackerStore, requestSync: (commit: string) => void): TrackerStore {
+function watched(tracker: TrackerStore, requestSync: (commit: string) => void, bindings: BindingWrite[]): TrackerStore {
   return {
     location: tracker.location,
     read: () => tracker.read(),
@@ -172,6 +182,7 @@ function syncingOnSeal(tracker: TrackerStore, requestSync: (commit: string) => v
     async transact(spec, body) {
       const write = await tracker.transact(spec, body);
       if (write.commit && write.sealed) requestSync(write.commit);
+      if (write.commit && write.attempt && write.issue) bindings.push({ handle: write.attempt, issue: write.issue });
       return write;
     },
     initialize: (spec) => tracker.initialize(spec),
@@ -179,6 +190,24 @@ function syncingOnSeal(tracker: TrackerStore, requestSync: (commit: string) => v
     sync: (spec) => tracker.sync(spec),
     close: () => tracker.close(),
   };
+}
+
+/**
+ * After the binding writes' refs moved (spec §14 Seen-here rows): one row per
+ * attempt and context on this machine. Best effort: a row is only a hint, so
+ * a store that can't take it never fails the call that already wrote.
+ */
+async function leaveSeenHereRows(tracker: TrackerStore, ctx: CallContext, actor: Actor, bindings: readonly BindingWrite[]): Promise<void> {
+  try {
+    const store = new MachineLocalStore(tracker.location.commonDir, ctx.repo.root);
+    const { source, pendingHint } = observedEvidence(ctx);
+    const at = tracker.now();
+    for (const binding of bindings) {
+      await recordSeenHere(store, { ...binding, actor, source, pendingHint, worktree: ctx.repo.root, at });
+    }
+  } catch {
+    // The binding still stands: an id search finds the context without its row.
+  }
 }
 
 function annotationsOf(op: OpDefinition<unknown, unknown>): Record<string, boolean> {
@@ -282,13 +311,16 @@ export function createCore(options: CoreOptions = {}): Core {
         tracker = opened;
         const syncTips: string[] = [];
         const requestSync = (commit: string): void => void syncTips.push(commit);
+        const bindings: BindingWrite[] = [];
+        const actor = actorOf(ctx);
         const result = await op.run(parsed, {
           ctx,
-          tracker: syncingOnSeal(opened, requestSync),
-          actor: actorOf(ctx),
+          tracker: watched(opened, requestSync, bindings),
+          actor,
           scanner,
           requestSync,
         });
+        if (bindings.length > 0) await leaveSeenHereRows(opened, ctx, actor, bindings);
         const syncTip = syncTips.at(-1);
         if (syncTip !== undefined) await afterWrite(opened, syncTip, ctx);
         return { ok: true, result } as never;
