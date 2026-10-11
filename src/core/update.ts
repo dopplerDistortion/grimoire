@@ -2,7 +2,7 @@
 // and reports the requested changes that were already in place.
 import { GrimoireError, invalid } from '../errors';
 import { issueRevision, parseWriteRef, sortedUnique, type IssueLink, type IssueRecord } from '../tracker';
-import { findCycle } from './derive';
+import { fieldConflict, findCycle, stateConflict } from './derive';
 import { linkTarget } from './links';
 import { heldAttempt, parseHandle, recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
@@ -121,6 +121,13 @@ export const update = define({
         throw new GrimoireError('REVISION_CONFLICT', `${id} changed since revision ${input.if_revision}; show it again`, {
           revision: currentRevision,
         });
+      }
+      const conflict = fieldConflict(draft, id);
+      if (conflict) {
+        if (input.body !== undefined) throw stateConflict(id, conflict, 'the whole body can’t be replaced');
+        const written = [...(input.title !== undefined ? ['title'] : []), ...(input.parent !== undefined ? ['parent'] : [])];
+        const blocked = written.filter((field) => conflict.fields.includes(field));
+        if (blocked.length > 0) throw stateConflict(id, conflict, `${blocked.join(' and ')} can’t be changed`);
       }
       const noops: Noop[] = [];
       let title = current.title;

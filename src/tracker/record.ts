@@ -1,6 +1,7 @@
 // The issue record, `issues/<a>/<b>/<id>/issue.md` (spec §3): canonical
 // frontmatter, then the body as verbatim bytes.
 import { createHash } from 'node:crypto';
+import { bareId } from './ids';
 import { canonicalJson, formatLine, lineValue, parseLines } from './lines';
 
 export interface IssueLink {
@@ -70,7 +71,8 @@ function canonicalLinks(links: readonly IssueLink[]): IssueLink[] {
 
 function knownValues(record: IssueRecord): Record<(typeof KNOWN_KEYS)[number], unknown> {
   return {
-    id: record.id,
+    // A record kept apart by a collision lives under `<id>~<hash4>`, but keeps the id it was minted as.
+    id: bareId(record.id),
     seq: record.seq,
     title: record.title,
     status: record.status,
@@ -158,4 +160,13 @@ export function issueRevision(record: IssueRecord): string {
     if (!KNOWN.has(key)) content[key] = lineValue(raw);
   }
   return createHash('sha256').update(`${canonicalJson(content)}\n`, 'utf8').update(record.body, 'utf8').digest('hex');
+}
+
+/**
+ * Which record this is when one id was minted on two clones: 4 hex characters
+ * of the sha256 of what never changes about a record (when and by whom it was
+ * created). A collision keeps each record under `<id>~<hash4>`.
+ */
+export function collisionHash(record: IssueRecord): string {
+  return createHash('sha256').update(`${record.created_at}\n${record.created_by}`, 'utf8').digest('hex').slice(0, 4);
 }

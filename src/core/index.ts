@@ -34,6 +34,7 @@ export type { UpdateResult, Noop } from './update';
 export type { CommentResult } from './comment';
 export type { ListResult, ListRow } from './list';
 export type { RelatedIssue, ShownComment } from './show';
+export type { IssueConflict } from './derive';
 export type { Remedy } from './upgrade';
 export type { ErrorBody, ErrorCode } from '../errors';
 

@@ -1,7 +1,7 @@
 // The read model: one immutable snapshot per tip, and the draft a write round
 // edits on top of it.
 import { TREE_MODE } from '../git/objects';
-import { ID_LENGTH, ID_PREFIX, MAX_ID_LENGTH, notFound, parseWriteRef, resolveReadRef } from './ids';
+import { ID_LENGTH, ID_PREFIX, MAX_ID_LENGTH, notFound, resolveReadRef, resolveWriteRef } from './ids';
 import {
   byCommentOrder,
   commentEntry,
@@ -35,6 +35,7 @@ import {
   ATTEMPTS_DIR,
   COMMENTS_DIR,
   commentFile,
+  CONFLICTS_DIR,
   DELETED_DIR,
   FORMAT_FILE,
   FORWARDS_DIR,
@@ -44,9 +45,10 @@ import {
   OUTCOMES_DIR,
   SETTINGS_FILE,
 } from './layout';
+import { parseConflict, type ConflictRecord } from './conflict';
 import { lineValue, parseLines } from './lines';
 import { parseMarker, type Marker } from './marker';
-import { BoundedMap, type FileEdit, type TrackerObjects } from './objects';
+import { BoundedMap, type FileEdit, type ObjectSource, type TrackerObjects, type VirtualObjects } from './objects';
 import { parseIssue, serializeIssue, type IssueRecord } from './record';
 
 /** What every read sees: the tracker at one tip. */
@@ -74,6 +76,8 @@ export interface TrackerView {
   attempts(issue: string): readonly AttemptRecord[];
   /** The attempt with this handle, on any issue, or undefined. */
   attempt(handle: string): AttemptRecord | undefined;
+  /** The issue's fold conflict records, oldest first: what folds set aside until a human resolves it. */
+  conflicts(id: string): readonly ConflictRecord[];
 }
 
 /** A comment a write adds; the draft picks its id and time. */
@@ -104,7 +108,8 @@ export interface TrackerDraft extends TrackerView {
   /** Writes an issue record (canonically serialized; its unknown keys kept). */
   putIssue(record: IssueRecord): void;
   /**
-   * Adds a write-once comment to a live issue. Its time is the round's instant,
+   * Adds a write-once comment to a live issue (or, for an issue deleted
+   * elsewhere, only to the activity/ of its open attempts). Its time is the round's instant,
    * forced past the issue's latest comment and the latest comment time this
    * store wrote; comments added in one round are ordered by `n`. Every attempt
    * open on the issue gets the same blob in its `activity/`.
@@ -134,30 +139,67 @@ function byOpening(a: AttemptRecord, b: AttemptRecord): number {
   return a.start.at < b.start.at ? -1 : a.start.at > b.start.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/** What a snapshot is built from. */
+export interface SnapshotParts {
+  /** The commit the view is based on: the tip, or the local tip of a fold. */
+  readonly tip: string;
+  /** The parents a write on this view commits with: the tip, or both tips of a fold. */
+  readonly parents: readonly string[];
+  readonly rootTree: string;
+  /** Reads the view's objects (a fold's own objects first). */
+  readonly source: ObjectSource;
+  /** A fold's in-memory objects, persisted by the write that commits the fold; null otherwise. */
+  readonly virtual: VirtualObjects | null;
+  readonly marker: Marker | null;
+  readonly records: ReadonlyMap<string, IssueRecord>;
+  /** Each live issue's `issue.md` blob. */
+  readonly issueBlobs: ReadonlyMap<string, string>;
+  readonly settings: ReadonlyMap<string, unknown>;
+  /** Ids gone from the live view but never reused: deleted and forwarded. */
+  readonly retiredIds: ReadonlySet<string>;
+  /** Each issue's comment files, in comment order. */
+  readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>;
+  /** Each issue's attempts, in opening order. */
+  readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>;
+  /** Each issue's conflict records, oldest first. */
+  readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
+}
+
 export class Snapshot implements TrackerView {
-  private readonly ordered: readonly IssueRecord[];
+  readonly tip: string;
+  readonly parents: readonly string[];
+  readonly rootTree: string;
+  readonly source: ObjectSource;
+  readonly virtual: VirtualObjects | null;
+  readonly marker: Marker | null;
+  readonly retiredIds: ReadonlySet<string>;
   readonly ids: ReadonlySet<string>;
+  private readonly records: ReadonlyMap<string, IssueRecord>;
+  private readonly issueBlobs: ReadonlyMap<string, string>;
+  private readonly settings: ReadonlyMap<string, unknown>;
+  private readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>;
+  private readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>;
+  private readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
+  private readonly ordered: readonly IssueRecord[];
   private readonly attemptsById = new Map<string, AttemptRecord>();
 
-  constructor(
-    readonly tip: string,
-    readonly rootTree: string,
-    readonly marker: Marker | null,
-    private readonly records: ReadonlyMap<string, IssueRecord>,
-    /** Each live issue's `issue.md` blob. */
-    private readonly issueBlobs: ReadonlyMap<string, string>,
-    private readonly settings: ReadonlyMap<string, unknown>,
-    /** Ids gone from the live view but never reused: deleted and forwarded. */
-    readonly retiredIds: ReadonlySet<string>,
-    /** Each issue's comment files, in comment order. */
-    private readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>,
-    /** Each issue's attempts, in opening order. */
-    private readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>,
-    private readonly readBlob: (oid: string) => Promise<Buffer>,
-  ) {
-    this.ordered = [...records.values()].sort(byOrder);
-    this.ids = new Set(records.keys());
-    for (const list of attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
+  constructor(parts: SnapshotParts) {
+    this.tip = parts.tip;
+    this.parents = parts.parents;
+    this.rootTree = parts.rootTree;
+    this.source = parts.source;
+    this.virtual = parts.virtual;
+    this.marker = parts.marker;
+    this.retiredIds = parts.retiredIds;
+    this.records = parts.records;
+    this.issueBlobs = parts.issueBlobs;
+    this.settings = parts.settings;
+    this.commentFiles = parts.commentFiles;
+    this.attemptLists = parts.attemptLists;
+    this.conflictLists = parts.conflictLists;
+    this.ordered = [...parts.records.values()].sort(byOrder);
+    this.ids = new Set(parts.records.keys());
+    for (const list of parts.attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -178,9 +220,7 @@ export class Snapshot implements TrackerView {
   }
 
   resolveWrite(ref: string, field = 'id'): string {
-    const id = parseWriteRef(ref, field);
-    if (!this.records.has(id)) throw notFound(field, id);
-    return id;
+    return resolveWriteRef(ref, this.ids, field);
   }
 
   link(id: string): string {
@@ -195,7 +235,7 @@ export class Snapshot implements TrackerView {
   async readComment(issue: string, comment: string): Promise<IssueComment> {
     const stored = this.commentFiles.get(issue)?.find((c) => c.id === comment);
     if (!stored) throw new Error(`no comment ${comment} on ${issue}`);
-    return parseComment(stored.id, await this.readBlob(stored.oid));
+    return parseComment(stored.id, await this.source.blob(stored.oid));
   }
 
   attempts(issue: string): readonly AttemptRecord[] {
@@ -204,6 +244,10 @@ export class Snapshot implements TrackerView {
 
   attempt(handle: string): AttemptRecord | undefined {
     return this.attemptsById.get(handle);
+  }
+
+  conflicts(id: string): readonly ConflictRecord[] {
+    return this.conflictLists.get(id) ?? [];
   }
 }
 
@@ -271,9 +315,7 @@ export class Draft implements TrackerDraft {
   }
 
   resolveWrite(ref: string, field = 'id'): string {
-    const id = parseWriteRef(ref, field);
-    if (!this.issue(id)) throw notFound(field, id);
-    return id;
+    return resolveWriteRef(ref, this.liveIds(), field);
   }
 
   link(id: string): string {
@@ -308,7 +350,7 @@ export class Draft implements TrackerDraft {
     const records = this.base.attempts(issue).map((record) => this.withEdits(record));
     for (const [id, opened] of this.opened) {
       if (opened.issue === issue) {
-        records.push(this.withEdits({ id, issue, start: opened.start, end: null, outcome: null, activity: [] }));
+        records.push(this.withEdits({ id, issue, start: opened.start, end: null, outcome: null, activity: [], setAside: [] }));
       }
     }
     return records.sort(byOpening);
@@ -319,6 +361,10 @@ export class Draft implements TrackerDraft {
     if (opened) return this.attempts(opened.issue).find((a) => a.id === handle);
     const record = this.base.attempt(handle);
     return record ? this.withEdits(record) : undefined;
+  }
+
+  conflicts(id: string): readonly ConflictRecord[] {
+    return this.base.conflicts(id);
   }
 
   private openAttemptsOf(issue: string): AttemptRecord[] {
@@ -332,7 +378,10 @@ export class Draft implements TrackerDraft {
   }
 
   addComment(issue: string, comment: NewComment): IssueComment {
-    if (!this.issue(issue)) throw notFound('id', issue);
+    const live = this.issue(issue) !== undefined;
+    // An issue deleted elsewhere keeps no comments; one made while ending an
+    // attempt on it lives only in that attempt's activity/.
+    if (!live && this.openAttemptsOf(issue).length === 0) throw notFound('id', issue);
     const existing = this.comments(issue);
     const latest = existing.length > 0 ? existing[existing.length - 1]!.ms : 0;
     const ms = Math.max(this.commentMs ?? Math.max(this.now.getTime(), this.storeCommentMs + 1), latest + 1);
@@ -346,9 +395,15 @@ export class Draft implements TrackerDraft {
       ...(comment.key !== undefined ? { key: comment.key } : {}),
       body: comment.body,
     };
-    let list = this.added.get(issue);
-    if (!list) this.added.set(issue, (list = []));
-    list.push(added);
+    let bytes: Buffer | null = null;
+    if (live) {
+      let list = this.added.get(issue);
+      if (!list) this.added.set(issue, (list = []));
+      list.push(added);
+    } else {
+      const { id: _id, ...stored } = added;
+      bytes = serializeComment(stored);
+    }
     const entry: ActivityEntry = {
       ...commentEntry(added.id)!,
       detail: {
@@ -358,7 +413,7 @@ export class Draft implements TrackerDraft {
         fields: [],
       },
     };
-    for (const attempt of this.openAttemptsOf(issue)) this.pushActivity(attempt.id, { issue, entry, bytes: null });
+    for (const attempt of this.openAttemptsOf(issue)) this.pushActivity(attempt.id, { issue, entry, bytes });
     return added;
   }
 
@@ -477,6 +532,8 @@ interface IssueEntry {
   readonly record: IssueRecord;
   readonly oid: string;
   readonly comments: readonly StoredComment[];
+  /** Its conflict records, oldest first. */
+  readonly conflicts: readonly ConflictRecord[];
 }
 
 type LoadedAttempt = Omit<AttemptRecord, 'outcome'>;
@@ -487,18 +544,51 @@ interface LoadedOutcome {
   readonly outcome: AttemptOutcome;
 }
 
+/** What the loader remembers by oid; objects are immutable, so a fold's in-memory ones share it. */
+class LoaderMemos {
+  readonly issuesByTree = new BoundedMap<string, readonly IssueEntry[]>(8_192);
+  readonly namesByTree = new BoundedMap<string, readonly string[]>(8_192);
+  readonly records = new BoundedMap<string, IssueRecord>(50_000);
+  readonly attemptsByTree = new BoundedMap<string, readonly LoadedAttempt[]>(8_192);
+  readonly outcomesByTree = new BoundedMap<string, readonly LoadedOutcome[]>(8_192);
+}
+
 /** Builds snapshots from tracker trees, memoizing every subtree by oid. */
 export class SnapshotLoader {
-  private readonly issuesByTree = new BoundedMap<string, readonly IssueEntry[]>(8_192);
-  private readonly namesByTree = new BoundedMap<string, readonly string[]>(8_192);
-  private readonly records = new BoundedMap<string, IssueRecord>(50_000);
-  private readonly attemptsByTree = new BoundedMap<string, readonly LoadedAttempt[]>(8_192);
-  private readonly outcomesByTree = new BoundedMap<string, readonly LoadedOutcome[]>(8_192);
+  private readonly issuesByTree: BoundedMap<string, readonly IssueEntry[]>;
+  private readonly namesByTree: BoundedMap<string, readonly string[]>;
+  private readonly records: BoundedMap<string, IssueRecord>;
+  private readonly attemptsByTree: BoundedMap<string, readonly LoadedAttempt[]>;
+  private readonly outcomesByTree: BoundedMap<string, readonly LoadedOutcome[]>;
 
-  constructor(private readonly objects: TrackerObjects) {}
+  constructor(
+    private readonly objects: TrackerObjects | VirtualObjects,
+    private readonly memos = new LoaderMemos(),
+  ) {
+    this.issuesByTree = memos.issuesByTree;
+    this.namesByTree = memos.namesByTree;
+    this.records = memos.records;
+    this.attemptsByTree = memos.attemptsByTree;
+    this.outcomesByTree = memos.outcomesByTree;
+  }
 
+  /** The snapshot at the commit `tip`. */
   async load(tip: string): Promise<Snapshot> {
     const { tree } = await this.objects.commit(tip);
+    return this.loadTree(tip, [tip], tree, null);
+  }
+
+  /** The snapshot of a fold: its merged tree, read from `virtual`, committed later with both tips as parents. */
+  folded(local: string, remote: string, tree: string, virtual: VirtualObjects): Promise<Snapshot> {
+    return new SnapshotLoader(virtual, this.memos).loadTree(local, [local, remote], tree, virtual);
+  }
+
+  private async loadTree(
+    tip: string,
+    parents: readonly string[],
+    tree: string,
+    virtual: VirtualObjects | null,
+  ): Promise<Snapshot> {
     const root = await this.objects.tree(tree);
     const find = (name: string) => root.find((entry) => entry.name === name);
     const subtree = (name: string) => {
@@ -530,18 +620,21 @@ export class SnapshotLoader {
       list.push({ ...loaded, outcome: verdicts.get(`${loaded.issue}/${loaded.id}`) ?? null });
     }
     for (const list of attemptLists.values()) list.sort(byOpening);
-    return new Snapshot(
+    return new Snapshot({
       tip,
-      tree,
-      markerBytes ? parseMarker(markerBytes.toString('utf8')) : null,
-      new Map(issues.map(({ record }) => [record.id, record])),
-      new Map(issues.map(({ record, oid }) => [record.id, oid])),
+      parents,
+      rootTree: tree,
+      source: this.objects,
+      virtual,
+      marker: markerBytes ? parseMarker(markerBytes.toString('utf8')) : null,
+      records: new Map(issues.map(({ record }) => [record.id, record])),
+      issueBlobs: new Map(issues.map(({ record, oid }) => [record.id, oid])),
       settings,
-      retired,
-      new Map(issues.map(({ record, comments }) => [record.id, comments])),
+      retiredIds: retired,
+      commentFiles: new Map(issues.map(({ record, comments }) => [record.id, comments])),
       attemptLists,
-      (oid) => this.objects.blob(oid),
-    );
+      conflictLists: new Map(issues.map(({ record, conflicts }) => [record.id, conflicts])),
+    });
   }
 
   /** Every id a tip holds, live or retired, from tree names alone. */
@@ -564,25 +657,38 @@ export class SnapshotLoader {
     return new Set([...deleted, ...forwards].map((entry) => entry.name.replace(/\.md$/, '')));
   }
 
-  /** Records under `issues/` (depth 0), `<a>` (1), `<b>` (2) or `<id>` (3). */
-  private async issuesUnder(oid: string | null, depth: number): Promise<readonly IssueEntry[]> {
+  /**
+   * Records under `issues/` (depth 0), `<a>` (1), `<b>` (2) or the issue
+   * directory `name` (3). A record is known by its directory's name: its id,
+   * or `<id>~<hash4>` for one side of a cross-clone id collision.
+   */
+  private async issuesUnder(oid: string | null, depth: number, name = ''): Promise<readonly IssueEntry[]> {
     if (!oid) return [];
-    const memoKey = `${depth}:${oid}`;
+    const memoKey = `${depth}:${oid}:${name}`;
     const cached = this.issuesByTree.get(memoKey);
     if (cached) return cached;
     const entries = await this.objects.tree(oid);
     let records: readonly IssueEntry[];
     if (depth < 3) {
       const children = await Promise.all(
-        entries.filter((e) => e.mode === TREE_MODE).map((e) => this.issuesUnder(e.oid, depth + 1)),
+        entries.filter((e) => e.mode === TREE_MODE).map((e) => this.issuesUnder(e.oid, depth + 1, e.name)),
       );
       records = children.flat();
     } else {
       const file = entries.find((e) => e.name === 'issue.md' && e.mode !== TREE_MODE);
       const dir = entries.find((e) => e.name === COMMENTS_DIR && e.mode === TREE_MODE);
-      records = file
-        ? [{ record: await this.record(file.oid), oid: file.oid, comments: dir ? await this.commentsIn(dir.oid) : [] }]
-        : [];
+      const conflicts = entries.find((e) => e.name === CONFLICTS_DIR && e.mode === TREE_MODE);
+      if (file) {
+        const record = await this.record(file.oid);
+        records = [
+          {
+            record: record.id === name ? record : { ...record, id: name },
+            oid: file.oid,
+            comments: dir ? await this.commentsIn(dir.oid) : [],
+            conflicts: conflicts ? await this.conflictsIn(conflicts.oid) : [],
+          },
+        ];
+      } else records = [];
     }
     this.issuesByTree.set(memoKey, records);
     return records;
@@ -642,7 +748,16 @@ export class SnapshotLoader {
       if (parsed) activity.push({ ...parsed, detail: end ? null : parseActivity(await this.objects.blob(entry.oid)) });
     }
     activity.sort(byCommentOrder);
-    return { id, issue, start, end, activity };
+    const conflicts = entries.find((e) => e.name === CONFLICTS_DIR && e.mode === TREE_MODE);
+    const setAside = conflicts
+      ? await Promise.all(
+          (await this.objects.tree(conflicts.oid))
+            .filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'))
+            .map(async (e) => parseEnd(await this.objects.blob(e.oid))),
+        )
+      : [];
+    setAside.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
+    return { id, issue, start, end, activity, setAside };
   }
 
   /** The outcome records in one issue's `outcomes/<a>/<b>/<issue>/` directory. */
@@ -658,6 +773,17 @@ export class SnapshotLoader {
     );
     this.outcomesByTree.set(memoKey, outcomes);
     return outcomes;
+  }
+
+  /** A `conflicts/` directory's records, oldest first (then by name). */
+  private async conflictsIn(tree: string): Promise<ConflictRecord[]> {
+    const files = (await this.objects.tree(tree)).filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'));
+    const parsed = await Promise.all(
+      files.map(async (e) => ({ name: e.name, record: parseConflict(await this.objects.blob(e.oid)) })),
+    );
+    return parsed
+      .sort((x, y) => (x.record.at < y.record.at ? -1 : x.record.at > y.record.at ? 1 : x.name < y.name ? -1 : 1))
+      .map((p) => p.record);
   }
 
   /** A `comments/` directory's files, in comment order; names only, no blobs read. */

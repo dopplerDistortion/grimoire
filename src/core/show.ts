@@ -5,7 +5,7 @@ import { invalid } from '../errors';
 import { issueRevision, type AttemptRecord, type IssueComment, type IssueLink, type TrackerView } from '../tracker';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import { listedOpenAttempt, type ListedOpenAttempt } from './attempts';
-import { derivations, type RelationState } from './derive';
+import { derivations, type IssueConflict, type RelationState } from './derive';
 import { dashboardPort, localLink } from './local-link';
 import { define, oneLine } from './op';
 import { staleCutoff } from './stale';
@@ -64,7 +64,8 @@ export interface ShowResult {
   last_assignee: string | null;
   /** Claimable: open, unclaimed, unconflicted, unblocked and with no open sub-issue. */
   ready: boolean;
-  conflict: null;
+  /** The fold conflict, or null: `{fields, theirs, base}`; a conflicted issue isn't ready. */
+  conflict: IssueConflict | null;
   comment_count: number;
   /** A page of comments, oldest first: the newest ones (or those before the cursor). */
   comments: ShownComment[];
@@ -92,6 +93,18 @@ export interface PastAttempt {
   outcome: { verdict: string; reason: string; set_by: string; at: string } | null;
   /** The id of its debrief comment, or null. */
   debrief: string | null;
+  /**
+   * When two clones ended it differently: the endings the fold set aside
+   * (`theirs.end`, oldest first) beside the one that stands; else null.
+   */
+  conflict: AttemptConflict | null;
+}
+
+/** An attempt sealed twice across clones. */
+export interface AttemptConflict {
+  fields: ['end'];
+  theirs: { end: { ended: string; ended_at: string; ended_by: string }[] };
+  base: { end: null };
 }
 
 function pastAttempt(record: AttemptRecord): PastAttempt {
@@ -110,6 +123,20 @@ function pastAttempt(record: AttemptRecord): PastAttempt {
       ? { verdict: record.outcome.verdict, reason: record.outcome.reason, set_by: record.outcome.set_by, at: record.outcome.at }
       : null,
     debrief: end.debrief,
+    conflict:
+      record.setAside.length === 0
+        ? null
+        : {
+            fields: ['end'],
+            theirs: {
+              end: record.setAside.map((other) => ({
+                ended: other.ended,
+                ended_at: other.at,
+                ended_by: typeof other.ended_by.person === 'string' ? other.ended_by.person : '',
+              })),
+            },
+            base: { end: null },
+          },
   };
 }
 

@@ -106,6 +106,14 @@ export async function fetchTracker(checkout: Checkout): Promise<void> {
   ]);
 }
 
+/**
+ * Fetches `other`'s local tracker straight into `checkout`'s remote-tracking
+ * ref, as if `other` had pushed it: lets two diverged clones each see the other.
+ */
+export async function fetchTrackerFrom(checkout: Checkout, other: Checkout): Promise<void> {
+  await checkout.git(['fetch', '--quiet', other.dir, `+${TRACKER_REF}:refs/remotes/origin/grimoire/tracker`]);
+}
+
 /** A random-suffix source that hands out `suffixes` in order (then fails). */
 export function suffixQueue(...suffixes: string[]): (length: number) => string {
   return () => {

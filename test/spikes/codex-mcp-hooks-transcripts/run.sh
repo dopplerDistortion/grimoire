@@ -26,7 +26,7 @@ R=$K/runs/$NAME
 if [ -z "${KEEP_HOME:-}" ]; then rm -rf "$R"; fi
 mkdir -p "$R/home" "$R/fake" "$R/cap"
 if [ ! -f "$K/probe.mjs" ]; then
-  node --input-type=module -e "import('$(cygpath -m "$REPO")/test/spikes/mcp-dual-era/bundle-probe.mjs').then((m) => m.bundleProbe('$(cygpath -m "$K")'))"
+  node --input-type=module -e "import('file:///$(cygpath -m "$REPO")/test/spikes/mcp-dual-era/bundle-probe.mjs').then((m) => m.bundleProbe('$(cygpath -m "$K")'))"
 fi
 W=${WORK:-$R/work}
 if [ ! -d "$W/.git" ] && [ ! -f "$W/.git" ]; then
