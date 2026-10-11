@@ -77,7 +77,7 @@ export interface SkillReadEvent {
 export interface EndCaptureInput {
   /** Where git runs to read the binding trailers. */
   readonly repoRoot: string;
-  /** The worktree the ending call came from: rewritten to `<repo>`. */
+  /** The worktree the ending call came from: rewritten to `<repo>` for its own context, and for a context with no row saying where it worked. */
   readonly worktree: string;
   readonly store: MachineLocalStore;
   /** The view the call validated against. */
@@ -120,6 +120,8 @@ interface Target {
   readonly pendingHints: readonly ReservedHint[];
   readonly spawnEnv: string | null;
   readonly path: string | null;
+  /** The worktree it worked in, rewritten to `<repo>`: its row's, else the ending call's. */
+  readonly worktree: string;
   readonly row: boolean;
   readonly calling: boolean;
 }
@@ -186,7 +188,7 @@ async function targetsOf(input: EndCaptureInput, deadline: number): Promise<Targ
         null,
       )
     : [];
-  const targets: Target[] = bindings === null ? rows.filter(agentRow).map(rowTarget) : boundTargets(bindings, rows);
+  const targets: Target[] = bindings === null ? rows.filter(agentRow).map(rowTarget) : boundTargets(bindings, rows, input.worktree);
   if (!call.binds || call.actor.kind === 'human') return targets;
 
   // The ending call's own binding write isn't committed yet: the cut looks for it from what this process saw.
@@ -209,6 +211,7 @@ async function targetsOf(input: EndCaptureInput, deadline: number): Promise<Targ
     pendingHints: [...(known?.pendingHints ?? []), ...(call.pendingHint ? [call.pendingHint] : [])],
     spawnEnv: actor.spawn_env ?? known?.spawnEnv ?? null,
     path: revealed?.transcript_path ?? known?.path ?? null,
+    worktree: input.worktree,
     row: known?.row ?? false,
     calling: true,
   };
@@ -217,7 +220,7 @@ async function targetsOf(input: EndCaptureInput, deadline: number): Promise<Targ
 }
 
 /** The agent contexts the binding writes name, with this machine's rows. */
-function boundTargets(bindings: readonly Binding[], rows: readonly SeenHereRow[]): Target[] {
+function boundTargets(bindings: readonly Binding[], rows: readonly SeenHereRow[], worktree: string): Target[] {
   const agents = boundContexts(bindings, rows).filter((context) => context.bindings.some((binding) => binding.actor.kind !== 'human'));
   return agents.map((context) => {
     const latest = context.bindings.at(-1)!.actor;
@@ -232,6 +235,7 @@ function boundTargets(bindings: readonly Binding[], rows: readonly SeenHereRow[]
       pendingHints: context.row?.pending_hint ? [context.row.pending_hint] : [],
       spawnEnv: context.row?.spawn_env ?? latest.spawn_env ?? null,
       path: context.row?.path ?? null,
+      worktree: context.row?.worktree ?? worktree,
       row: context.row !== null,
       calling: false,
     };
@@ -262,6 +266,7 @@ function rowTarget(row: SeenHereRow): Target {
     pendingHints: row.pending_hint ? [row.pending_hint] : [],
     spawnEnv: row.spawn_env,
     path: row.path,
+    worktree: row.worktree,
     row: true,
     calling: false,
   };
@@ -307,7 +312,7 @@ class ContextCut {
     private readonly claimed: readonly string[],
   ) {
     const home = input.options?.home ?? os.homedir();
-    this.paths = { home, repo: input.worktree, ...(process.platform === 'win32' ? { tmp: os.tmpdir() } : {}) };
+    this.paths = { home, repo: target.worktree, ...(process.platform === 'win32' ? { tmp: os.tmpdir() } : {}) };
     this.rewrite = pathRewriter(this.paths);
   }
 

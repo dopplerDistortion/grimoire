@@ -11,7 +11,7 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, expect, vi } from 'vitest';
 import { FIXTURES_DIR, fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
-import { seenHereRows, sessionKey } from '../../src/capture/seen-here';
+import { seenHereRows, sessionKey, type SeenHereRow } from '../../src/capture/seen-here';
 import { registerSweep } from '../../src/capture/sweeps';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
 import type { CallContext, Core, CoreOptions } from '../../src/core';
@@ -933,6 +933,32 @@ describe('identity checked against the transcript at cut time', () => {
 
     expect(record!.fields).toMatchObject({ session: PLAIN_SESSION, context: 'main', source: 'hint', excerpt: 'cut' });
     expect(record!.body).toContain('tool mcp__grimoire__comment');
+  });
+
+  test('a context’s paths are rewritten against the worktree its row says it worked in, not the closing call’s', async ({ world, grimoire, capture }) => {
+    // The plain session ran in spike A's probe repo: a linked worktree of the repo, as far as this test goes.
+    const probe = 'C:\\Users\\user\\AppData\\Local\\Temp\\grimoire-spike-a\\proj';
+    const core = capture.makeCore();
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    capture.at('2026-10-11T03:30:00.000Z');
+    const id = await created(core, grimoire.ctx, 'Another worktree');
+    const claim = await core.call('claim', { id }, person(grimoire.ctx));
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    const { attempt } = claim.result;
+    capture.at('2026-10-11T03:30:40.051Z');
+    const hint = { session_id: PLAIN_SESSION, tool_use_id: PLAIN_COMMENT };
+    const commenting = plainCall(grimoire.ctx, { era: 'modern', hint, meta: { 'claudecode/toolUseId': PLAIN_COMMENT } });
+    expect(await core.call('comment', { id, body: 'done', attempt }, commenting)).toMatchObject({ ok: true });
+    const key = sessionKey({ client: 'claude-code', session: PLAIN_SESSION, context: 'main', nonce: 'nonce-plain' });
+    await machine.coordination.update<SeenHereRow>('seen-here', `${attempt}/${key}`, (row) => (row ? { ...row, worktree: probe } : undefined));
+    capture.at('2026-10-11T03:30:45.000Z');
+
+    expect(await core.call('close', { id, reason: 'done', attempt }, person(grimoire.ctx))).toMatchObject({ ok: true });
+
+    const record = (await sessionRecords(world.a, id, attempt)).find((r) => r.fields.client === 'claude-code')!;
+    expect(record.fields).toMatchObject({ session: PLAIN_SESSION, excerpt: 'cut' });
+    expect(record.body).toContain(' | file_path: <repo>\\README.md');
+    expect(record.body).not.toContain(probe);
   });
 
   test('a pending hint whose tool-use id its transcript doesn’t hold claims nothing', async ({ world, grimoire, capture }) => {
