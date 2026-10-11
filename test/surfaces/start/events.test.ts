@@ -82,4 +82,44 @@ describe('live events when reading fails', () => {
       await served.close();
     }
   });
+
+  gitTest('a check that can’t read the commits between the tips sends reload, never drops the move', async ({ world }) => {
+    const machineDir = path.join(world.root, 'machine');
+    await mkdir(machineDir, { recursive: true });
+    // git can't even start where nothing exists: every diff fails.
+    const served = await serveLive(path.join(world.root, 'gone'), machineDir);
+    try {
+      const events = await SseClient.connect(served.port, '');
+      await events.next((event) => event.event === 'ready');
+      served.tips = { local: B, remote: null };
+      const moved = await events.next((event) => event.event !== 'ready');
+      events.close();
+
+      expect(moved.event).toBe('reload');
+      expect(moved.id).toMatch(new RegExp(`^${B}:0:[0-9a-f]{12}$`));
+      expect(moved.data).toEqual({ tips: { local: B, remote: null } });
+    } finally {
+      await served.close();
+    }
+  });
+
+  gitTest('a resume that can’t read the commits it missed gets reload', async ({ world }) => {
+    const machineDir = path.join(world.root, 'machine');
+    await mkdir(machineDir, { recursive: true });
+    const served = await serveLive(path.join(world.root, 'gone'), machineDir);
+    try {
+      const first = await SseClient.connect(served.port, '');
+      const ready = await first.next((event) => event.event === 'ready');
+      first.close();
+      served.tips = { local: B, remote: null };
+      const resumed = await SseClient.connect(served.port, '', ready.id!);
+      const answer = await resumed.next(() => true);
+      resumed.close();
+
+      expect(answer.event).toBe('reload');
+      expect(answer.id).toMatch(new RegExp(`^${B}:0:[0-9a-f]{12}$`));
+    } finally {
+      await served.close();
+    }
+  });
 });

@@ -151,7 +151,7 @@ export class LiveEvents {
       this.streams.add(stream);
       this.wake();
       const resumed = lastEventId === null ? null : parseId(lastEventId);
-      const message = lastEventId === null ? null : resumed === null ? { event: 'reload' as const, data: { tips: tipsOf(current) } } : await this.between(resumed, current);
+      const message = lastEventId === null ? null : resumed === null ? reloadOf(current) : await this.between(resumed, current).catch(() => reloadOf(current));
       if (message) send(response, message.event, idOf(current), message.data);
       else send(response, 'ready', idOf(current), { tips: tipsOf(current) });
     });
@@ -198,14 +198,15 @@ export class LiveEvents {
     void this.serial(async () => {
       try {
         const previous = this.state;
+        // A failed read (git busy, a ref mid-update) keeps the old state: the next check tries again.
         const next = await this.read();
+        // Commits it can't read are never dropped: the client refetches everything instead.
+        const message = previous === null || idOf(previous) === idOf(next) ? null : await this.between(previous, next).catch(() => reloadOf(next));
         this.state = next;
-        if (!previous || idOf(previous) === idOf(next)) return;
-        const message = await this.between(previous, next);
         if (!message) return;
         for (const { response } of this.streams) send(response, message.event, idOf(next), message.data);
       } catch {
-        // A failed check (git busy, a ref mid-update) tries again next time.
+        // Nothing moved on: the next check tries again.
       } finally {
         this.checking = false;
       }
@@ -290,6 +291,10 @@ export class LiveEvents {
 
 function tipsOf(state: LiveState): TrackerTips {
   return { local: state.local, remote: state.remote };
+}
+
+function reloadOf(state: LiveState): Outgoing {
+  return { event: 'reload', data: { tips: tipsOf(state) } };
 }
 
 function send(response: ServerResponse, event: string, id: string, data: unknown): void {
