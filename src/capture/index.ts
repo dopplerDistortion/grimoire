@@ -1,6 +1,16 @@
-// Capture (spec §2 module 4, §14): the client transcript readers (Claude Code, Codex), the format
-// check, window selection and the excerpt pipeline. Binding evidence, transcript
-// roots, fact extraction, session records and the attempt-end cut build on this.
+// Capture (spec §2 module 4, §14): binding evidence, bindings and seen-here
+// rows, revealed transcript roots, the client transcript readers (Claude Code,
+// Codex), the format check, window selection and the excerpt pipeline. Fact
+// extraction, session records and the attempt-end cut build on this.
+export {
+  boundContexts,
+  readBindings,
+  type Binding,
+  type BoundContext,
+} from './bindings';
+export { idValue, mcpCallEvidence, observedEvidence, MAIN_CONTEXT, type CallEvidence, type EvidenceSource } from './evidence';
+export { noteCutReach, recordSeenHere, seenHereRows, sessionKey, SEEN_HERE, type BindingSeen, type SeenHereRow } from './seen-here';
+export { recordRevealedRoot, revealedRoot, revealedRoots, TRANSCRIPT_ROOTS, type RevealedRoot } from './transcript-roots';
 export {
   cutClaudeCode,
   readClaudeCodeTranscript,

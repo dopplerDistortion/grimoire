@@ -9,8 +9,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { describe, expect } from 'vitest';
 import { gitTest, readFixture, readFixtureJson, type Checkout } from '#harness';
+import { seenHereRows } from '../../../src/capture/seen-here';
 import { createCore, findHostRoot, type CallContext, type Core } from '../../../src/core';
-import { grimoireServerFactory, type McpCore } from '../../../src/surfaces/mcp/server';
+import { MachineLocalStore } from '../../../src/machine-local';
+import { grimoireServerFactory, type McpCore, type McpDeps } from '../../../src/surfaces/mcp/server';
 import { VERSION } from '../../../src/version';
 import { commitToTracker, initializeTracker } from '../../core/support';
 
@@ -32,7 +34,7 @@ interface Served {
 async function serve(
   checkout: Checkout,
   era: Era,
-  options: { wrap?: (core: Core) => McpCore; startDir?: string } = {},
+  options: { wrap?: (core: Core) => McpCore; startDir?: string; onClient?: McpDeps['onClient']; spawnEnvId?: string } = {},
 ): Promise<Served> {
   const core = createCore();
   const seen: Seen[] = [];
@@ -46,7 +48,13 @@ async function serve(
   const wrapped = options.wrap ? options.wrap({ ...core, ...recording }) : recording;
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const handle = serveStdio(
-    grimoireServerFactory({ core: async () => wrapped, startDir: options.startDir ?? checkout.dir, nonce: 'nonce-test' }),
+    grimoireServerFactory({
+      core: async () => wrapped,
+      startDir: options.startDir ?? checkout.dir,
+      nonce: 'nonce-test',
+      ...(options.onClient ? { onClient: options.onClient } : {}),
+      ...(options.spawnEnvId ? { spawnEnvId: options.spawnEnvId } : {}),
+    }),
     { transport: serverSide },
   );
   const client =
@@ -417,6 +425,105 @@ describe('per-call _meta', () => {
       expect(previous).not.toHaveProperty('sessionId');
       // Nothing else of the turn metadata, so none of its workspace paths.
       expect(JSON.stringify([current, previous])).not.toContain('\\\\');
+    } finally {
+      await served.close();
+    }
+  });
+});
+
+describe('the connecting client', () => {
+  gitTest('the first request that names it hands it on once, for the process record', async ({ world }) => {
+    await initializeTracker(world.a, world.a);
+    for (const era of ['legacy', 'modern'] as const) {
+      const clients: unknown[] = [];
+      const served = await serve(world.a, era, { onClient: (client) => clients.push(client) });
+      try {
+        await served.client.listTools();
+        await served.client.callTool({ name: 'labels', arguments: {} });
+
+        expect(clients, era).toEqual([
+          era === 'legacy' ? { name: 'codex-mcp-client', version: '0.162.1' } : { name: 'claude-code', version: '2.1.296' },
+        ]);
+      } finally {
+        await served.close();
+      }
+    }
+  });
+});
+
+/** The tracker tip's Grimoire-Actor trailer, parsed. */
+async function tipActor(checkout: Checkout): Promise<Record<string, string>> {
+  const value = await checkout.git(['log', '-1', '--format=%(trailers:key=Grimoire-Actor,valueonly,unfold)', 'refs/grimoire/tracker']);
+  return JSON.parse(value) as Record<string, string>;
+}
+
+describe('identity, observed end to end', () => {
+  gitTest("Claude Code's hinted calls: the actor is the hint's session, the main context and the call; the claim leaves a seen-here row", async ({
+    world,
+  }) => {
+    await initializeTracker(world.a, world.a);
+    // Claude Code's real hinted call, whose spike-era hint (under the probe's key) still held the transcript path.
+    const { params } = readFixtureJson<{ params: { arguments: Record<string, unknown>; _meta: Record<string, unknown> } }>(
+      'claude-code/meta/tools-call.json',
+    );
+    const hint = params.arguments._grimoire_hint as { session_id: string; tool_use_id: string };
+    const served = await serve(world.a, 'modern', { spawnEnvId: 'spawn-session' });
+    try {
+      const created = await served.client.callTool({ name: 'create', arguments: { title: 'Observed', _grimoire: hint }, _meta: params._meta });
+      const id = (created.structuredContent as { id: string }).id;
+      expect(await tipActor(world.a)).toEqual({
+        kind: 'agent',
+        client: 'claude-code',
+        session: hint.session_id,
+        context: 'main',
+        call: hint.tool_use_id,
+        spawn_env: 'spawn-session',
+        nonce: 'nonce-test',
+      });
+
+      // The claim's own call: the hook's hint for it, and Claude Code's _meta.
+      const claimHint = { ...hint, tool_use_id: 'toolu_01ClaimCallFromTheModel' };
+      const claimed = await served.client.callTool({
+        name: 'claim',
+        arguments: { id, _grimoire: claimHint },
+        _meta: { 'claudecode/toolUseId': claimHint.tool_use_id },
+      });
+      const { attempt } = claimed.structuredContent as { attempt: string };
+      expect(await tipActor(world.a)).toMatchObject({ session: hint.session_id, context: 'main', call: claimHint.tool_use_id });
+      const rows = await seenHereRows(new MachineLocalStore(path.join(world.a.dir, '.git')));
+      expect(rows).toEqual([
+        expect.objectContaining({
+          handle: attempt,
+          issue: id,
+          client: 'claude-code',
+          session: hint.session_id,
+          context: 'main',
+          call: claimHint.tool_use_id,
+          spawn_env: 'spawn-session',
+          nonce: 'nonce-test',
+          source: 'hint',
+        }),
+      ]);
+    } finally {
+      await served.close();
+    }
+  });
+
+  gitTest("Codex's subagent call: the session is the root thread, the context its own thread, and the call id", async ({ world }) => {
+    await initializeTracker(world.a, world.a);
+    const { params } = readFixtureJson<{ params: { _meta: Record<string, unknown> } }>('codex/meta/tools-call-subagent.json');
+    const served = await serve(world.a, 'legacy');
+    try {
+      await served.client.callTool({ name: 'create', arguments: { title: 'From a Codex subagent' }, _meta: params._meta });
+
+      expect(await tipActor(world.a)).toEqual({
+        kind: 'agent',
+        client: 'codex-mcp-client',
+        session: params._meta.sessionId,
+        context: params._meta.threadId,
+        call: params._meta.callId,
+        nonce: 'nonce-test',
+      });
     } finally {
       await served.close();
     }

@@ -813,6 +813,81 @@ describe('the format check', () => {
   });
 });
 
+describe('a context bound through the CLI (spec §14 CLI calls)', () => {
+  const HANDLE = 'at-7kq2xm';
+  /** plain's first Bash call (03:30:34.169, answered 03:30:34.626): here it runs `claim gr-1`. */
+  const CLAIM_CALL = 'toolu_01NJ8CKFfNDDda2gqBmrjmo6';
+  /** plain's MCP comment (03:30:40.008): here a Bash call running `close gr-1`. */
+  const CLOSE_CALL = PLAIN_COMMENT.id;
+  /**
+   * The binding calls as `boundContexts` gives them for a CLI context: no call
+   * id, what each result printed, and the commit's time in whole seconds.
+   */
+  const CLAIM = { grimoire: 'claim', printed: [HANDLE], at: '2026-10-11T03:30:34Z' };
+  const CLOSE = { grimoire: 'close', printed: [HANDLE], at: '2026-10-11T03:30:40Z' };
+  const evidence = (...bindingCalls: CutEvidence['bindingCalls']): CutEvidence => ({
+    issue: 'gr-1',
+    attemptOpenedAt: '2026-10-11T03:30:34.000Z',
+    bindingCalls,
+  });
+
+  /** plain, with its claim and its close made through the CLI: `close` overrides the close's command or output. */
+  async function shellSession(close: { command?: string; output?: string } = {}): Promise<string> {
+    const claimed = JSON.stringify({ id: 'gr-1', attempt: HANDLE, since: '2026-10-11T03:30:34.400Z' });
+    const closed = JSON.stringify({ id: 'gr-1', attempt: HANDLE, ended: 'done', outcome: 'pass' });
+    return editedCopy(PLAIN, (lines) =>
+      lines.map((line) =>
+        editJson(line, (l) => {
+          for (const block of blocksOf(l)) {
+            if (block.type === 'tool_use' && block.id === CLAIM_CALL) block.input = { command: 'node .grimoire/run.cjs claim gr-1' };
+            if (block.type === 'tool_result' && block.tool_use_id === CLAIM_CALL) block.content = claimed;
+            if (block.type === 'tool_use' && block.id === CLOSE_CALL) {
+              // Its arguments come on stdin (spec §10), so only what it printed names the issue's attempt.
+              const command = close.command ?? 'node .grimoire/run.cjs close --input - < close.json';
+              Object.assign(block, { name: 'Bash', input: { command } });
+            }
+            if (block.type === 'tool_result' && block.tool_use_id === CLOSE_CALL) block.content = close.output ?? closed;
+          }
+        }),
+      ),
+    );
+  }
+
+  it('finds each binding call by the id its shell result printed, as if the evidence named the call', async () => {
+    const file = await shellSession();
+    const result = await cutFile(file, evidence(CLAIM, CLOSE));
+    const byId = await cutFile(file, evidence({ id: CLAIM_CALL, at: CLAIM.at }, { id: CLOSE_CALL, at: CLOSE.at }));
+
+    expect(result.status).toBe('cut');
+    expect(result.notes).toEqual([]);
+    expect(result.excerpt).toBe(byId.excerpt);
+    expect(result.steps.filter((s) => s.kind === 'tool_call' && s.grimoire === 'cli').map((s) => isCallStep(s) && s.id)).toEqual([
+      CLAIM_CALL,
+      CLOSE_CALL,
+    ]);
+  });
+
+  it('falls back to the last shell command running grimoire with that verb and the issue id, at or before the call time', async () => {
+    // The close's output never reached the transcript whole: the handle it printed isn't there.
+    const command = `node .grimoire/run.cjs close gr-1 done --attempt ${HANDLE} --input - < debrief.json`;
+    const file = await shellSession({ command, output: 'Output too large; see the spill file.' });
+    const withoutIssue = await shellSession({ output: 'Output too large; see the spill file.' });
+
+    expect((await cutFile(file, evidence(CLAIM, CLOSE))).status).toBe('cut');
+    // Neither what it printed nor its command names it: nothing to go on.
+    expect((await cutFile(withoutIssue, evidence(CLAIM, CLOSE))).status).toBe('unmatched');
+  });
+
+  it('gives unmatched when no shell command runs grimoire with that verb on the issue', async () => {
+    const file = await shellSession({ command: `node .grimoire/run.cjs close gr-2 done --attempt ${HANDLE}`, output: 'done' });
+    const result = await cutFile(file, evidence(CLAIM, CLOSE));
+    const update = await cutFile(await shellSession(), evidence(CLAIM, { grimoire: 'update', printed: ['9f'.repeat(32)], at: CLOSE.at }));
+
+    expect(result).toMatchObject({ status: 'unmatched', excerpt: null, steps: [], window: null });
+    expect(update.status).toBe('unmatched');
+  });
+});
+
 // Temp copies of real fixtures, for the cases a client writes only now and then
 // (a torn last line, a line type from a newer version). Each copy is the real
 // transcript with the stated lines cut, inserted or edited, nothing else.

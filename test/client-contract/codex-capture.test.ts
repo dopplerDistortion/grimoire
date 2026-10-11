@@ -876,6 +876,33 @@ describe('matching a binding call without a call id (T6 fallback)', () => {
   });
 });
 
+describe('a context bound through the CLI (spec §14 CLI calls)', () => {
+  it('finds a claim made through exec_command by the handle its output printed, as if the evidence named the call', async () => {
+    // Scenario A's commit (call_4_0, 04:44:09.393, answered 04:44:09.607) made the claim through the CLI.
+    const handle = 'at-4m9wqe';
+    const file = await editedCopy(PAGINATED, (lines) =>
+      asGrimoire(lines).map((line) =>
+        editJson(line, (l) => {
+          const payload = l.payload as Record<string, unknown>;
+          if (payload.call_id !== 'call_4_0') return;
+          if (payload.type === 'function_call') payload.arguments = JSON.stringify({ cmd: 'npm run -s grimoire -- claim gr-7k2pq' });
+          if (payload.type === 'function_call_output') {
+            const printed = JSON.stringify({ id: 'gr-7k2pq', attempt: handle, since: '2026-10-11T04:44:09.500Z' });
+            payload.output = `Chunk ID: 333cd4\nWall time: 0.2000 seconds\nProcess exited with code 0\nOriginal token count: 30\nOutput:\n${printed}\n`;
+          }
+        }),
+      ),
+    );
+    const evidence = (call: BindingCall): CutEvidence => ({ issue: 'gr-7k2pq', attemptOpenedAt: '2026-10-11T04:44:09.000Z', bindingCalls: [call] });
+    // As `boundContexts` gives a CLI claim: no call id, the handle it printed, the commit's time in whole seconds.
+    const result = await cutFile(file, PAGINATED_THREAD, evidence({ grimoire: 'claim', printed: [handle], at: '2026-10-11T04:44:09Z' }));
+    const byId = await cutFile(file, PAGINATED_THREAD, evidence({ id: 'call_4_0', at: '2026-10-11T04:44:09Z' }));
+
+    expect(result.status).toBe('cut');
+    expect(result.excerpt).toBe(byId.excerpt);
+  });
+});
+
 describe('knowledge chores', () => {
   const evidence: CutEvidence = {
     issue: 'gr-7k2pq',

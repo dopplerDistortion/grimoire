@@ -43,6 +43,8 @@ export async function runMcp(argv: readonly string[]): Promise<void> {
         inFlight.add(call);
         void call.finally(() => inFlight.delete(call));
       },
+      // The record the launcher's entry started for this server (./process-record.ts) learns its client.
+      onClient: (client) => void import('./process-record').then(({ noteServerClient }) => noteServerClient(client.name)).catch(() => {}),
     }),
     { onerror: (error) => process.stderr.write(`grimoire mcp: ${error.message}\n`) },
   );

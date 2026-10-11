@@ -21,6 +21,7 @@ import {
   shimText,
   writeJoinRecord,
 } from '../../src/installer';
+import { revealedRoot } from '../../src/capture/transcript-roots';
 import { MachineLocalStore } from '../../src/machine-local';
 import { initializeTracker } from '../core/support';
 import { packGrimoire, reportingPackage, runEntry, writeConfig } from './support';
@@ -86,6 +87,9 @@ describe('a clone joined from the packed tarball', () => {
     let duringServe: Awaited<ReturnType<typeof pruneCopies>>;
     try {
       await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => [r.pin, r.worktree]), { timeout: 10_000 }).toEqual([[PIN, world.a.dir]]);
+      // The first request names the client (`clientInfo`), and the record then carries it.
+      await client.listTools();
+      await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => r.client), { timeout: 10_000 }).toEqual(['claude-code']);
       await writeConfig(world.a.dir, '1.0.0');
       duringServe = await pruneCopies(store);
     } finally {
@@ -125,7 +129,19 @@ describe('a clone joined from the packed tarball', () => {
     await rm(path.join(copyDir(store, PIN), '.complete'));
     const withoutCopy = await runEntry(claudeHookArgs('session-start'), { cwd: sub, projectDir: world.a.dir, input: claudeStart });
 
-    for (const r of runs) expect([r.code, r.stdout, r.stderr]).toEqual([0, '', '']);
+    const [start, preRun, unknownRun] = runs;
+    for (const r of [start!, unknownRun!]) expect([r.code, r.stdout, r.stderr]).toEqual([0, '', '']);
+    // The pre-tool-use hook adds the reserved hint key, ids only (spike A, T1).
+    const payload = JSON.parse(pre) as { session_id: string; tool_use_id: string; tool_input: object };
+    expect([preRun!.code, preRun!.stderr]).toEqual([0, '']);
+    expect(JSON.parse(preRun!.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        updatedInput: { ...payload.tool_input, _grimoire: { session_id: payload.session_id, tool_use_id: payload.tool_use_id } },
+      },
+    });
+    // The transcript path stays out of the hint: the hook recorded it in the clone instead (§6).
+    expect(await revealedRoot(store, payload.session_id)).toMatchObject({ transcript_path: JSON.parse(pre).transcript_path });
     for (const r of [brokenStart!, brokenPre!]) {
       expect([r.code, r.stdout]).toEqual([0, '']);
       expect(r.stderr).toMatch(/^grimoire hook failed: .*(Cannot find module|ERR_MODULE_NOT_FOUND)/s);

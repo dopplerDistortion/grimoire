@@ -51,6 +51,10 @@ export interface WriteResult<R> {
   readonly replayed: boolean;
   /** True when the commit sealed an attempt (wrote its `end.md`): an attempt-ending write. */
   readonly sealed: boolean;
+  /** The commit's `Grimoire-Issue`, when it made one that names an issue. */
+  readonly issue?: string;
+  /** The commit's `Grimoire-Attempt` (the handle it binds), when it made one that names a handle. */
+  readonly attempt?: string;
 }
 
 export interface TrackerOptions {
@@ -339,7 +343,14 @@ class GitTrackerStore implements TrackerStore {
       const move = await this.moveRef(tips.local, commit);
       if (move.moved) {
         this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
-        return { result: outcome.result, commit, replayed: false, sealed: [...edits.keys()].some(isAttemptEnd) };
+        return {
+          result: outcome.result,
+          commit,
+          replayed: false,
+          sealed: [...edits.keys()].some(isAttemptEnd),
+          ...(outcome.issue ? { issue: outcome.issue } : {}),
+          ...(outcome.attempt ? { attempt: outcome.attempt } : {}),
+        };
       }
       if (move.staleLock) {
         throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });

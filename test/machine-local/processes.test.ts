@@ -54,6 +54,21 @@ describe('process records', () => {
     expect(await store.processes.live()).toEqual([]);
   });
 
+  test('a registration fills in its client once it is known (a server learns it from its first call), in the same record', async ({
+    world,
+  }) => {
+    const store = await storeOf(world.a.dir);
+    const registration = await store.processes.register({ role: 'mcp', client: null, worktree: world.a.dir, pin: '1.0.0', pathSource: null });
+
+    const updated = await registration.update({ client: 'codex-mcp-client' });
+
+    expect(updated).toEqual({ ...registration.record, client: 'codex-mcp-client' });
+    expect(await store.processes.live({ client: 'codex-mcp-client' })).toEqual([updated]);
+    expect(await readdir(path.join(store.dir, 'processes'))).toEqual([`${process.pid}-${updated.nonce}.json`]);
+    await registration.unregister();
+    expect(await store.processes.live()).toEqual([]);
+  });
+
   test('live processes are listed per client, worktree and pin, from any worktree', async ({
     world,
   }) => {
