@@ -82,9 +82,10 @@ export interface TrackerStore {
    * means the ref did not move (but a plain Error, when a git that stopped
    * answering after it was told to move the ref can't say whether it did).
    * BUSY after the budget, or at once for a ref lock older than ~30 s
-   * (`details.stale_lock`). A git that says nothing for `gitStallMs` (less
-   * as the budget runs out, see `STALL_FLOOR_MS`) is killed and the round
-   * tried again on a new one, or BUSY once no more than that floor is left.
+   * (`details.stale_lock`). A git that says nothing for `gitStallMs`, or
+   * until the budget runs out if that comes first, is killed and the round
+   * tried again on a new one, or BUSY once the budget is spent (a git that
+   * may have moved the ref gets longer, see `STALL_FLOOR_MS`).
    */
   transact<R>(
     spec: WriteSpec,
@@ -123,9 +124,12 @@ export const STALE_REF_LOCK_MS = 30_000;
 const ANCESTRY_WALK = 128;
 /**
  * As a write's budget runs out, the gits it waits on get only what is left
- * of it to answer, so one that gets stuck late still gives BUSY about on
- * time; but never less than this, which no healthy local git goes without
- * answering, so a slow round is never cut short for a stuck one.
+ * of it to answer, so one that gets stuck late still gives BUSY on time:
+ * killing a git that can't have moved the ref costs nothing but the write,
+ * which is out of budget anyway. Two waits get at least this long however
+ * little is left, since cutting them short costs more than time: a git told
+ * to commit (killed, the write can't say whether the ref moved), and a
+ * killed git's exit (its ref lock can be removed only once it is gone).
  */
 const STALL_FLOOR_MS = 1_000;
 
@@ -239,20 +243,25 @@ class GitTrackerStore implements TrackerStore {
     this.objects = new TrackerObjects(location.root, path.join(location.commonDir, 'objects'), location.objectFormat, stall);
     this.loader = new SnapshotLoader(this.objects);
     this.fairness = new FairnessLock(location.commonDir);
-    this.updater = new RefUpdater(location, 'grimoire: write', { stallMs: stall });
+    this.updater = new RefUpdater(location, 'grimoire: write', this.updaterStalls());
     this.clock = options.clock ?? (() => new Date());
     this.randomSuffix = options.randomIdSuffix ?? randomIdSuffix;
     this.budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
   }
 
-  /** How long a local git may say nothing now: `gitStallMs`, or less while a write's budget runs out. */
+  /** How long a local git may say nothing now: `gitStallMs`, or what is left of a write's budget when that is less. */
   private stallNow(): number {
     if (this.writeDeadline === null) return this.stallMs;
-    return Math.min(this.stallMs, Math.max(this.stallFloor(), this.writeDeadline - Date.now()));
+    return Math.min(this.stallMs, Math.max(0, this.writeDeadline - Date.now()));
   }
 
-  private stallFloor(): number {
-    return Math.min(this.stallMs, STALL_FLOOR_MS);
+  /** The same, for a git that may have moved the ref or must exit first (see `STALL_FLOOR_MS`). */
+  private settleNow(): number {
+    return Math.max(Math.min(this.stallMs, STALL_FLOOR_MS), this.stallNow());
+  }
+
+  private updaterStalls() {
+    return { stallMs: () => this.stallNow(), settleMs: () => this.settleNow() };
   }
 
   /** A one-shot git in the repository, killed (GitStalledError) when it says nothing for the stall time. */
@@ -353,8 +362,9 @@ class GitTrackerStore implements TrackerStore {
         if (written) return written;
         if (Date.now() >= deadline) throw busy('the tracker kept moving for the whole write budget');
       } catch (error) {
-        // The stuck git was killed before the ref could move: try again on a new one while more than the stall floor is left.
-        if (!(error instanceof GitStalledError) || deadline - Date.now() <= this.stallFloor()) throw error;
+        // The stuck git was killed before the ref could move: try again on a new one while the budget lasts
+        // (its gits get only what is left of it).
+        if (!(error instanceof GitStalledError) || Date.now() >= deadline) throw error;
       }
       await sleep(5 + Math.random() * 20);
     }
@@ -762,7 +772,7 @@ class GitTrackerStore implements TrackerStore {
    * the ref moved even when that git gets stuck, and cleans up after it.
    */
   private async updateRefOnce(ref: string, next: string, old: string | null, reflogMessage: string): Promise<RefUpdate> {
-    const updater = new RefUpdater(this.location, reflogMessage, { stallMs: () => this.stallNow() });
+    const updater = new RefUpdater(this.location, reflogMessage, this.updaterStalls());
     try {
       return await updater.update(ref, next, old ?? zeroOid(this.location.objectFormat));
     } finally {

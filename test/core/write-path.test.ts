@@ -474,6 +474,11 @@ const UNKILLABLE_AFTER_COMMIT = `${SILENT_AFTER_COMMIT}
 spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER)}, own[0]], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
 `;
 
+/** WEDGED_GIT, and its exit is never seen: a keeper holds its stdout open (all pids go to the file given). */
+const WEDGED_SLOW_TO_EXIT = `${WEDGED_GIT}
+spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER)}, own[0]], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
+`;
+
 /**
  * An updater whose git dies holding the ref's lock, as a killed git does:
  * once git has prepared, it is killed at once, and the relay passes on
@@ -581,32 +586,62 @@ describe('a local git that stops answering', () => {
     },
   );
 
-  test('a git that stops answering late in the budget, once the write got the fairness lock: BUSY still comes within the budget', async ({
-    world,
-    grimoire,
-  }) => {
+  test.for([
+    ['more than a second', 1_200],
+    ['less than a second', 400],
+  ] as const)(
+    'a git that stops answering late in the budget, once the write got the fairness lock with %s left: BUSY still comes within the budget',
+    async ([, left], { world, grimoire }) => {
+      void grimoire; // initializes the tracker
+      const stallMs = 2_000;
+      const pidFile = path.join(world.root, 'wedged-pids');
+      const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: stallMs });
+      const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+      const held = await machine.locks.acquire('tracker-write');
+      if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+      let wedged = { restore() {} };
+      try {
+        const startedAt = Date.now();
+        const write = store.transact(keyWrite('late'), () => ({ result: null })).catch((error: unknown) => error);
+        // Once the write is ready and waits for the lock (no process has started for 300 ms), the clone's
+        // config changes, so its round reads it again, with a git that hangs. Only letting go of the lock
+        // is left for the last moment, so a slow machine doesn't push the round past the budget.
+        for (let seen = -1; seen !== started().length; ) {
+          seen = started().length;
+          await setTimeout(300);
+        }
+        wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
+        await world.a.git(['config', 'grimoire.unrelated', 'changed']);
+        await setTimeout(Math.max(0, startedAt + BUDGET_MS - left - Date.now()));
+        await held.lock.release();
+
+        const failure = await write;
+        const took = Date.now() - startedAt;
+
+        expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
+        expect(took).toBeLessThan(BUDGET_MS + 500);
+      } finally {
+        wedged.restore();
+        await store.close();
+        await killPidsIn(pidFile);
+      }
+    },
+  );
+
+  test('a ref updater that stops answering and is slow to exit once killed: BUSY still comes within the budget', async ({ world, grimoire }) => {
     void grimoire; // initializes the tracker
-    const stallMs = 2_000;
+    const before = (await trackerTip(world.a))!;
     const pidFile = path.join(world.root, 'wedged-pids');
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: stallMs });
-    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
-    const held = await machine.locks.acquire('tracker-write');
-    if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
-    let wedged = { restore() {} };
+    const wedged = replaceGits({ command: /update-ref --stdin/, script: WEDGED_SLOW_TO_EXIT, args: [pidFile] });
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
     try {
       const started = Date.now();
-      const write = store.transact(keyWrite('late'), () => ({ result: null })).catch((error: unknown) => error);
-      await setTimeout(BUDGET_MS - 1_200);
-      // The clone's config changed while the write waited, so its round reads it again, with a git that hangs.
-      wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
-      await world.a.git(['config', 'grimoire.unrelated', 'changed']);
-      await held.lock.release();
-
-      const failure = await write;
+      const failure: unknown = await store.transact(keyWrite('slow exit'), () => ({ result: null })).catch((error: unknown) => error);
       const took = Date.now() - started;
 
       expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
       expect(took).toBeLessThan(BUDGET_MS + 500);
+      expect(await trackerTip(world.a)).toBe(before);
     } finally {
       wedged.restore();
       await store.close();
@@ -690,6 +725,32 @@ describe('a local git that stops answering', () => {
       }
     },
   );
+
+  test('a ref updater killed holding the ref’s lock with under a second of the budget left after it: the write still lands on a new git', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const before = (await trackerTip(world.a))!;
+    const dies = replaceGits({ command: /update-ref --stdin/, script: DIES_HOLDING_THE_LOCK, args: ['withhold'], times: 1 });
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const held = await machine.locks.acquire('tracker-write');
+    if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+    try {
+      const write = store.transact(keyWrite('dies late'), () => ({ result: null }));
+      // The round starts once the lock is let go; its updater is killed a stall time later, with under a second left.
+      await setTimeout(BUDGET_MS - STALL_MS - 1_000);
+      await held.lock.release();
+
+      expect((await write).commit).toBe(await trackerTip(world.a));
+      expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
+    } finally {
+      dies.restore();
+      await held.lock.release();
+      await store.close();
+    }
+  });
 
   test('a ref updater told to commit that outlives being killed: the write fails without promising the ref did not move', async ({
     world,

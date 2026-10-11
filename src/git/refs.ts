@@ -53,6 +53,13 @@ export interface RefUpdaterOptions {
   readonly packedRefs?: () => Promise<string>;
   /** How long git may take over a step before it is killed as stuck; default GIT_STALL_MS. */
   readonly stallMs?: StallLimit;
+  /**
+   * The same, for the waits that cost more than time when cut short: git's
+   * answer once told to commit (killed, whether the ref moved must be found
+   * out), the git that finds that out, and a killed or ending git's exit
+   * (its ref lock can be removed only once it is gone); default `stallMs`.
+   */
+  readonly settleMs?: StallLimit;
 }
 
 /**
@@ -76,20 +83,28 @@ export interface RefUpdaterOptions {
  * grimoire's own, timed apart). One that doesn't is killed (with its tree on
  * Windows) and the next update starts a new one. Stuck before it was told to
  * commit, the ref did not move: the update fails with GitStalledError (BUSY).
- * Stuck after, the ref may have moved: a new git is asked whether it did, and
- * only when that can't be told either does the update fail with a plain
- * Error, which promises nothing (ADR 0012). A killed git leaves its ref lock
- * behind (a kill skips git's own clean-up), which would refuse every later
- * update; once that git has exited, the lock it left is removed.
+ * Stuck after (given the settle time, which may be longer), the ref may have
+ * moved: a new git is asked whether it did, and only when that can't be told
+ * either does the update fail with a plain Error, which promises nothing
+ * (ADR 0012). A killed git leaves its ref lock behind (a kill skips git's
+ * own clean-up), which would refuse every later update; once that git has
+ * exited (it gets the settle time), the lock it left is removed. The update
+ * that killed it doesn't wait for that, so its BUSY comes on time; the next
+ * update waits for it (a stall time at most, or BUSY), and never starts a
+ * transaction before it is done: the lock is told apart by its content, which
+ * a retried update's identical commit would share.
  */
 export class RefUpdater {
   private session: Session | null = null;
   private tail: Promise<unknown> = Promise.resolve();
   /** Sessions whose git is exiting. */
   private readonly ending = new Set<Promise<void>>();
+  /** Removing the ref locks killed or dead gits left, once they have exited; null when there is nothing to remove. */
+  private cleanup: Promise<void> | null = null;
   private closed = false;
   private readonly packedRefs: () => Promise<string>;
   private readonly stall: StallLimit;
+  private readonly settle: StallLimit;
   private reftable: Promise<boolean> | null = null;
 
   constructor(
@@ -99,12 +114,14 @@ export class RefUpdater {
   ) {
     this.packedRefs = options.packedRefs ?? (() => packedRefsStamp(location.commonDir));
     this.stall = options.stallMs ?? GIT_STALL_MS;
+    this.settle = options.settleMs ?? this.stall;
   }
 
   /**
    * Moves `ref` from `old` (the zero oid: create it) to `next`, atomically.
    * After `close`, the update still runs, on a git that exits right after it.
-   * GitStalledError: git got stuck before it could move the ref.
+   * GitStalledError: git got stuck before it could move the ref, or a git
+   * killed before it hasn't exited for a stall time (its lock may be left).
    */
   update(ref: string, next: string, old: string): Promise<RefUpdate> {
     const run = this.tail.then(() => this.transact(ref, next, old)).finally(() => {
@@ -129,6 +146,7 @@ export class RefUpdater {
   async close(): Promise<void> {
     this.closed = true;
     await this.tail;
+    await this.cleanup;
     if (this.session) this.end(this.session);
     this.session = null;
     await Promise.all(this.ending);
@@ -141,7 +159,7 @@ export class RefUpdater {
   private end(session: Session): void {
     if (session.exited) return;
     setActive(session, true);
-    const stuck = setTimeout(() => killTree(session.child), stallOf(this.stall));
+    const stuck = setTimeout(() => killTree(session.child), stallOf(this.settle));
     const exited: Promise<void> = session.closed.finally(() => {
       clearTimeout(stuck);
       this.ending.delete(exited);
@@ -152,18 +170,19 @@ export class RefUpdater {
 
   private async transact(ref: string, next: string, old: string): Promise<RefUpdate> {
     for (let attempt = 1; ; attempt++) {
+      await this.cleaned();
       const session = this.ensureSession(await this.packedRefs());
       let result: Attempt;
       try {
         result = await this.attempt(session, ref, next, old);
         if (result.kind === 'unknown') result = (await this.landed(ref, next)) ? { kind: 'moved' } : { kind: 'lost' };
       } catch (error) {
-        await this.releaseLock(session, ref, next);
+        this.cleanUp(session, ref, next);
         throw error;
       }
       if (result.kind === 'moved') return { moved: true };
       if (result.kind === 'refused') return { moved: false, stderr: result.stderr };
-      await this.releaseLock(session, ref, next);
+      this.cleanUp(session, ref, next);
       if (result.kind === 'stalled') throw new GitStalledError('update-ref --stdin', result.stallMs);
       // Lost: start over on a new git (this one's packed-refs can't be trusted, or it is gone).
       if (this.session === session) this.session = null;
@@ -172,10 +191,28 @@ export class RefUpdater {
     }
   }
 
+  /** Removes the ref lock `session`'s git may have left (see `releaseLock`), after any removal already under way. */
+  private cleanUp(session: Session, ref: string, next: string): void {
+    const cleanup: Promise<void> = (this.cleanup ?? Promise.resolve())
+      .then(() => this.releaseLock(session, ref, next))
+      .catch(() => {})
+      .finally(() => {
+        if (this.cleanup === cleanup) this.cleanup = null;
+      });
+    this.cleanup = cleanup;
+  }
+
+  /** Waits until no lock a killed git left is still to be removed: GitStalledError when that takes a stall time. */
+  private async cleaned(): Promise<void> {
+    if (!this.cleanup) return;
+    const stallMs = stallOf(this.stall);
+    if (!(await settlesWithin(this.cleanup, stallMs))) throw new GitStalledError('update-ref --stdin', stallMs);
+  }
+
   /** Whether `ref` holds `next`, asked of a new git: `next` is new, so only this update can have put it there. */
   private async landed(ref: string, next: string): Promise<boolean> {
     const run = await runGit(this.location.root, ['for-each-ref', '--contains', next, '--format=%(refname)', ref], {
-      stallMs: this.stall,
+      stallMs: this.settle,
     }).catch((error: unknown) => {
       // Not BUSY, which would promise that the ref did not move.
       throw new Error(`could not tell whether ${ref} moved to ${next}: ${(error as Error).message}`);
@@ -211,7 +248,7 @@ export class RefUpdater {
   private async releaseLock(session: Session, ref: string, next: string): Promise<void> {
     if (!session.exited) {
       if (session.killedAt === null) return;
-      if (!(await exitWithin(session, session.killedAt + stallOf(this.stall) - Date.now()))) return;
+      if (!(await exitWithin(session, session.killedAt + stallOf(this.settle) - Date.now()))) return;
     }
     const lock = await this.lockPath(ref);
     const ours =
@@ -266,10 +303,10 @@ export class RefUpdater {
         if (this.session === session) this.session = null;
         killTree(session.child);
       };
-      // git has the stall time to answer each step, or it is killed.
+      // git has the stall time to answer each step (once told to commit, the settle time), or it is killed.
       const watch = () => {
         clearTimeout(watchdog);
-        const stallMs = stallOf(this.stall);
+        const stallMs = stallOf(told === 'commit' ? this.settle : this.stall);
         watchdog = setTimeout(() => {
           kill();
           if (told !== 'commit') return finish({ kind: 'stalled', stallMs });
@@ -374,11 +411,15 @@ export class RefUpdater {
 
 /** Whether the session's git exits within `ms`. */
 async function exitWithin(session: Session, ms: number): Promise<boolean> {
-  if (session.exited) return true;
+  return session.exited || (await settlesWithin(session.closed, ms));
+}
+
+/** Whether `promise` settles within `ms`. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, ms))));
   try {
-    return await Promise.race([session.closed.then(() => true), late]);
+    return await Promise.race([promise.then(() => true, () => true), late]);
   } finally {
     clearTimeout(timer);
   }
