@@ -70,14 +70,19 @@ export interface RetiredIds {
 const NONE_RETIRED: RetiredIds = { forwardOf: () => undefined, deletion: () => undefined };
 
 /**
- * The live record a full id names: itself, or the one side of a collision, or
- * the side its forwarding record names. Several unforwarded sides give
- * AMBIGUOUS_REF (until `resolve`), and a deleted or unknown id NOT_FOUND.
+ * The live record a full id names: itself, or the side its forwarding record
+ * names, or the one side of a collision. A forwarding record is final: when
+ * its record was deleted the id is NOT_FOUND ("deleted"), never the other
+ * side. Several unforwarded sides give AMBIGUOUS_REF (until `resolve`), and a
+ * deleted or unknown id NOT_FOUND.
  */
 function liveRecord(input: string, id: string, ids: ReadonlySet<string>, retired: RetiredIds, field: string): string {
   if (ids.has(id)) return id;
   const forward = retired.forwardOf(id);
-  if (forward !== undefined && ids.has(forward)) return forward;
+  if (forward !== undefined) {
+    if (ids.has(forward)) return forward;
+    throw notFound(field, id, retired.deletion(forward) ?? retired.deletion(id));
+  }
   const sides = collisionSides(id, ids);
   if (sides.length === 1) return sides[0]!;
   if (sides.length > 1) throw ambiguous(input, sides);
@@ -112,6 +117,8 @@ export function resolveReadRef(input: string, ids: ReadonlySet<string>, field: s
   }
   const full = ID_PREFIX + token.suffix + token.side;
   if (ids.has(full)) return full;
+  // A forwarded bare id names its record, whatever records its prefix matches.
+  if (retired.forwardOf(full) !== undefined) return liveRecord(input, full, ids, retired, field);
   const matches = [...ids].filter((id) => id.startsWith(full)).sort();
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) {

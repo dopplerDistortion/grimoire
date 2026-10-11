@@ -108,6 +108,102 @@ describe('resolving an id collision', () => {
     expect(await bobCore.call('show', { ref: 'gr-k1m0x' }, bob)).toMatchObject({ ok: true, result: { id: mine, title: 'Alice’s, kept' } });
   });
 
+  test('relations written under the bare id before the collision name the kept record: its children, claim, list and delete', async ({
+    world,
+    grimoire,
+  }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x', 'k1d00', 'wa1t5') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    await createIssue(aliceCore, alice, { title: 'Alice’s k1m0x' });
+    const kid = await createIssue(aliceCore, alice, { title: 'Kid', parent: 'gr-k1m0x' });
+    const waiting = await createIssue(aliceCore, alice, { title: 'Waits', blocked_by: ['gr-k1m0x'] });
+    await createIssue(bobCore, bob, { title: 'Bob’s k1m0x' });
+    await bobPublishes(world);
+    const { core } = grimoire;
+    const { mine } = await collisionSides(core, alice);
+    expect(await core.call('resolve', { id: 'gr-k1m0x', keep: mine }, terminal(alice))).toMatchObject({ ok: true });
+
+    const shown = await core.call('show', { ref: mine }, alice);
+    const listed = await core.call('list', { parent: mine }, alice);
+    const listedBare = await core.call('list', { parent: 'gr-k1m0x' }, alice);
+    const [claimed, withKid] = await expectRefUnmoved(world.a, async () => [
+      await core.call('claim', { id: mine }, alice),
+      await core.call('delete', { id: mine }, terminal(alice)),
+    ]);
+
+    expect(shown).toMatchObject({ ok: true, result: { children: [{ id: kid, title: 'Kid', status: 'open' }], ready: false } });
+    for (const outcome of [listed, listedBare]) expect(outcome).toMatchObject({ ok: true, result: { rows: [{ id: kid }], total: 1 } });
+    expect(claimed).toMatchObject({ ok: false, error: { code: 'HAS_OPEN_CHILDREN' } });
+    expect(withKid).toMatchObject({ ok: false, error: { code: 'INVALID', details: { sub_issues: [kid] } } });
+
+    // With the kid moved away, the delete strips the bare id from Waits too.
+    expect(await core.call('update', { id: kid, parent: null }, alice)).toMatchObject({ ok: true });
+    const deleted = await core.call('delete', { id: 'gr-k1m0x' }, terminal(alice));
+
+    expect(deleted).toEqual({ ok: true, result: { id: mine, deleted: true, blocked_by_stripped: [{ id: waiting, blocked_by: [] }] } });
+    expect(await core.call('show', { ref: waiting }, alice)).toMatchObject({ ok: true, result: { blocked_by: [], ready: true } });
+  });
+
+  test('reopening the kept record lists what waits for it by the bare id; a blocker cycle through the bare id is refused', async ({
+    world,
+    grimoire,
+  }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('ep1c0', 'k1m0x', 'wa1t5') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    await createIssue(aliceCore, alice, { title: 'Epic' });
+    await createIssue(aliceCore, alice, { title: 'Alice’s k1m0x', parent: 'gr-ep1c0' });
+    const waiting = await createIssue(aliceCore, alice, { title: 'Waits', blocked_by: ['gr-k1m0x'] });
+    await createIssue(bobCore, bob, { title: 'Bob’s k1m0x' });
+    await bobPublishes(world);
+    const { core } = grimoire;
+    const { mine } = await collisionSides(core, alice);
+    await core.call('resolve', { id: 'gr-k1m0x', keep: mine }, terminal(alice));
+
+    const cycle = await expectRefUnmoved(world.a, () => core.call('update', { id: mine, blocked_by_add: [waiting] }, alice));
+    await core.call('close', { id: mine, reason: 'done' }, terminal(alice));
+    const reopened = await core.call('reopen', { id: mine, comment: 'Not done.' }, terminal(alice));
+
+    expect(cycle).toMatchObject({ ok: false, error: { code: 'CYCLE' } });
+    expect(reopened).toMatchObject({
+      ok: true,
+      result: {
+        reblocked: [
+          { id: waiting, title: 'Waits', via: 'blocked_by' },
+          { id: 'gr-ep1c0', title: 'Epic', via: 'parent' },
+        ],
+      },
+    });
+  });
+
+  test('once the kept record is deleted, the bare id answers “deleted” and never falls to the other record', async ({ world, grimoire }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    await createIssue(aliceCore, alice, { title: 'Alice’s k1m0x' });
+    await createIssue(bobCore, bob, { title: 'Bob’s k1m0x' });
+    await bobPublishes(world);
+    const { core } = grimoire;
+    const { mine, theirs } = await collisionSides(core, alice);
+    await core.call('resolve', { id: 'gr-k1m0x', keep: mine }, terminal(alice));
+    expect(await core.call('delete', { id: mine }, terminal(alice))).toMatchObject({ ok: true });
+
+    const shown = await core.call('show', { ref: 'gr-k1m0x' }, alice);
+    const linked = await core.call('show', { ref: 'see gr-k1m0x' }, alice);
+    const write = await expectRefUnmoved(world.a, () => core.call('comment', { id: 'gr-k1m0x', body: 'whose?' }, alice));
+
+    for (const outcome of [shown, linked, write]) {
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: expect.stringContaining('was deleted'), details: { deleted: { by: 'alice@example.com' } } },
+      });
+    }
+    // The other record is still there under its own id, and a prefix still finds it.
+    expect(await core.call('show', { ref: theirs }, alice)).toMatchObject({ ok: true, result: { title: 'Bob’s k1m0x' } });
+    expect(await core.call('show', { ref: 'gr-k1m' }, alice)).toMatchObject({ ok: true, result: { id: theirs } });
+  });
+
   test('keep may name the record by its hash4 alone; a bare id with no collision is refused', async ({ world, grimoire }) => {
     const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x', 'solo1') });
     const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });

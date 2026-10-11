@@ -6,7 +6,7 @@
 // reachable as `<id>~<hash4>`.
 import { GrimoireError, invalid } from '../errors';
 import { collisionSides, issueRevision, parseWriteRef, type IssueRecord, type TrackerDraft } from '../tracker';
-import { fieldConflict, findCycle, OPEN_ATTEMPTS_FIELD } from './derive';
+import { fieldConflict, findCycle, namedIn, OPEN_ATTEMPTS_FIELD } from './derive';
 import { removeIssue } from './human-ops';
 import { recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
@@ -60,6 +60,7 @@ function theirValue(draft: TrackerDraft, record: IssueRecord, field: string, val
       const cycle = findCycle(
         draft.issues().map((issue) => (issue.id === record.id ? next : issue)),
         record.id,
+        namedIn(draft),
       );
       if (cycle) throw new GrimoireError('CYCLE', `that would make a cycle (each waits for the next): ${cycle.join(' → ')}`, { path: cycle });
       return { parent };

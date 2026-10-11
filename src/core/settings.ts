@@ -62,16 +62,13 @@ const linkBase: Pick<SettingSpec, 'parse' | 'why'> = {
 };
 
 /**
- * Every setting this release knows, by key. Tickets that add a setting add it
- * here; a tracker's keys this release doesn't know are still shown and kept.
+ * Every setting this release knows, by key. The part of grimoire a setting
+ * governs adds it here, with whatever a change must do in the same commit
+ * (the excerpt mode, the delivery switch, the loop pause and the chore and
+ * skill thresholds come with their tickets). A tracker's keys this release
+ * doesn't know are still shown and kept.
  */
-const SETTINGS: Readonly<Record<string, SettingSpec>> = {
-  excerpts: {
-    scope: 'store',
-    description: 'what traces commit: excerpts, facts (no excerpt text) or none (no transcript is opened)',
-    fallback: () => 'facts',
-    ...oneOf(['excerpts', 'facts', 'none']),
-  },
+const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(Object.entries({
   'auto-sync': {
     scope: 'store',
     description: 'whether grimoire syncs the tracker on its own; `grimoire sync` always works',
@@ -83,30 +80,6 @@ const SETTINGS: Readonly<Record<string, SettingSpec>> = {
     description: 'the URL `link` puts before a record’s path (empty: `link` is the bare id)',
     fallback: () => '',
     ...linkBase,
-  },
-  delivery: {
-    scope: 'store',
-    description: 'whether evolved skills reach working agents',
-    fallback: () => 'on',
-    ...oneOf(['on', 'off']),
-  },
-  'knowledge.loop': {
-    scope: 'store',
-    description: 'whether new knowledge chores become due',
-    fallback: () => 'on',
-    ...oneOf(['on', 'paused']),
-  },
-  'skills.max_active': {
-    scope: 'store',
-    description: 'the most evolved skills active at once',
-    fallback: () => 8,
-    ...wholeNumber(1, 100),
-  },
-  'skills.description_max': {
-    scope: 'store',
-    description: 'the longest evolved skill description, in characters',
-    fallback: () => 300,
-    ...wholeNumber(1, 1024),
   },
   'knowledge.pickup': {
     scope: 'machine',
@@ -133,7 +106,7 @@ const SETTINGS: Readonly<Record<string, SettingSpec>> = {
     fallback: () => 'excerpts',
     ...oneOf(['excerpts', 'facts', 'none']),
   },
-};
+} satisfies Record<string, SettingSpec>));
 
 /** One setting as `settings_get` shows it. */
 export interface ShownSetting {
@@ -155,7 +128,7 @@ export interface SettingsResult {
 }
 
 function unknownKey(key: string): never {
-  throw invalid({ key: `"${key}" is not a setting; settings are ${Object.keys(SETTINGS).join(', ')}` });
+  throw invalid({ key: `"${key}" is not a setting; settings are ${[...SETTINGS.keys()].join(', ')}` });
 }
 
 export const settingsGet = define({
@@ -173,8 +146,8 @@ export const settingsGet = define({
     const result: SettingsResult = { store: {}, machine: {} };
     const stored = view.settings();
     const wanted = (key: string) => input.key === undefined || input.key === key;
-    if (input.key !== undefined && !(input.key in SETTINGS) && !stored.has(input.key)) unknownKey(input.key);
-    for (const [key, spec] of Object.entries(SETTINGS)) {
+    if (input.key !== undefined && !SETTINGS.has(input.key) && !stored.has(input.key)) unknownKey(input.key);
+    for (const [key, spec] of SETTINGS) {
       if (!wanted(key)) continue;
       if (spec.scope === 'store') {
         const setting = stored.get(key);
@@ -189,9 +162,11 @@ export const settingsGet = define({
             : { value, default: false, description: spec.description };
       }
     }
-    // Keys a newer release set are shown as they are.
+    // Keys a newer release set are shown as they are (as own properties, whatever the tracker named them).
     for (const [key, setting] of stored) {
-      if (!(key in SETTINGS) && wanted(key)) result.store[key] = { value: setting.value, default: false, at: setting.at, by: setting.by };
+      if (SETTINGS.has(key) || !wanted(key)) continue;
+      const shown: ShownSetting = { value: setting.value, default: false, at: setting.at, by: setting.by };
+      Object.defineProperty(result.store, key, { value: shown, enumerable: true, writable: true, configurable: true });
     }
     return result;
   },
@@ -223,7 +198,7 @@ export const settingsSet = define({
   replay: 'none',
   input: s.object({ key: s.string(oneLine), value: scalar }),
   async run(input, { ctx, tracker, actor }): Promise<SettingsSetResult> {
-    const spec = SETTINGS[input.key] ?? unknownKey(input.key);
+    const spec = SETTINGS.get(input.key) ?? unknownKey(input.key);
     const value = spec.parse(input.value);
     if (value === undefined) throw invalid({ value: `${input.key} ${spec.why}` });
     if (spec.scope === 'machine') {
@@ -234,7 +209,7 @@ export const settingsSet = define({
       return { key: input.key, scope: 'machine', value, changed };
     }
     const author = writer(ctx);
-    const write = await tracker.transact({ op: 'settings_set', author, actor }, (draft) => {
+    const write = await tracker.transact({ op: 'settings-set', author, actor }, (draft) => {
       const current = draft.settings().get(input.key);
       if (current && JSON.stringify(current.value) === JSON.stringify(value)) {
         return { result: { key: input.key, scope: 'store' as const, value, changed: false, at: current.at, by: current.by } };

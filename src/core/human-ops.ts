@@ -5,7 +5,7 @@
 import { GrimoireError, invalid } from '../errors';
 import { parseWriteRef, type AttemptRecord, type TrackerDraft } from '../tracker';
 import { checkClaimable, parseHandle, recordedActor, sealOpenAttempt } from './attempts';
-import { openAttemptsOf } from './derive';
+import { fieldConflict, issueConflict, namesIssue, openAttemptsOf, relatedIssue, stateConflict } from './derive';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
 
@@ -62,37 +62,30 @@ export interface ReassignResult extends AssignResult {
 export const reassign = define({
   name: 'reassign',
   description:
-    'Hand a claimed issue to another person: ends the open attempt as reassign (its outcome is fail) and opens one on their behalf, in one commit. Name the attempt when two are open. Human-only.',
+    'Hand a claimed issue to another person: ends its open attempt as reassign (its outcome is fail) and opens one on their behalf, in one commit. With two open attempts (claims made on different clones), release one as abandoned first. Human-only.',
   kind: 'write',
   policy: 'human-only',
   replay: 'none',
-  input: s.object({
-    id: idInput,
-    assignee: personInput,
-    attempt: s.optional(s.string({ ...oneLine, description: 'the open attempt to end (needed only when two are open)' })),
-  }),
+  input: s.object({ id: idInput, assignee: personInput }),
   async run(input, { ctx, tracker, actor }): Promise<ReassignResult> {
     const author = writer(ctx);
     const by = recordedActor(author.email, actor);
     const ref = parseWriteRef(input.id, 'id');
     const assignee = parseAssignee(input.assignee);
-    const handle = input.attempt === undefined ? undefined : parseHandle(input.attempt);
     const write = await tracker.transact({ op: 'reassign', author, actor }, (draft) => {
       const id = draft.resolveWrite(ref, 'id');
       const open = openAttemptsOf(draft, id);
-      let ending: AttemptRecord;
-      if (handle !== undefined) {
-        const named = open.find((attempt) => attempt.record.id === handle);
-        if (!named) throw invalid({ attempt: `${handle} is not an open attempt on ${id}` });
-        ending = named.record;
-      } else if (open.length === 0) {
-        throw invalid({ id: `nobody holds ${id}; assign it instead` });
-      } else if (open.length > 1) {
-        throw new GrimoireError('ATTEMPT_OPEN', `${id} has ${open.length} open attempts; name the one to end as \`attempt\``, {
-          attempt: open[0]!.record.id,
-          open_attempts: open.map((attempt) => attempt.record.id),
-        });
-      } else ending = open[0]!.record;
+      if (open.length === 0) throw invalid({ id: `nobody holds ${id}; assign it instead` });
+      if (open.length > 1) {
+        // A reassign ends one attempt and opens another (spec §19); which claim yields is the human's call.
+        const holders = open.map((attempt) => `${attempt.record.id} (${attempt.assignee})`).join(', ');
+        throw new GrimoireError(
+          'STATE_CONFLICT',
+          `${id} has ${open.length} open attempts, claimed on different clones: ${holders}; release one as abandoned first, then reassign the other`,
+          { conflict: issueConflict(draft, id, open) },
+        );
+      }
+      const ending = open[0]!.record;
       sealOpenAttempt(draft, ending.id, { ended: 'reassign', by, binds: false });
       checkClaimable(draft, id, author.email);
       const attempt = draft.openAttempt(id, { assignee, actor: by, opened: 'assign', wiki_exposed: false });
@@ -151,6 +144,9 @@ export const reopen = define({
       const id = draft.resolveWrite(ref, 'id');
       const issue = draft.issue(id)!;
       if (issue.status === 'open') throw invalid({ id: `${id} is already open` });
+      // A reopen writes status: a status the fold set aside is resolved first (spec §4).
+      const conflict = fieldConflict(draft, id);
+      if (conflict?.fields.includes('status')) throw stateConflict(id, conflict, 'it can’t be reopened');
       // Open and unassigned with no attempt: an attempt left open on the closed issue (after a fold) is superseded.
       for (const open of openAttemptsOf(draft, id)) sealOpenAttempt(draft, open.record.id, { ended: 'superseded', by, binds: false });
       const closing = closingAttempt(draft, id);
@@ -164,9 +160,9 @@ export const reopen = define({
       const comment = draft.addComment(id, { actor: by, kind: 'comment', body: input.comment });
       const reblocked: Reblocked[] = draft
         .issues()
-        .filter((other) => other.status === 'open' && other.blocked_by.includes(id))
+        .filter((other) => other.status === 'open' && other.blocked_by.some((blocker) => namesIssue(draft, blocker, id)))
         .map((other) => ({ id: other.id, title: other.title, via: 'blocked_by' }));
-      const parent = issue.parent === null ? undefined : draft.issue(issue.parent);
+      const parent = issue.parent === null ? undefined : relatedIssue(draft, issue.parent);
       if (parent?.status === 'open') reblocked.push({ id: parent.id, title: parent.title, via: 'parent' });
       return { result: { id, status: 'open' as const, comment: comment.id, outcome, reblocked }, issue: id };
     });
@@ -195,7 +191,7 @@ export function removeIssue(draft: TrackerDraft, id: string, person: string, by:
       attempt: open[0]!.record.id,
     });
   }
-  const children = draft.issues().filter((kid) => kid.parent === id);
+  const children = draft.issues().filter((kid) => kid.parent !== null && namesIssue(draft, kid.parent, id));
   if (children.length > 0) {
     const kids = children.map((kid) => kid.id);
     throw new GrimoireError('INVALID', `${id} has sub-issues (${kids.join(', ')}); delete or re-parent them first`, {
@@ -206,8 +202,9 @@ export function removeIssue(draft: TrackerDraft, id: string, person: string, by:
   const now = draft.now.toISOString();
   const stripped: DeleteResult['blocked_by_stripped'] = [];
   for (const other of draft.issues()) {
-    if (other.id === id || !other.blocked_by.includes(id)) continue;
-    const blockedBy = other.blocked_by.filter((blocker) => blocker !== id);
+    // A bare id written before a collision, whose forwarding record maps it here, goes too.
+    const blockedBy = other.blocked_by.filter((blocker) => !namesIssue(draft, blocker, id));
+    if (other.id === id || blockedBy.length === other.blocked_by.length) continue;
     draft.putIssue({ ...other, blocked_by: blockedBy, updated_at: now });
     draft.addActivity(other.id, { actor: by, fields: ['blocked_by'] });
     stripped.push({ id: other.id, blocked_by: blockedBy });
@@ -262,7 +259,7 @@ export const outcomeSet = define({
     const author = writer(ctx);
     const handle = parseHandle(input.attempt);
     const setBy = `human:${author.email}`;
-    const write = await tracker.transact({ op: 'outcome_set', author, actor }, (draft) => {
+    const write = await tracker.transact({ op: 'outcome-set', author, actor }, (draft) => {
       const record = draft.attempt(handle);
       if (!record) throw new GrimoireError('NOT_FOUND', `no attempt ${handle}`, { field: 'attempt', ref: handle });
       if (!record.end) throw invalid({ attempt: `${handle} is still open; an attempt gets its outcome when it ends` });

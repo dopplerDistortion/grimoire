@@ -21,7 +21,7 @@ export interface Person {
 
 /** Facts about one write that its commit records (spec §3, Commits). */
 export interface WriteSpec {
-  /** `Grimoire-Op`: create, update, comment, … */
+  /** `Grimoire-Op`: create, update, comment, …; a multi-word op is hyphenated (outcome-set, skill-edit). */
   readonly op: string;
   /** Author and committer. */
   readonly author: Person;

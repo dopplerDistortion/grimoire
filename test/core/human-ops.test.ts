@@ -3,6 +3,7 @@
 // delete and outcome overrides, refused from every agent surface.
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
+import type { GitWorld } from '#harness';
 import {
   agentContext,
   coreTest as test,
@@ -17,6 +18,14 @@ import {
 } from './support';
 
 const DEBRIEF = { asked: 'a', tried: 't', failed: 'none', worked: 'w', next: 'none' };
+const T1 = new Date(T0.getTime() + 60_000);
+
+/** Clone b takes clone a's tracker as its own: from here the two write apart until they fold. */
+async function bothClones(world: GitWorld): Promise<void> {
+  await pushTracker(world.a);
+  await fetchTracker(world.b);
+  await world.b.git(['update-ref', TRACKER_REF, 'refs/remotes/origin/grimoire/tracker']);
+}
 
 async function createIssue(core: Core, ctx: CallContext, input: Record<string, unknown>): Promise<string> {
   const created = await core.call('create', input, ctx);
@@ -176,6 +185,37 @@ describe('assign and reassign', () => {
     });
   });
 
+  test('with two open attempts after a fold, reassign is refused until one is released as abandoned', async ({ world, grimoire }) => {
+    const { core, ctx: alice } = grimoire;
+    const bobCore = grimoire.makeCore({ clock: () => T1 });
+    const bob = agentContext(world.b);
+    const id = await createIssue(core, alice, { title: 'Claimed twice' });
+    await bothClones(world);
+    const mine = await claim(core, alice, id);
+    const bobs = await claim(bobCore, bob, id);
+    await pushTracker(world.b);
+    await fetchTracker(world.a);
+
+    const refused = await expectRefUnmoved(world.a, async () => [
+      await core.call('reassign', { id, assignee: 'carol@example.com' }, terminal(alice)),
+      await core.call('reassign', { id, assignee: 'carol@example.com', attempt: bobs }, terminal(alice)),
+    ]);
+    await core.call('release', { id, attempt: bobs, abandoned: true }, terminal(alice));
+    const reassigned = await core.call('reassign', { id, assignee: 'carol@example.com' }, terminal(alice));
+
+    expect(refused[0]).toMatchObject({
+      ok: false,
+      error: {
+        code: 'STATE_CONFLICT',
+        message: expect.stringContaining('release one as abandoned'),
+        details: { conflict: { fields: ['open_attempts'], theirs: { open_attempts: [mine, bobs] }, base: { open_attempts: [] } } },
+      },
+    });
+    // There is no `attempt` input: a reassign ends the one open attempt.
+    expect(refused[1]).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { attempt: expect.any(String) } } } });
+    expect(reassigned).toMatchObject({ ok: true, result: { ended: mine, assignee: 'carol@example.com' } });
+  });
+
   test('reassign needs an attempt to end', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     const id = await createIssue(core, ctx, { title: 'Nobody’s' });
@@ -284,6 +324,55 @@ describe('reopen', () => {
     });
   });
 
+  test('an attempt left open on the closed issue by a fold is superseded, so the issue reopens with no attempt', async ({ world, grimoire }) => {
+    const { core, ctx: alice } = grimoire;
+    const bobCore = grimoire.makeCore({ clock: () => T1 });
+    const bob = agentContext(world.b);
+    const id = await createIssue(core, alice, { title: 'Closed here, claimed there' });
+    await bothClones(world);
+    const mine = await claim(core, alice, id);
+    await core.call('close', { id, reason: 'done', attempt: mine, debrief: DEBRIEF }, alice);
+    const bobs = await claim(bobCore, bob, id);
+    await pushTracker(world.b);
+    await fetchTracker(world.a);
+    expect(await core.call('show', { ref: id }, alice)).toMatchObject({ ok: true, result: { status: 'done', open_attempts: [{ attempt: bobs }] } });
+
+    const reopened = await core.call('reopen', { id, comment: 'Bob is still on it.' }, terminal(alice));
+
+    expect(reopened).toMatchObject({ ok: true, result: { status: 'open', outcome: { attempt: mine, from: 'pass', to: 'fail' } } });
+    const shown = await core.call('show', { ref: id }, alice);
+    expect(shown).toMatchObject({ ok: true, result: { status: 'open', assignee: null, open_attempts: [], ready: true } });
+    const past = shown.ok ? shown.result.past_attempts : [];
+    expect(past).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ attempt: mine, ended: 'done', outcome: expect.objectContaining({ verdict: 'fail', reason: 'reopened' }) }),
+        expect.objectContaining({
+          attempt: bobs,
+          ended: 'superseded',
+          ended_by: 'alice@example.com',
+          outcome: expect.objectContaining({ verdict: 'none', reason: 'superseded' }),
+        }),
+      ]),
+    );
+  });
+
+  test('a status the fold set aside must be resolved before a reopen', async ({ world, grimoire }) => {
+    const { core, ctx: alice } = grimoire;
+    const bobCore = grimoire.makeCore({ clock: () => T1 });
+    const bob = terminal(agentContext(world.b));
+    const id = await createIssue(core, alice, { title: 'Closed two ways' });
+    await bothClones(world);
+    await core.call('close', { id, reason: 'done' }, terminal(alice));
+    await bobCore.call('close', { id, reason: 'canceled' }, bob);
+    await pushTracker(world.b);
+    await fetchTracker(world.a);
+    expect(await core.call('show', { ref: id }, alice)).toMatchObject({ ok: true, result: { conflict: { fields: ['status'] } } });
+
+    const refused = await expectRefUnmoved(world.a, () => core.call('reopen', { id, comment: 'Neither.' }, terminal(alice)));
+
+    expect(refused).toMatchObject({ ok: false, error: { code: 'STATE_CONFLICT', details: { conflict: { fields: ['status'] } } } });
+  });
+
   test('an open issue can’t be reopened', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     const id = await createIssue(core, ctx, { title: 'Open' });
@@ -378,7 +467,7 @@ describe('delete', () => {
     const { ctx } = grimoire;
     const core = grimoire.makeCore({ randomIdSuffix: suffixQueue('d0med', 'd0med', 'fresh') });
     expect(await createIssue(core, ctx, { title: 'First' })).toBe('gr-d0med');
-    await core.call('delete', { id: 'gr-d0med' }, terminal(ctx));
+    expect(await core.call('delete', { id: 'gr-d0med' }, terminal(ctx))).toMatchObject({ ok: true, result: { deleted: true } });
 
     const next = await core.call('create', { title: 'Second' }, ctx);
 
@@ -418,7 +507,10 @@ describe('outcome overrides', () => {
       result: { past_attempts: [{ attempt, outcome: { verdict: 'fail', reason: 'tests were skipped', set_by: 'human:alice@example.com' } }] },
     });
     const tip = (await trackerTip(world.a))!;
-    expect(await world.a.git(['log', '-1', '--format=%B', tip])).toMatch(/^Grimoire-Actor: \{"kind":"human","client":"dashboard",/m);
+    const message = await world.a.git(['log', '-1', '--format=%B', tip]);
+    expect(message).toMatch(/^Grimoire-Actor: \{"kind":"human","client":"dashboard",/m);
+    // Trailer ops are hyphenated, like skill-edit and wiki-edit (spec §3, Commits).
+    expect(message).toMatch(/^Grimoire-Op: outcome-set$/m);
   });
 
   test('an open attempt has no outcome to override, and an unknown handle is NOT_FOUND', async ({ world, grimoire }) => {

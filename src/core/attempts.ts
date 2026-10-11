@@ -14,7 +14,7 @@ import {
   type Verdict,
 } from '../tracker';
 import { humanSurface, type Actor } from './context';
-import { fieldConflict, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
+import { fieldConflict, namesIssue, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
 import { define, oneLine, writer, type OpEnv } from './op';
 import { applyPatch, patchOps, type PatchOp } from './patch';
 import { s } from './schema';
@@ -76,7 +76,7 @@ export function checkClaimable(view: TrackerView, id: string, person: string): v
   const conflict = fieldConflict(view, id);
   if (conflict) throw stateConflict(id, conflict, 'it can’t be claimed');
   if (issue.status !== 'open') throw new GrimoireError('NOT_OPEN', `${id} is ${issue.status}, not open`);
-  const openChildren = view.issues().filter((kid) => kid.parent === id && kid.status === 'open');
+  const openChildren = view.issues().filter((kid) => kid.parent !== null && namesIssue(view, kid.parent, id) && kid.status === 'open');
   if (openChildren.length > 0) {
     throw new GrimoireError(
       'HAS_OPEN_CHILDREN',
