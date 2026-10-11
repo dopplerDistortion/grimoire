@@ -22,6 +22,14 @@ _Avoid_: Installed version, current version, lock
 A person's setup of grimoire on their own machine for one clone of a host repo and the pinned version its checkout names; it is needed before grimoire runs in that clone and again for each new pinned version, and it is the only step that downloads grimoire.
 _Avoid_: Install, setup, onboarding
 
+**Version copy**:
+One grimoire release unpacked into a clone's git common directory and shared by every worktree of that clone; a join installs the copy its checkout pins, and agent clients only ever run grimoire from such a copy.
+_Avoid_: Install, cache, vendored copy
+
+**Launcher**:
+The small machine-local program that every agent-client entry and the dotfolder's command-line runner go through, which runs the version copy a checkout pins once the clone has joined that version, and otherwise says how to join.
+_Avoid_: Loader, wrapper
+
 **Upgrade**:
 A human's move of one checkout to a new pinned version, together with any change to the shape of grimoire's data that the new version needs; other branches take it through git like any change, and other machines through a join.
 _Avoid_: Update, bump, migration

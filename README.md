@@ -22,7 +22,7 @@ npm ci              # install the dev toolchain (grimoire has no runtime depende
 npm run check       # the full local check, the CI equivalent (below)
 npm test            # Vitest only
 npm run typecheck   # tsc, for the Node side and the dashboard
-npm run build       # dist/grimoire.mjs + dist/chunks/ (esbuild) and dist/dashboard/ (Vite)
+npm run build       # dist/grimoire.mjs, dist/launch.mjs + dist/chunks/ (esbuild) and dist/dashboard/ (Vite)
 ```
 
 `npm run check` runs four steps in order and prints a summary: `typecheck`,
@@ -70,7 +70,19 @@ op `<noun>_<verb>`), driven by the op's input schema: the input is a JSON object
 on stdin (`--input -`), flags and arguments are sugar for its plain fields (a
 field that isn't plain takes JSON on its flag), and stdout is always one JSON object (exit 0, 1 with an `error` object, 2 for a
 usage error). `grimoire <verb> --help` prints the schema and flags. A human-only
-verb's typed confirmation is registered in `src/surfaces/cli/gate.ts`. The dashboard (Preact) lives in
+verb's typed confirmation is registered in `src/surfaces/cli/gate.ts`.
+
+Agent clients never run the bin. Every client entry runs the frozen bootstrap
+(`src/installer/bootstrap.ts`), which requires the clone's launcher
+(`src/installer/launcher.cjs`, written to `<git-common-dir>/grimoire/`), which
+imports the pinned version copy's `dist/launch.mjs` (`src/surfaces/launch.ts`);
+the committed shell shim (`src/installer/run.cjs`) does the same for CLI verbs.
+Run directly, the bin hands every verb but `init`, `leave` and `uninstall` to
+that copy too (`src/surfaces/delegate.ts`), or exits 3 with the join command.
+A hook verb always exits 0 and swallows its own failures; set `GRIMOIRE_DEBUG=1`
+to see them on stderr.
+
+The dashboard (Preact) lives in
 `src/surfaces/dashboard/`, and `npm run dev:dashboard` serves it.
 
 Tests are `*.test.ts` files, either next to the module they test or under `test/`.
