@@ -2,12 +2,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { cleanGitEnv, NO_HOOKS } from './run';
 
 export interface GitObject {
+  /** The object's oid: what the requested name resolved to. */
+  oid: string;
   type: string;
   content: Buffer;
 }
 
 interface Pending {
-  oid: string;
   resolve(object: GitObject | null): void;
   reject(error: Error): void;
 }
@@ -15,6 +16,8 @@ interface Pending {
 /**
  * One long-lived `git cat-file --batch` per repository: reads cost a pipe round
  * trip, not a process. Requests are answered in order, so callers may pipeline.
+ * A request may name a ref: git resolves it when it reads the request (loose
+ * refs and reftable fresh each time, packed-refs only when its stat changed).
  * The process is unref'd while idle, so it never keeps Node alive; `close()`
  * ends it. A crashed process fails its pending reads and is respawned on the
  * next read.
@@ -26,13 +29,13 @@ export class ObjectReader {
 
   constructor(private readonly cwd: string) {}
 
-  /** Reads an object, or null when the repository doesn't have it. */
-  read(oid: string): Promise<GitObject | null> {
+  /** Reads the object `name` (an oid or a full ref name) names, or null when there is none. */
+  read(name: string): Promise<GitObject | null> {
     return new Promise((resolve, reject) => {
       const child = this.ensureChild();
-      this.pending.push({ oid, resolve, reject });
+      this.pending.push({ resolve, reject });
       this.setActive(true);
-      child.stdin.write(`${oid}\n`);
+      child.stdin.write(`${name}\n`);
     });
   }
 
@@ -107,14 +110,14 @@ export class ObjectReader {
         head.resolve(null);
         continue;
       }
-      const [, type, size] = header.split(' ');
+      const [oid, type, size] = header.split(' ');
       const length = Number(size);
       const end = newline + 1 + length;
       if (this.buffer.length < end + 1) break;
       const content = Buffer.from(this.buffer.subarray(newline + 1, end));
       this.buffer = this.buffer.subarray(end + 1);
       this.pending.shift();
-      head.resolve({ type: type ?? '', content });
+      head.resolve({ oid: oid ?? '', type: type ?? '', content });
     }
     if (this.pending.length === 0) this.setActive(false);
   }

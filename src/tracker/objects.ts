@@ -1,6 +1,7 @@
 // Cached reads of tracker objects through one long-lived `git cat-file --batch`,
-// and in-process writes of new blobs, trees and commits. Objects are immutable,
-// so every cache is keyed by oid and never invalidated.
+// which also resolves refs, and in-process writes of new blobs, trees and
+// commits. Objects are immutable, so every cache is keyed by oid and never
+// invalidated; refs are never cached.
 //
 // A fold builds its merged tree in memory (`VirtualObjects`): the same oids git
 // would give the objects, computed without writing anything, so reads never
@@ -132,7 +133,11 @@ async function editTreeWith(
 }
 
 export class TrackerObjects extends ObjectSource {
-  private readonly reader: ObjectReader;
+  private reader: ObjectReader;
+  /** Readers being shut down after a restart. */
+  private readonly retiring = new Set<Promise<void>>();
+  /** The packed-refs stamp when the current reader first resolved refs; undefined before. */
+  private refsStamp: string | undefined;
   private readonly trees = new BoundedMap<string, readonly TreeEntry[]>(20_000);
   private readonly blobs = new BoundedMap<string, Buffer>(20_000);
   private readonly commits = new BoundedMap<string, CommitHeader>(2_000);
@@ -142,7 +147,7 @@ export class TrackerObjects extends ObjectSource {
   };
 
   constructor(
-    repoDir: string,
+    private readonly repoDir: string,
     private readonly objectsDir: string,
     readonly format: ObjectFormat,
   ) {
@@ -154,8 +159,37 @@ export class TrackerObjects extends ObjectSource {
     this.reader.warm();
   }
 
-  close(): Promise<void> {
-    return this.reader.close();
+  async close(): Promise<void> {
+    await Promise.all([this.reader.close(), ...this.retiring]);
+  }
+
+  /**
+   * Resolves full ref names to oids (null: no such ref) through the long-lived
+   * reader, which reads refs fresh, except that it trusts its cached
+   * packed-refs while the file's stat looks unchanged to it. `packedRefs` is
+   * `packedRefsStamp`, taken just before: when it differs from the stamp of
+   * the reader's first ref lookup, a new reader answers instead.
+   */
+  async resolveRefs(names: readonly string[], packedRefs: string): Promise<(string | null)[]> {
+    if (this.refsStamp !== packedRefs) {
+      if (this.refsStamp !== undefined) this.restartReader();
+      this.refsStamp = packedRefs;
+    }
+    const objects = await Promise.all(names.map((name) => this.reader.read(name)));
+    return objects.map((object) => {
+      if (!object) return null;
+      if (object.type === 'commit' && !this.commits.has(object.oid)) {
+        this.commits.set(object.oid, decodeCommitHeader(object.content));
+      }
+      return object.oid;
+    });
+  }
+
+  private restartReader(): void {
+    const old = this.reader;
+    this.reader = new ObjectReader(this.repoDir);
+    const closing: Promise<void> = old.close().finally(() => this.retiring.delete(closing));
+    this.retiring.add(closing);
   }
 
   private async readObject(oid: string, type: ObjectType): Promise<Buffer> {

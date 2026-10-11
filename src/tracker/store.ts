@@ -4,6 +4,7 @@ import { GrimoireError } from '../errors';
 import { VERSION } from '../version';
 import { zeroOid } from '../git/objects';
 import { locateRepo, type RepoLocation } from '../git/repo';
+import { packedRefsStamp, RefUpdater } from '../git/refs';
 import { runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
@@ -99,10 +100,20 @@ export interface TrackerStore {
 export const DEFAULT_BUDGET_MS = 10_000;
 /** A ref lock older than this is stale: BUSY with `details.stale_lock` (spec §4). */
 export const STALE_REF_LOCK_MS = 30_000;
+/** How many commits `descends` walks before it leaves the question to `git merge-base`. */
+const ANCESTRY_WALK = 128;
 
 interface Tips {
   local: string | null;
   remote: string | null;
+}
+
+/** What the clone's config says about remotes. */
+interface RemoteConfig {
+  /** `grimoire.remote`, or null. */
+  readonly chosen: string | null;
+  /** The configured remotes' names, plus `grimoire.remote`'s: whose remote-tracking tracker counts. */
+  readonly names: readonly string[];
 }
 
 type RefMove = { moved: true } | { moved: false; staleLock?: { path: string; age_ms: number } };
@@ -140,7 +151,9 @@ class GitTrackerStore implements TrackerStore {
   private readonly clock: () => Date;
   private readonly randomSuffix: (length: number) => string;
   private readonly budgetMs: number;
-  private remoteConfig: { stamp: string; value: string | null } | null = null;
+  /** Moves the tracker ref for writes, through one long-lived git. */
+  private readonly updater: RefUpdater;
+  private remoteConfig: { stamp: string; value: RemoteConfig } | null = null;
   /** The latest comment time this store wrote: comment times never go back within a process. */
   private commentMs = 0;
 
@@ -151,13 +164,14 @@ class GitTrackerStore implements TrackerStore {
     this.objects = new TrackerObjects(location.root, path.join(location.commonDir, 'objects'), location.objectFormat);
     this.loader = new SnapshotLoader(this.objects);
     this.fairness = new FairnessLock(location.commonDir);
+    this.updater = new RefUpdater(location.root, 'grimoire: write');
     this.clock = options.clock ?? (() => new Date());
     this.randomSuffix = options.randomIdSuffix ?? randomIdSuffix;
     this.budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
   }
 
-  close(): Promise<void> {
-    return this.objects.close();
+  async close(): Promise<void> {
+    await Promise.all([this.objects.close(), this.updater.close()]);
   }
 
   now(): Date {
@@ -179,6 +193,7 @@ class GitTrackerStore implements TrackerStore {
     const deadline = Date.now() + this.budgetMs;
     this.objects.warm();
     const turn = await this.turnstile.run(deadline, async () => {
+      await this.prefetch();
       const lock = await this.fairness.acquire(deadline);
       if (!lock) throw busy('another grimoire write held the tracker for the whole write budget');
       try {
@@ -189,6 +204,22 @@ class GitTrackerStore implements TrackerStore {
     });
     if (!turn) throw busy('other writes in this process held the tracker for the whole write budget');
     return turn.value;
+  }
+
+  /**
+   * Gets both long-lived gits running and the current view cached before a
+   * write queues for the fairness lock, so the round inside the lock pays only
+   * for what changed since. Writes hold that lock one after another, so a git
+   * start or a cold snapshot inside it would delay every writer queued behind.
+   * Any failure here is the round's to report.
+   */
+  private async prefetch(): Promise<void> {
+    try {
+      this.updater.warm(await packedRefsStamp(this.location.commonDir));
+      await this.snapshotOf(await this.resolveTips());
+    } catch {
+      // The round resolves and loads again, and reports what went wrong.
+    }
   }
 
   async fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }> {
@@ -232,7 +263,7 @@ class GitTrackerStore implements TrackerStore {
         committer: { ...spec.author, when: now },
         message,
       });
-      const move = await this.moveRef(tips.local, commit, message.split('\n', 1)[0]!);
+      const move = await this.moveRef(tips.local, commit);
       if (move.moved) {
         this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
         return { result: outcome.result, commit, replayed: false };
@@ -269,7 +300,7 @@ class GitTrackerStore implements TrackerStore {
       committer: { ...spec.author, when: now },
       message,
     });
-    const move = await this.moveRef(null, commit, message.split('\n', 1)[0]!);
+    const move = await this.createRef(commit, message.split('\n', 1)[0]!);
     if (move.moved) return { root: commit, created: true };
     const raced = await existing();
     if (raced) return raced;
@@ -288,39 +319,45 @@ class GitTrackerStore implements TrackerStore {
     return `grimoire: ${spec.op}${issue ? ` ${issue}` : ''}\n\n${trailers.join('\n')}\n`;
   }
 
-  /** Both tracker tips, resolved fresh: never cached across calls (spec §4). */
+  /**
+   * Both tracker tips, resolved fresh: never cached across calls (spec §4).
+   * They are read through the long-lived object reader, not a new git process:
+   * every write resolves them inside the fairness lock, where a process start
+   * would be paid once per queued writer.
+   */
   private async resolveTips(): Promise<Tips> {
-    const run = await runGit(this.location.root, [
-      'for-each-ref',
-      '--format=%(objectname) %(refname)',
-      TRACKER_REF,
-      'refs/remotes/*/grimoire/tracker',
-    ]);
-    if (run.code !== 0) throw new Error(`git for-each-ref failed: ${run.stderr.trim()}`);
-    const refs = new Map<string, string>();
-    for (const line of run.stdout.toString('utf8').split(/\r?\n/)) {
-      const space = line.indexOf(' ');
-      if (space > 0) refs.set(line.slice(space + 1), line.slice(0, space));
-    }
-    const local = refs.get(TRACKER_REF) ?? null;
-    const remotes = [...refs.keys()]
-      .map((ref) => /^refs\/remotes\/(.+)\/grimoire\/tracker$/.exec(ref)?.[1])
-      .filter((name): name is string => name !== undefined)
-      .sort();
-    if (remotes.length === 0) return { local, remote: null };
+    // Taken before git reads any ref, so a packed-refs rewrite it might miss shows here.
+    const packedRefs = await packedRefsStamp(this.location.commonDir);
+    const { chosen, names } = await this.remotes();
+    const [local = null, ...remoteTips] = await this.objects.resolveRefs(
+      [TRACKER_REF, ...names.map(remoteTrackerRef)],
+      packedRefs,
+    );
+    const tracked = names.filter((_, i) => remoteTips[i] !== null).sort();
+    if (tracked.length === 0) return { local, remote: null };
     // `grimoire.remote`, else the remote that has the tracker (origin first).
-    const chosen = (await this.configuredRemote()) ?? (remotes.includes('origin') ? 'origin' : remotes[0]!);
-    return { local, remote: refs.get(remoteTrackerRef(chosen)) ?? null };
+    const pick = chosen ?? (tracked.includes('origin') ? 'origin' : tracked[0]!);
+    return { local, remote: remoteTips[names.indexOf(pick)] ?? null };
   }
 
-  /** `git config grimoire.remote`, re-read only when the clone's config file changes. */
-  private async configuredRemote(): Promise<string | null> {
+  /** The clone's remotes and `grimoire.remote`, re-read only when its config file changes. */
+  private async remotes(): Promise<RemoteConfig> {
     const info = await stat(path.join(this.location.commonDir, 'config')).catch(() => null);
     const stamp = info ? `${info.mtimeMs}:${info.size}` : 'none';
     if (this.remoteConfig?.stamp !== stamp) {
-      const run = await runGit(this.location.root, ['config', '--get', 'grimoire.remote']);
-      const value = run.code === 0 ? run.stdout.toString('utf8').trim() || null : null;
-      this.remoteConfig = { stamp, value };
+      const run = await runGit(this.location.root, ['config', '-z', '--get-regexp', '^(remote\\..+|grimoire\\.remote)$']);
+      let chosen: string | null = null;
+      const names = new Set<string>();
+      // `key\nvalue\0` per entry (`key\0` for a key with no value); exit 1: no such keys.
+      for (const entry of run.code === 0 ? run.stdout.toString('utf8').split('\0') : []) {
+        const newline = entry.indexOf('\n');
+        const key = newline < 0 ? entry : entry.slice(0, newline);
+        if (key === 'grimoire.remote') chosen = newline < 0 ? null : entry.slice(newline + 1).trim() || null;
+        const remote = /^remote\.(.+)\.[^.]+$/.exec(key)?.[1];
+        if (remote) names.add(remote);
+      }
+      if (chosen) names.add(chosen);
+      this.remoteConfig = { stamp, value: { chosen, names: [...names] } };
     }
     return this.remoteConfig.value;
   }
@@ -366,6 +403,10 @@ class GitTrackerStore implements TrackerStore {
   private async mergeBases(commits: readonly string[]): Promise<readonly string[]> {
     const key = commits.join(' ');
     let bases = this.bases.get(key);
+    if (!bases && commits.length === 2 && (await this.descends(commits[0]!, commits[1]!))) {
+      bases = [commits[1]!];
+      this.bases.set(key, bases);
+    }
     if (!bases) {
       const run = await runGit(this.location.root, ['merge-base', '--all', ...commits]);
       // Exit 1 with no output: unrelated histories, so the fold has no base.
@@ -379,6 +420,32 @@ class GitTrackerStore implements TrackerStore {
       this.bases.set(key, bases);
     }
     return bases;
+  }
+
+  /**
+   * Whether `tip` descends from `ancestor`, found by walking back from `tip`
+   * to `ancestor` or to a commit already known to descend from it. False when
+   * the walk gives up (after ANCESTRY_WALK commits) or can't read a commit:
+   * `git merge-base` decides then. Writes extend the tracker a commit or a
+   * few at a time, so a local tip ahead of the remote-tracking one usually
+   * takes a few cached reads here instead of a git process inside the
+   * fairness lock.
+   */
+  private async descends(tip: string, ancestor: string): Promise<boolean> {
+    const knownToDescend = (commit: string) =>
+      commit === ancestor || this.bases.get(`${commit} ${ancestor}`)?.join(' ') === ancestor;
+    const seen = new Set<string>();
+    try {
+      for (let frontier = [tip]; frontier.length > 0 && seen.size < ANCESTRY_WALK; ) {
+        if (frontier.some(knownToDescend)) return true;
+        for (const commit of frontier) seen.add(commit);
+        const headers = await Promise.all(frontier.map((commit) => this.objects.commit(commit)));
+        frontier = [...new Set(headers.flatMap((header) => header.parents))].filter((commit) => !seen.has(commit));
+      }
+    } catch {
+      // A commit missing here (a shallow or partial clone): git reports it.
+    }
+    return false;
   }
 
   /** Ids taken on either tip (live, deleted or forwarded), for minting. */
@@ -395,8 +462,22 @@ class GitTrackerStore implements TrackerStore {
     return run.stdout.toString('utf8').trim().split(/\r?\n/).pop()!;
   }
 
-  /** `update-ref <new> <old>`: the compare-and-set that publishes a round. */
-  private async moveRef(old: string | null, commit: string, subject: string): Promise<RefMove> {
+  /**
+   * `update <ref> <new> <old>`: the compare-and-set that publishes a round,
+   * through the long-lived updater (no process start inside the fairness lock).
+   */
+  private async moveRef(old: string | null, commit: string): Promise<RefMove> {
+    const update = await this.updater.update(
+      TRACKER_REF,
+      commit,
+      old ?? zeroOid(this.location.objectFormat),
+      await packedRefsStamp(this.location.commonDir),
+    );
+    return update.moved ? { moved: true } : this.failedMove(update.stderr);
+  }
+
+  /** Creates the tracker ref with a process of its own, so its reflog entry carries `subject`. */
+  private async createRef(commit: string, subject: string): Promise<RefMove> {
     const run = await runGit(this.location.root, [
       'update-ref',
       '--create-reflog',
@@ -404,10 +485,13 @@ class GitTrackerStore implements TrackerStore {
       subject,
       TRACKER_REF,
       commit,
-      old ?? zeroOid(this.location.objectFormat),
+      zeroOid(this.location.objectFormat),
     ]);
-    if (run.code === 0) return { moved: true };
-    const stderr = run.stderr;
+    return run.code === 0 ? { moved: true } : this.failedMove(run.stderr);
+  }
+
+  /** Why a ref update failed: lost the compare-and-set, or a ref lock (stale past ~30 s) blocked it. */
+  private async failedMove(stderr: string): Promise<RefMove> {
     if (/but expected|reference already exists|unable to resolve reference/i.test(stderr)) return { moved: false };
     const lockPath =
       /Unable to create '([^']+\.lock)'/.exec(stderr)?.[1] ??
