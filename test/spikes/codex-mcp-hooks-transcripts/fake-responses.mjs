@@ -7,10 +7,14 @@
 //
 // The model's behaviour is a PLAN embedded in the prompt:
 //   PLAN: [{"call":"<tool>","args":{...}}, {"calls":[...]}, {"say":"text"}]
-// For each request, the server finds the newest user message holding "PLAN:",
-// counts the tool outputs after it, and plays that step. Past the end it says
-// "done". A step may carry "tokens": N to report N total tokens (to trigger
-// auto-compaction). A request that is a compaction prompt gets a summary.
+// For each request, the server finds the newest user message holding "PLAN:"
+// and plays the next step of that plan for that thread: it counts the requests
+// already answered per (thread-id header, plan text), not the tool outputs.
+// Past the end it says "done". The input items after the plan message are used
+// only to fill in "$SESSION" (the last "session ID N") and "$AGENT" (the last
+// thread id). A step may carry "tokens": N to report N total tokens (to trigger
+// auto-compaction). A request whose x-codex-turn-metadata request_kind is
+// "compaction" gets a summary and doesn't advance the plan.
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';

@@ -38,6 +38,7 @@ Captured under a scripted model. Shared provenance and sanitizing are in
 | -- | -- |
 | `tools-call/` | One `codex exec` turn with the `initialize` (2025-06-18) / `tools/list` handshake and six `tools/call`s: `echo`, `big` (spike B's 24 KB cut), `which` (`structuredContent` and text differ), `boom` (the handler throws, so the server answers `-32603`), then two `echo`s the model issued in one response. Every call's `_meta` has `callId`, `threadId`, `sessionId`, `windowId`, `itemId`, `progressToken` and the `x-codex-turn-metadata` object. The matching rollout is `../transcripts/mcp-results/`. |
 | `subagent/` | A root thread that spawns a subagent (`spawn_agent`), with both threads calling `echo`. Codex started **two** server processes (`starts.jsonl`), and both appended to the same capture files, so `c2s.jsonl` interleaves two connections (each opens with its own `initialize`; request ids restart at 0). The child's calls have `threadId` ≠ `sessionId`. There is no `s2c.jsonl`: the replies of the two connections can't be paired by id. The matching rollouts are `../transcripts/subagent/`. |
+| `two-turns/` | Fix pass, under `C:\gok130`: one `codex app-server` thread (legacy history mode) with two turns, three `echo` calls in all, and one compaction in turn 1. Codex started **one** server process (`starts.jsonl`), so the process lives per thread, not per turn. The matching rollout is `../transcripts/compaction-legacy/`. |
 
 ## Spike F (GOK-131)
 

@@ -4,7 +4,7 @@ import { GrimoireError, invalid } from '../errors';
 import type { SecretScanner } from '../scanner';
 import { ATTEMPT_PATTERN, parseWriteRef, type AttemptRecord, type IssueRecord, type TrackerView, type Verdict } from '../tracker';
 import type { Actor } from './context';
-import { openAttemptsOf, type OpenAttemptFacts } from './derive';
+import { fieldConflict, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
 import { define, oneLine, writer, type OpEnv } from './op';
 import { applyPatch, patchOps, type PatchOp } from './patch';
 import { s } from './schema';
@@ -66,7 +66,7 @@ export interface ClaimResult {
 export const claim = define({
   name: 'claim',
   description:
-    'Claim an open, unassigned issue to work it yourself: opens an attempt and returns its handle. Claim only the leaf you are about to work; ALREADY_CLAIMED means move on.',
+    'Claim an open, unassigned grimoire issue to work it yourself: opens an attempt and returns its handle. Claim only the leaf you are about to work; ALREADY_CLAIMED means move on.',
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',
@@ -84,6 +84,8 @@ export const claim = define({
       const issue = draft.issue(id)!;
       const open = openAttemptsOf(draft, id);
       if (open.length > 0) throw alreadyClaimed(id, open, author.email);
+      const conflict = fieldConflict(draft, id);
+      if (conflict) throw stateConflict(id, conflict, 'it can’t be claimed');
       if (issue.status !== 'open') throw new GrimoireError('NOT_OPEN', `${id} is ${issue.status}, not open`);
       const openChildren = draft.issues().filter((kid) => kid.parent === id && kid.status === 'open');
       if (openChildren.length > 0) {
@@ -294,8 +296,8 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
         throw new GrimoireError('NOT_OPEN', `${id} is ${status}, not open`);
       }
     }
+    // Undefined only for your own open handle on an issue deleted elsewhere.
     const issue = draft.issue(id);
-    if (!issue) draft.resolveWrite(id, 'id');
     if (actor.kind === 'agent' && (ending === 'done' || ending === 'release') && !request.debrief) {
       throw new GrimoireError(
         'DEBRIEF_REQUIRED',
@@ -303,10 +305,10 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
       );
     }
     let parentEdit: { record: IssueRecord; body: string; noops: readonly number[] } | null = null;
-    if (request.parentPatch) {
-      if (issue!.parent === null) throw invalid({ parent_patch: `${id} has no parent` });
-      const parent = draft.issue(issue!.parent);
-      if (!parent) draft.resolveWrite(issue!.parent, 'parent_patch');
+    if (request.parentPatch && issue) {
+      if (issue.parent === null) throw invalid({ parent_patch: `${id} has no parent` });
+      const parent = draft.issue(issue.parent);
+      if (!parent) draft.resolveWrite(issue.parent, 'parent_patch');
       const patched = applyPatch(parent!.body, request.parentPatch);
       parentEdit = { record: parent!, body: patched.body, noops: patched.noops };
     }
@@ -329,14 +331,14 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
       ? draft.addComment(id, { actor: by, kind: 'debrief', body: renderDebrief(request.debrief, scanner), ...named }).id
       : null;
 
-    const superseded = issue!.status !== 'open';
+    const superseded = !issue || issue.status !== 'open';
     const ended = superseded ? 'superseded' : ending;
     const sealing = draft.attempt(handle)!;
     const fieldChanges = new Set(
       sealing.activity.flatMap((entry) => (entry.detail?.kind === 'update' ? entry.detail.fields : [])),
     );
-    if (!superseded && (ending === 'done' || ending === 'canceled')) {
-      draft.putIssue({ ...issue!, status: ending, updated_at: now });
+    if (issue && !superseded && (ending === 'done' || ending === 'canceled')) {
+      draft.putIssue({ ...issue, status: ending, updated_at: now });
       fieldChanges.add('status');
     }
     const binding = [...bindingActors(sealing), ...(binds ? [by] : [])];
@@ -352,10 +354,12 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     });
     const verdict = VERDICT[ended]!;
     draft.putOutcome(handle, { verdict, reason: ended, set_by: 'grimoire' });
-    const parentNoops = (parentEdit?.noops ?? []).map((op) => ({
-      field: `parent_patch[${op}]`,
-      reason: request.parentPatch![op]!.op === 'replace' ? 'unchanged' : 'text already present',
-    }));
+    const parentNoops = issue
+      ? (parentEdit?.noops ?? []).map((op) => ({
+          field: `parent_patch[${op}]`,
+          reason: request.parentPatch![op]!.op === 'replace' ? 'unchanged' : 'text already present',
+        }))
+      : (request.parentPatch ?? []).map((_op, i) => ({ field: `parent_patch[${i}]`, reason: `${id} was deleted` }));
     const result: EndResult = {
       id,
       attempt: handle,
@@ -371,7 +375,7 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
 export const close = define({
   name: 'close',
   description:
-    'Close an issue as done or canceled, ending your attempt: name its handle as `attempt` (without one, the issue must be open and unclaimed). Agents closing as done give a debrief. parent_patch (anchored edits to the parent’s body), comment and close land in one commit. Replay-safe.',
+    'Close a grimoire issue as done or canceled, ending your attempt: name its handle as `attempt` (without one, the issue must be open and unclaimed). Agents closing as done give a debrief. parent_patch (anchored edits to the parent’s body), comment and close land in one commit. Replay-safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',
@@ -402,7 +406,7 @@ export const close = define({
 export const release = define({
   name: 'release',
   description:
-    'Give up your attempt without closing the issue: its outcome is fail. Agents give a debrief. `abandoned: true` recovers a dead claim of your own person: no debrief, and it binds nothing. Replay-safe.',
+    'Release your claim on a grimoire issue, giving up your attempt without closing the issue: its outcome is fail. Agents give a debrief. `abandoned: true` recovers a dead claim of your own person: no debrief, and it binds nothing. Replay-safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',

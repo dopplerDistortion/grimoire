@@ -19,13 +19,18 @@ Because `--ignore-user-config` skips `config.toml`, the stand-in provider was
 passed with `-c model_provider="mock"` and
 `-c model_providers.mock={name="mock",base_url="http://127.0.0.1:<port>/v1",wire_api="responses"}`.
 The output schema was `{summary: string}`. The working folder was a fresh temp
-directory outside any git repo.
+directory outside any git repo. The prompt (a `PLAN: [...]` for the stand-in)
+came on stdin.
+
+Every `agent_message` text is the scripted model's reply, fixed in the plan
+(`from the stdin bundle`, `scripted reply`). It says nothing about what the
+commands did.
 
 | File | What it shows |
 | -- | -- |
 | `runner-stdin-bundle.jsonl` | The bundle on stdin as the whole prompt, with no prompt argument. The model answered with the schema-shaped final message only: `thread.started`, `turn.started`, `item.completed` (`agent_message`), `turn.completed`. `-o` received the same text and the exit code was 0. |
-| `read-only-shell-blocked.jsonl` | The model asked for `Get-Content input.txt`, then `Set-Content written.txt x`. Without `prefer_mxc` both were refused before running ("blocked by policy" on stderr), so no `command_execution` item appears. The turn still completed. |
-| `read-only-prefer-mxc.jsonl` | The same with `--enable prefer_mxc`. It starts with a warning `item.completed` of type `error` (an under-development feature). The read ran (`exit_code: 0`, the file's text), and the write failed with "Access to the path … is denied" (`exit_code: 1`). |
+| `read-only-shell-blocked.jsonl` | The model asked, in one response, for `Get-Content input.txt` and `Set-Content written.txt x`. Without `prefer_mxc` both were refused before running, so no `command_execution` item appears, and the turn still completed. The refusals the model got (`exec_command failed: CreateProcess { … rejected: blocked by policy … }`) are in `../model-input/read-only-shell-blocked.jsonl`. Re-captured in the fix pass, under `C:\gok130`. |
+| `read-only-prefer-mxc.jsonl` | The same with `--enable prefer_mxc`. It starts with a warning `item.completed` of type `error` (an under-development feature). The two commands ran in parallel: the read completed (`exit_code: 0`, the file's text), and the write failed with "Access to the path … is denied" (`exit_code: 1`). Re-captured in the fix pass, under `C:\gok130`. |
 
 ## Spike F (GOK-131), items P7 and C4
 

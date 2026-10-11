@@ -1,7 +1,10 @@
-// node mkrepo.mjs <dir> [--dashdash] [--groups-before N] [--extra-hook]
+// node mkrepo.mjs <dir> [--dashdash] [--groups-before N] [--mixed-before]
 // A throwaway git repo with <git-common-dir>/grimoire/launcher.cjs and a
 // committed .codex/config.toml whose last [[hooks.SessionStart]] group runs
 // `node -e "<bootstrap>" [--] hook session-start` (spec §11, Codex block).
+// --groups-before N puts N one-handler SessionStart groups before grimoire's.
+// --mixed-before puts a PreToolUse group and a two-handler SessionStart group
+// before grimoire's, to show how Codex numbers groups and handlers per event.
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -10,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const [dir, ...flags] = process.argv.slice(2);
 if (dir === undefined) {
-  console.error('usage: node mkrepo.mjs <dir> [--dashdash] [--groups-before N] [--extra-hook]');
+  console.error('usage: node mkrepo.mjs <dir> [--dashdash] [--groups-before N] [--mixed-before]');
   process.exit(2);
 }
 const before = Number(flags.includes('--groups-before') ? flags[flags.indexOf('--groups-before') + 1] : 0);
@@ -31,6 +34,13 @@ export function hookCommand(dashdash) {
 const tomlString = (s) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 let toml = '';
+if (flags.includes('--mixed-before')) {
+  /** @param {string} text */
+  const echo = (text) => tomlString(`node -e "process.stdout.write('${text}')"`);
+  toml += `[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = ${echo('pre tool use')}\ntimeout = 10\n\n`;
+  toml += `[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = ${echo('first handler')}\ntimeout = 10\n`;
+  toml += `[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = ${echo('second handler')}\ntimeout = 10\n\n`;
+}
 for (let n = 0; n < before; n++) {
   toml += `[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = ${tomlString(`node -e "process.stdout.write('other group ${n}')"`)}\ntimeout = 10\n\n`;
 }

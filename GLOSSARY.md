@@ -100,6 +100,14 @@ _Avoid_: Conversation, thread, agent
 The tie between an attempt and a context that claimed it, ended it, or wrote to its issue naming the attempt; only bound contexts have their transcripts cut into the attempt's trace, and every other write on the issue is recorded only as activity.
 _Avoid_: Participation, membership, association
 
+**Fold**:
+Grimoire's own deterministic merge of a clone's tracker branch with the fetched one after they diverged, by rules that know each record's shape and never by `git merge`; a read shows it in memory, the next write commits it, and every clone reaches the same state whichever side folds.
+_Avoid_: Sync, rebase, git merge
+
+**Fold conflict**:
+What a fold sets aside when two clones changed the same field of an issue, deleted an issue the other edited, or both claimed it: the issue keeps one value and shows the other beside it, and can't be claimed until a human resolves it.
+_Avoid_: Merge conflict, collision
+
 ### Surfaces
 
 **Dashboard**:
