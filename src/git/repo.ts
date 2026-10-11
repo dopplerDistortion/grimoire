@@ -2,7 +2,7 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { GrimoireError } from '../errors';
 import type { ObjectFormat } from './objects';
-import { runGit } from './run';
+import { GitStalledError, runGit, type StallLimit } from './run';
 
 export interface RepoLocation {
   /** The checkout's top level. */
@@ -16,17 +16,20 @@ export interface RepoLocation {
  * Asks git where the checkout rooted at `dir` keeps its shared state, and its
  * object format. `dir` must hold `.git` itself (a host repo's root, spec §7):
  * git's discovery is never allowed to wander up to an enclosing repository.
+ * A git that stops answering for `stallMs` gives BUSY (GitStalledError).
  */
-export async function locateRepo(dir: string): Promise<RepoLocation> {
+export async function locateRepo(dir: string, options: { stallMs?: StallLimit } = {}): Promise<RepoLocation> {
   const dotGit = await stat(path.join(dir, '.git')).catch(() => null);
   if (!dotGit) throw new GrimoireError('NO_REPO', `no git repository at ${dir}`, { root: dir });
-  const run = await runGit(dir, [
-    'rev-parse',
-    '--path-format=absolute',
-    '--show-toplevel',
-    '--git-common-dir',
-    '--show-object-format',
-  ]).catch(() => null);
+  const run = await runGit(
+    dir,
+    ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir', '--show-object-format'],
+    options.stallMs === undefined ? {} : { stallMs: options.stallMs },
+  ).catch((error: unknown) => {
+    // A stuck git says nothing about the repository: the call may be tried again.
+    if (error instanceof GitStalledError) throw error;
+    return null;
+  });
   if (!run || run.code !== 0) {
     throw new GrimoireError('NO_REPO', `no git repository at ${dir}`, { root: dir });
   }

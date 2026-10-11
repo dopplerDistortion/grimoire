@@ -177,6 +177,72 @@ describe('resolving an id collision', () => {
     });
   });
 
+  test('blocker deltas match a blocker by the record it names: the bare id and the kept record’s id are one blocker', async ({
+    world,
+    grimoire,
+  }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x', 'wa1t5', 'n3xt5') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    await createIssue(aliceCore, alice, { title: 'Alice’s k1m0x' });
+    // Stores the bare id: made before anyone knew of the collision.
+    const waiting = await createIssue(aliceCore, alice, { title: 'Waits', blocked_by: ['gr-k1m0x'] });
+    await createIssue(bobCore, bob, { title: 'Bob’s k1m0x' });
+    await bobPublishes(world);
+    const { core } = grimoire;
+    const { mine } = await collisionSides(core, alice);
+    await core.call('resolve', { id: 'gr-k1m0x', keep: mine }, terminal(alice));
+    // Stores the kept record's id.
+    const later = await createIssue(aliceCore, alice, { title: 'Later', blocked_by: [mine] });
+    const blockersOf = async (id: string) => {
+      const shown = await core.call('show', { ref: id }, alice);
+      return shown.ok ? shown.result.blocked_by : shown.error;
+    };
+
+    const both = await expectRefUnmoved(world.a, () =>
+      core.call('update', { id: waiting, blocked_by_add: [mine], blocked_by_remove: ['gr-k1m0x'] }, alice),
+    );
+    const addKept = await expectRefUnmoved(world.a, () => core.call('update', { id: waiting, blocked_by_add: [mine] }, alice));
+    const addBare = await expectRefUnmoved(world.a, () => core.call('update', { id: later, blocked_by_add: ['gr-k1m0x'] }, alice));
+    expect(both).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { 'blocked_by_remove[0]': expect.any(String) } } } });
+    expect(addKept).toMatchObject({ ok: true, result: { noops: [{ field: 'blocked_by_add[0]', reason: 'already set' }] } });
+    expect(addBare).toMatchObject({ ok: true, result: { noops: [{ field: 'blocked_by_add[0]', reason: 'already set' }] } });
+    expect(await blockersOf(waiting)).toEqual(['gr-k1m0x']);
+    expect(await blockersOf(later)).toEqual([mine]);
+
+    const removeKept = await core.call('update', { id: waiting, blocked_by_remove: [mine] }, alice);
+    const removeBare = await core.call('update', { id: later, blocked_by_remove: ['gr-k1m0x'] }, alice);
+    expect(removeKept).toMatchObject({ ok: true, result: { noops: [] } });
+    expect(removeBare).toMatchObject({ ok: true, result: { noops: [] } });
+    expect(await blockersOf(waiting)).toEqual([]);
+    expect(await blockersOf(later)).toEqual([]);
+  });
+
+  test('a parent is the record it names: setting the bare id or the kept record’s id over the other is unchanged', async ({
+    world,
+    grimoire,
+  }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x', 'wa1t5', 'n3xt5') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    await createIssue(aliceCore, alice, { title: 'Alice’s k1m0x' });
+    // Stores the bare id: made before anyone knew of the collision.
+    const child = await createIssue(aliceCore, alice, { title: 'Child', parent: 'gr-k1m0x' });
+    await createIssue(bobCore, bob, { title: 'Bob’s k1m0x' });
+    await bobPublishes(world);
+    const { core } = grimoire;
+    const { mine } = await collisionSides(core, alice);
+    await core.call('resolve', { id: 'gr-k1m0x', keep: mine }, terminal(alice));
+    // Stores the kept record's id.
+    const later = await createIssue(aliceCore, alice, { title: 'Later', parent: mine });
+
+    const keptOverBare = await expectRefUnmoved(world.a, () => core.call('update', { id: child, parent: mine }, alice));
+    const bareOverKept = await expectRefUnmoved(world.a, () => core.call('update', { id: later, parent: 'gr-k1m0x' }, alice));
+
+    expect(keptOverBare).toMatchObject({ ok: true, result: { noops: [{ field: 'parent', reason: 'unchanged' }] } });
+    expect(bareOverKept).toMatchObject({ ok: true, result: { noops: [{ field: 'parent', reason: 'unchanged' }] } });
+  });
+
   test('once the kept record is deleted, the bare id answers “deleted” and never falls to the other record', async ({ world, grimoire }) => {
     const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x') });
     const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });

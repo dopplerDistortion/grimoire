@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { cleanGitEnv, NO_HOOKS } from './run';
+import { cleanGitEnv, GIT_STALL_MS, GitStalledError, killTree, NO_HOOKS, stallOf, type StallLimit } from './run';
 
 export interface GitObject {
   /** The object's oid: what the requested name resolved to. */
@@ -18,6 +18,8 @@ interface Batch {
   readonly child: ChildProcessWithoutNullStreams;
   readonly pending: Pending[];
   buffer: Buffer;
+  /** Armed while reads wait: fires when git has said nothing for the stall time. */
+  watchdog: NodeJS.Timeout | undefined;
 }
 
 /**
@@ -28,13 +30,18 @@ interface Batch {
  * The process is unref'd while idle, so it never keeps Node alive; `close()`
  * ends it. A read after `close()` still gets its answer, from a process that
  * ends once its reads are answered. A crashed process fails its pending reads
- * and is respawned on the next read.
+ * and is respawned on the next read. So is a stuck one: when git says nothing
+ * for the stall time while reads wait, it is killed (with its tree on
+ * Windows) and they fail with GitStalledError (BUSY).
  */
 export class ObjectReader {
   private batch: Batch | null = null;
   private closed = false;
 
-  constructor(private readonly cwd: string) {}
+  constructor(
+    private readonly cwd: string,
+    private readonly stall: StallLimit = GIT_STALL_MS,
+  ) {}
 
   /** Reads the object `name` (an oid or a full ref name) names, or null when there is none. */
   read(name: string): Promise<GitObject | null> {
@@ -42,6 +49,7 @@ export class ObjectReader {
       const batch = this.ensureBatch();
       batch.pending.push({ resolve, reject });
       setActive(batch, true);
+      if (batch.pending.length === 1) this.watch(batch);
       batch.child.stdin.write(`${name}\n`);
     });
   }
@@ -55,7 +63,19 @@ export class ObjectReader {
     this.closed = true;
     const batch = this.batch;
     this.batch = null;
-    if (batch) await end(batch);
+    if (batch) await end(batch, stallOf(this.stall));
+  }
+
+  /** (Re)arms the watchdog: git has the stall time to say something about the reads that wait, or it is killed. */
+  private watch(batch: Batch): void {
+    clearTimeout(batch.watchdog);
+    const stallMs = stallOf(this.stall);
+    batch.watchdog = setTimeout(() => {
+      if (this.batch === batch) this.batch = null;
+      killTree(batch.child);
+      const error = new GitStalledError('cat-file --batch', stallMs);
+      for (const request of batch.pending.splice(0)) request.reject(error);
+    }, stallMs);
   }
 
   private ensureBatch(): Batch {
@@ -66,7 +86,7 @@ export class ObjectReader {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    const batch: Batch = { child, pending: [], buffer: Buffer.alloc(0) };
+    const batch: Batch = { child, pending: [], buffer: Buffer.alloc(0), watchdog: undefined };
     const stderr: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => this.onData(batch, chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
@@ -74,6 +94,7 @@ export class ObjectReader {
       // Surfaces as the process closing.
     });
     const fail = (reason: string) => {
+      clearTimeout(batch.watchdog);
       if (this.batch === batch) this.batch = null;
       const error = new Error(`git cat-file --batch ${reason}: ${Buffer.concat(stderr).toString('utf8').trim()}`);
       for (const request of batch.pending.splice(0)) request.reject(error);
@@ -108,21 +129,27 @@ export class ObjectReader {
       batch.pending.shift();
       head.resolve({ oid: oid ?? '', type: type ?? '', content });
     }
-    if (batch.pending.length > 0) return;
+    // Any answer is a sign of life: the reads still waiting get a new stall time.
+    if (batch.pending.length > 0) return this.watch(batch);
+    clearTimeout(batch.watchdog);
     setActive(batch, false);
     if (this.closed && this.batch === batch) {
       this.batch = null;
-      void end(batch);
+      void end(batch, stallOf(this.stall));
     }
   }
 }
 
-/** Lets a process exit once it has answered what it was asked; Node stays alive until it has. */
-function end(batch: Batch): Promise<void> {
+/**
+ * Lets a process exit once it has answered what it was asked; Node stays
+ * alive until it has. One still running `stallMs` later is killed.
+ */
+function end(batch: Batch, stallMs: number): Promise<void> {
   const { child } = batch;
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   setActive(batch, true);
-  const exited = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  const stuck = setTimeout(() => killTree(child), stallMs);
+  const exited = new Promise<void>((resolve) => child.once('close', () => resolve())).finally(() => clearTimeout(stuck));
   child.stdin.end();
   return exited;
 }

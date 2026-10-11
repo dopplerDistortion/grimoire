@@ -2,7 +2,7 @@
 // can appear and nothing can hang: stdin is ignored, every prompt path is
 // switched off, and each step has a timeout that kills git's whole process tree.
 import { spawn } from 'node:child_process';
-import { cleanGitEnv, NO_HOOKS, type GitRun } from '../git/run';
+import { cleanGitEnv, killTree, NO_HOOKS, type GitRun } from '../git/run';
 
 /** Why a sync failed (spec §4, Failure reporting). */
 export type SyncFailureClass = 'auth' | 'network' | 'rejected';
@@ -63,7 +63,7 @@ export function runNetworkGit(cwd: string, args: readonly string[], options: Net
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(child.pid);
+      killTree(child, { group: posix });
     }, options.timeoutMs);
     child.stdout!.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr!.on('data', (chunk: Buffer) => stderr.push(chunk));
@@ -82,20 +82,6 @@ export function runNetworkGit(cwd: string, args: readonly string[], options: Net
       child.stdin.end(options.input);
     }
   });
-}
-
-function killTree(pid: number | undefined): void {
-  if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    const kill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    kill.on('error', () => {});
-    return;
-  }
-  try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    // Already gone.
-  }
 }
 
 /** Removes the userinfo from every URL in `text` (`https://user:token@host` → `https://host`). */
