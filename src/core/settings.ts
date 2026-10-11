@@ -8,6 +8,7 @@ import { defaultDashboardPort, MachineLocalStore } from '../machine-local';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
 import { parseDuration } from './stale';
+import type { TrackerView } from '../tracker';
 
 export type SettingScope = 'store' | 'machine';
 
@@ -64,8 +65,9 @@ const linkBase: Pick<SettingSpec, 'parse' | 'why'> = {
 /**
  * Every setting this release knows, by key. The part of grimoire a setting
  * governs adds it here, with whatever a change must do in the same commit
- * (the excerpt mode, the delivery switch, the loop pause and the chore and
- * skill thresholds come with their tickets). A tracker's keys this release
+ * (the excerpt mode, the loop pause and the chore and proposal thresholds come
+ * with their tickets; turning `skills.delivery` off removes copies and stubs
+ * once generated output exists). A tracker's keys this release
  * doesn't know are still shown and kept.
  */
 const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(Object.entries({
@@ -80,6 +82,24 @@ const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(
     description: 'the URL `link` puts before a record’s path (empty: `link` is the bare id)',
     fallback: () => '',
     ...linkBase,
+  },
+  'skills.delivery': {
+    scope: 'store',
+    description: 'whether evolved skills reach working agents; off empties skill_list and removes every copy and stub',
+    fallback: () => true,
+    ...flag,
+  },
+  'skills.max_active': {
+    scope: 'store',
+    description: 'the most evolved skills that may be active at once',
+    fallback: () => 8,
+    ...wholeNumber(1, 64),
+  },
+  'skills.description_max': {
+    scope: 'store',
+    description: 'the longest an evolved skill’s description may be, in characters',
+    fallback: () => 300,
+    ...wholeNumber(1, 1024),
   },
   'knowledge.pickup': {
     scope: 'machine',
@@ -107,6 +127,18 @@ const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(
     ...oneOf(['excerpts', 'facts', 'none']),
   },
 } satisfies Record<string, SettingSpec>));
+
+/**
+ * A store setting's value in `view`: the one set when it is valid for this
+ * release, else its default.
+ */
+export function storeSetting(view: Pick<TrackerView, 'settings'>, key: string): unknown {
+  const spec = SETTINGS.get(key);
+  if (!spec || spec.scope !== 'store') throw new Error(`${key} is not a store setting`);
+  const set = view.settings().get(key);
+  const value = set === undefined ? undefined : spec.parse(set.value);
+  return value === undefined ? spec.fallback('') : value;
+}
 
 /** One setting as `settings_get` shows it. */
 export interface ShownSetting {

@@ -24,6 +24,10 @@ describe('the op registry', () => {
         'settings_get',
         'settings_set',
         'show',
+        'skill_edit',
+        'skill_list',
+        'skill_read',
+        'skill_show',
         'update',
       ]);
       // MCP lists exactly the agent tools of spec §8 (so far).
@@ -36,6 +40,8 @@ describe('the op registry', () => {
         'list',
         'release',
         'show',
+        'skill_list',
+        'skill_read',
         'update',
       ]);
       expect(byName.show).toMatchObject({
@@ -45,6 +51,16 @@ describe('the op registry', () => {
         inputSchema: { type: 'object', required: ['ref'], additionalProperties: false },
       });
       expect(byName.labels).toMatchObject({ kind: 'read', annotations: { readOnlyHint: true } });
+      expect(byName.skill_list).toMatchObject({ kind: 'read', policy: 'agent', mcp: true, annotations: { readOnlyHint: true } });
+      expect(byName.skill_read).toMatchObject({
+        kind: 'read',
+        policy: 'agent',
+        mcp: true,
+        annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', required: ['name'], additionalProperties: false },
+      });
+      expect(byName.skill_edit).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
+      expect(byName.skill_show).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
       expect(byName.create).toMatchObject({
         kind: 'write',
         policy: 'agent',

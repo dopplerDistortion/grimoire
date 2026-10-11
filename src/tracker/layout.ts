@@ -85,3 +85,16 @@ export function deletedFile(id: string): string {
 export function forwardFile(id: string): string {
   return `${FORWARDS_DIR}/${id}.md`;
 }
+
+/** `knowledge/ledger/<id>.md`: the skill ledger, one write-once record per file, named by its sha256 (spec §18). */
+export const LEDGER_DIR = 'knowledge/ledger';
+/** `knowledge/skill-versions/<sha256>.md`: each skill version's normalized text, named by its sha256 (spec §18). */
+export const SKILL_VERSIONS_DIR = 'knowledge/skill-versions';
+
+export function ledgerFile(id: string): string {
+  return `${LEDGER_DIR}/${id}.md`;
+}
+
+export function skillVersionFile(version: string): string {
+  return `${SKILL_VERSIONS_DIR}/${version}.md`;
+}

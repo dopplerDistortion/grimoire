@@ -1,7 +1,7 @@
 // The `grimoire` bin. esbuild bundles this file into dist/grimoire.mjs; each
 // verb's heavy code is a dynamic import, so it loads only for that verb.
-// So far: `--version` and the internal `mcp` entry; the other verbs arrive with
-// their tickets (spec §10).
+// So far: `--version`, the internal `mcp` entry and `skill edit`; the other
+// verbs arrive with their tickets (spec §10).
 import { VERSION } from '../../version';
 
 async function main(argv: readonly string[]): Promise<number | null> {
@@ -15,7 +15,11 @@ async function main(argv: readonly string[]): Promise<number | null> {
     await runMcp(argv.slice(1));
     return null;
   }
-  process.stderr.write(`grimoire ${VERSION}: usage: grimoire --version\n`);
+  if (argv[0] === 'skill' && argv[1] === 'edit') {
+    const { runSkillEdit } = await import('./skill-edit');
+    return runSkillEdit(argv.slice(2));
+  }
+  process.stderr.write(`grimoire ${VERSION}: usage: grimoire --version | grimoire skill edit <name>\n`);
   return 2;
 }
 
