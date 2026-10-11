@@ -6,7 +6,8 @@ import http from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
-import { cloneId, MachineLocalStore } from '../../../src/machine-local';
+import { putMachineSetting } from '../../../src/core/settings';
+import { cloneId, defaultDashboardPort, MachineLocalStore } from '../../../src/machine-local';
 import { callControl, ControlError, controlPaths } from '../../../src/surfaces/start/control';
 import { coreTest } from '../../core/support';
 import { cli, cliAtTerminal, lastJsonOnScreen } from '../cli/support';
@@ -81,8 +82,11 @@ describe('start: one instance per clone', () => {
       signed_in: true,
       version_differs: false,
     });
-    // No secret on stdout without a terminal.
-    expect(second.stdout).not.toContain(codeOf(url!));
+    // No sign-in URL without a terminal: neither from the second start nor from the first.
+    expect(second.stdout + second.stderr).not.toContain(codeOf(url!));
+    expect(second.stdout + second.stderr).not.toContain('/login#code=');
+    expect(first.stderr()).not.toContain('/login#code=');
+    expect(first.stderr()).toContain('sign a browser in with `grimoire open`');
     expect(cookie).not.toBeNull();
     expect(lock?.pid).toBe(first.child.pid);
   });
@@ -256,18 +260,32 @@ describe('start: open, gates and links', () => {
     expect(nothing.headers.location).toBe('/');
   });
 
-  instanceTest('the port: the next of 9 when the chosen one is taken, and show’s local_link carries the running port', async ({ clone }) => {
+  instanceTest('the port: this clone’s own with nothing set, the dashboard.port setting over it and --port over both, the next of 9 when the chosen one is taken; show’s local_link carries the running port', async ({ clone }) => {
+    const own = await defaultDashboardPort(clone.commonDir);
+    const unset = await clone.start();
+    await stopStart(unset, clone.commonDir, clone.env);
+
     const port = await freePort();
     const blocker = net.createServer();
     await new Promise<void>((resolve) => blocker.listen(port, '127.0.0.1', resolve));
-
-    const start = await clone.start(['--no-open', '--port', String(port)]);
+    await putMachineSetting(clone.commonDir, 'dashboard.port', port);
+    const set = await clone.start();
     const created = await cli(bin, ['create', '--title', 'Linked'], { cwd: clone.dir, env: clone.env });
     const shown = await cli(bin, ['show', created.json.id as string], { cwd: clone.dir, env: clone.env });
+    await stopStart(set, clone.commonDir, clone.env);
     blocker.close();
 
-    expect(start.port).toBeGreaterThan(port);
-    expect(start.port).toBeLessThanOrEqual(port + 9);
-    expect(shown.json.local_link).toBe(`http://127.0.0.1:${start.port}/issues/${created.json.id as string}`);
+    const flagged = await freePort();
+    const byFlag = await clone.start(['--no-open', '--port', String(flagged)]);
+
+    expect(own).toBeGreaterThanOrEqual(47_000);
+    expect(own).toBeLessThanOrEqual(47_999);
+    // Its own port, or one of the next 9 when another program holds it on this machine.
+    expect(unset.port).toBeGreaterThanOrEqual(own);
+    expect(unset.port).toBeLessThanOrEqual(own + 9);
+    expect(set.port).toBeGreaterThan(port);
+    expect(set.port).toBeLessThanOrEqual(port + 9);
+    expect(shown.json.local_link).toBe(`http://127.0.0.1:${set.port}/issues/${created.json.id as string}`);
+    expect(byFlag.port).toBe(flagged);
   });
 });
