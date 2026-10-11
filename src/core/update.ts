@@ -4,6 +4,7 @@ import { GrimoireError, invalid } from '../errors';
 import { issueRevision, parseWriteRef, sortedUnique, type IssueLink, type IssueRecord } from '../tracker';
 import { findCycle } from './derive';
 import { linkTarget } from './links';
+import { heldAttempt, parseHandle, recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
 import { applyPatch, patchOps } from './patch';
 import { s } from './schema';
@@ -50,6 +51,14 @@ function overlapping(adds: readonly string[], removes: readonly string[], field:
   return errors;
 }
 
+/** The fields an update changed, by name. */
+function changedFields(before: IssueRecord, after: IssueRecord): string[] {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  return (['title', 'body', 'labels', 'parent', 'blocked_by', 'links'] as const).filter(
+    (field) => !same(before[field], after[field]),
+  );
+}
+
 export const update = define({
   name: 'update',
   description:
@@ -77,10 +86,12 @@ export const update = define({
       ),
     ),
     if_revision: s.optional(s.string({ ...oneLine, description: 'the revision you read; the update fails with REVISION_CONFLICT if it moved' })),
+    attempt: s.optional(s.string({ ...oneLine, description: 'your open attempt’s handle: names the update as work on it' })),
   }),
   async run(input, { ctx, tracker, actor }): Promise<UpdateResult> {
     const author = writer(ctx);
     const id = parseWriteRef(input.id, 'id');
+    const attempt = input.attempt === undefined ? undefined : parseHandle(input.attempt);
     const labelsAdd = input.labels_add ?? [];
     const labelsRemove = input.labels_remove ?? [];
     const parent = input.parent === undefined || input.parent === null ? input.parent : parseWriteRef(input.parent, 'parent');
@@ -103,6 +114,7 @@ export const update = define({
 
     const write = await tracker.transact({ op: 'update', author, actor }, (draft) => {
       draft.resolveWrite(id, 'id');
+      if (attempt !== undefined) heldAttempt(draft, id, attempt, author.email);
       const current = draft.issue(id)!;
       const currentRevision = issueRevision(current);
       if (input.if_revision !== undefined && input.if_revision !== currentRevision) {
@@ -175,8 +187,13 @@ export const update = define({
       const revision = issueRevision(next);
       if (revision !== currentRevision) {
         draft.putIssue({ ...next, updated_at: draft.now.toISOString() });
+        draft.addActivity(id, {
+          actor: recordedActor(author.email, actor),
+          ...(attempt !== undefined ? { attempt } : {}),
+          fields: changedFields(current, next),
+        });
       }
-      return { result: { revision, noops }, issue: id };
+      return { result: { revision, noops }, issue: id, ...(attempt !== undefined ? { attempt } : {}) };
     });
     return write.result;
   },
