@@ -7,6 +7,10 @@ import { define, oneLine, writer } from './op';
 import { s } from './schema';
 import type { ShowResult } from './show';
 import type { UpdateResult } from './update';
+import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, ReopenResult } from './human-ops';
+import type { ResolveResult } from './resolve';
+import type { SettingsResult, SettingsSetResult } from './settings';
+import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -48,7 +52,7 @@ export const create = define({
           : {}),
       },
       async (draft) => {
-        const parentId = parent ? draft.resolveWrite(parent, 'parent') : null;
+        const parentId = parent === null ? null : draft.resolveWrite(parent, 'parent');
         const blockerIds = blockers.map((blocker) => draft.resolveWrite(blocker.id, blocker.field));
         const id = await draft.mintIssueId();
         const at = draft.now.toISOString();
@@ -108,4 +112,14 @@ export interface OpResults {
   claim: ClaimResult;
   release: EndResult;
   close: EndResult;
+  settings_get: SettingsResult;
+  assign: AssignResult;
+  reassign: ReassignResult;
+  reopen: ReopenResult;
+  delete: DeleteResult;
+  resolve: ResolveResult;
+  outcome_set: OutcomeSetResult;
+  settings_set: SettingsSetResult;
+  sync: SyncResult;
+  sync_status: SyncStatusResult;
 }

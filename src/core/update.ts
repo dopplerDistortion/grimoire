@@ -2,7 +2,7 @@
 // and reports the requested changes that were already in place.
 import { GrimoireError, invalid } from '../errors';
 import { issueRevision, parseWriteRef, sortedUnique, type IssueLink, type IssueRecord } from '../tracker';
-import { fieldConflict, findCycle, stateConflict } from './derive';
+import { fieldConflict, findCycle, namedIn, stateConflict } from './derive';
 import { linkTarget } from './links';
 import { heldAttempt, parseHandle, recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
@@ -182,6 +182,7 @@ export const update = define({
         ? findCycle(
             draft.issues().map((issue) => (issue.id === id ? next : issue)),
             id,
+            namedIn(draft),
           )
         : null;
       if (cycle) {

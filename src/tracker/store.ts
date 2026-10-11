@@ -8,11 +8,12 @@ import { packedRefsStamp, RefUpdater } from '../git/refs';
 import { runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
-import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, remoteTrackerRef, TRACKER_REF } from './layout';
+import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
 import { foldCommits } from './fold';
 import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
 import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
+import { syncTracker, type SyncOutcome, type SyncSpec, type TrackerRefs } from './sync';
 import { Draft, SnapshotLoader, type Snapshot, type TrackerDraft, type TrackerView } from './view';
 
 export interface Person {
@@ -22,7 +23,7 @@ export interface Person {
 
 /** Facts about one write that its commit records (spec §3, Commits). */
 export interface WriteSpec {
-  /** `Grimoire-Op`: create, update, comment, … */
+  /** `Grimoire-Op`: create, update, comment, …; a multi-word op is hyphenated (outcome-set, skill-edit). */
   readonly op: string;
   /** Author and committer. */
   readonly author: Person;
@@ -47,6 +48,8 @@ export interface WriteResult<R> {
   readonly commit: string | null;
   /** True when an idempotency key replayed an earlier result. */
   readonly replayed: boolean;
+  /** True when the commit sealed an attempt (wrote its `end.md`): an attempt-ending write. */
+  readonly sealed: boolean;
 }
 
 export interface TrackerOptions {
@@ -93,6 +96,16 @@ export interface TrackerStore {
    * parents. Returns null when there was nothing to fold.
    */
   fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }>;
+  /**
+   * Fetch → fold → push with the remote (spec §4, Sync): fetches the
+   * remote's `grimoire/tracker` (deepening a shallow history, backfilling a
+   * partial clone), commits the fold when the two diverged, and pushes the
+   * local tip unless the remote holds it, retrying a lost push race. Never
+   * pushes to a remote without a default branch. Network and remote failures
+   * come back in the outcome; only store errors (NO_GIT_IDENTITY for a fold,
+   * UPGRADE_REQUIRED, BUSY) throw.
+   */
+  sync(spec: SyncSpec): Promise<SyncOutcome>;
   /** Stops the store's git process. */
   close(): Promise<void>;
 }
@@ -128,6 +141,38 @@ function notSynced(root: string): GrimoireError {
   });
 }
 
+/** `config.yml` names root R, but no tracker ref in this clone holds it (spec §4, Missing tracker). */
+function missingTracker(root: string, trackerRoot: string, other: boolean): GrimoireError {
+  return new GrimoireError(
+    'NOT_SYNCED',
+    other
+      ? `the tracker refs in ${root} hold another tracker than the one .grimoire/config.yml names (root ${trackerRoot})`
+      : `the tracker .grimoire/config.yml names (root ${trackerRoot}) isn't in this clone yet`,
+    {
+      remedy: other
+        ? 'run `grimoire sync` to fetch grimoire/tracker from the remote; if that doesn’t fix it, a human runs `grimoire init` to repair this clone'
+        : 'run `grimoire sync` (or a plain `git fetch`) to fetch grimoire/tracker from the remote',
+      tracker_root: trackerRoot,
+    },
+  );
+}
+
+/** Writes wait while the tracker's history is shallow (spec §4, Refusals). */
+function shallowHistory(root: string): GrimoireError {
+  return new GrimoireError('NOT_SYNCED', `the tracker history is shallow in ${root}, so writes wait until sync deepens it`, {
+    remedy: 'run `grimoire sync` to fetch the full tracker history',
+  });
+}
+
+/** The `.grimoire/config.yml` key that names the tracker root R (spec §11, The dotfolder). */
+export const TRACKER_ROOT_KEY = 'tracker_root';
+
+/** The tracker root R a checkout's `.grimoire/config.yml` names, or null. */
+export function namedTrackerRoot(configText: string): string | null {
+  const match = new RegExp(`^${TRACKER_ROOT_KEY}:[ \t]*["']?([0-9a-fA-F]{7,64})["']?[ \t]*(?:#.*)?$`, 'm').exec(configText);
+  return match ? match[1]!.toLowerCase() : null;
+}
+
 function trailerValue(name: string, value: string): string {
   if (/[\r\n]/.test(value)) {
     throw new GrimoireError('INVALID', `the ${name} trailer value contains a line break`, {
@@ -154,6 +199,10 @@ class GitTrackerStore implements TrackerStore {
   /** Moves the tracker ref for writes, through one long-lived git. */
   private readonly updater: RefUpdater;
   private remoteConfig: { stamp: string; value: RemoteConfig } | null = null;
+  private checkoutConfig: { stamp: string; root: string | null } | null = null;
+  /** Whether a tip's history holds a root commit, by `<root> <tip>`. */
+  private readonly holds = new BoundedMap<string, boolean>(1_024);
+  private shallowMemo: { key: string; tips: ReadonlySet<string> } | null = null;
   /** The latest comment time this store wrote: comment times never go back within a process. */
   private commentMs = 0;
 
@@ -228,6 +277,18 @@ class GitTrackerStore implements TrackerStore {
     return { commit: write.commit };
   }
 
+  sync(spec: SyncSpec): Promise<SyncOutcome> {
+    return syncTracker(
+      {
+        root: this.location.root,
+        trackerRefs: () => this.trackerRefs(),
+        isShallow: async () => this.isShallow(await this.resolveTips()),
+        fold: (foldSpec) => this.fold(foldSpec),
+      },
+      spec,
+    );
+  }
+
   private async rounds<R>(
     spec: WriteSpec,
     body: (draft: TrackerDraft) => WriteOutcome<R> | Promise<WriteOutcome<R>>,
@@ -236,11 +297,12 @@ class GitTrackerStore implements TrackerStore {
   ): Promise<WriteResult<R>> {
     for (;;) {
       const tips = await this.resolveTips();
+      if (await this.isShallow(tips)) throw shallowHistory(this.location.root);
       const snapshot = await this.snapshotOf(tips);
       const now = this.clock();
       if (spec.idempotency) {
         const replay = await lookupKey(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, now);
-        if (replay) return { result: replay.result as R, commit: null, replayed: true };
+        if (replay) return { result: replay.result as R, commit: null, replayed: true, sealed: false };
       }
       checkTrackerMarker(snapshot.marker);
       const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs);
@@ -251,7 +313,7 @@ class GitTrackerStore implements TrackerStore {
         for (const [file, content] of recorded) edits.set(file, content);
       }
       const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
-      if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false };
+      if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false, sealed: false };
 
       // The fold's merged tree becomes real only now, in the write that commits it.
       if (snapshot.virtual) await snapshot.virtual.persist(snapshot.rootTree);
@@ -267,7 +329,7 @@ class GitTrackerStore implements TrackerStore {
       const move = await this.moveRef(tips.local, commit);
       if (move.moved) {
         this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
-        return { result: outcome.result, commit, replayed: false };
+        return { result: outcome.result, commit, replayed: false, sealed: [...edits.keys()].some(isAttemptEnd) };
       }
       if (move.staleLock) {
         throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
@@ -321,24 +383,111 @@ class GitTrackerStore implements TrackerStore {
   }
 
   /**
-   * Both tracker tips, resolved fresh: never cached across calls (spec §4).
-   * They are read through the long-lived object reader, not a new git process:
-   * every write resolves them inside the fairness lock, where a process start
-   * would be paid once per queued writer.
+   * The local tracker tip and every configured remote's remote-tracking
+   * tracker tip, by remote name, resolved fresh: never cached across calls
+   * (spec §4). They are read through the long-lived object reader, not a new
+   * git process: every write resolves them inside the fairness lock, where a
+   * process start would be paid once per queued writer.
    */
-  private async resolveTips(): Promise<Tips> {
+  private async trackerRefs(): Promise<TrackerRefs> {
     // Taken before git reads any ref, so a packed-refs rewrite it might miss shows here.
     const packedRefs = await packedRefsStamp(this.location.commonDir);
-    const { chosen, names } = await this.remotes();
-    const [local = null, ...remoteTips] = await this.objects.resolveRefs(
-      [TRACKER_REF, ...names.map(remoteTrackerRef)],
-      packedRefs,
-    );
-    const tracked = names.filter((_, i) => remoteTips[i] !== null).sort();
-    if (tracked.length === 0) return { local, remote: null };
+    const { names } = await this.remotes();
+    const [local = null, ...tips] = await this.objects.resolveRefs([TRACKER_REF, ...names.map(remoteTrackerRef)], packedRefs);
+    const remotes = new Map<string, string>();
+    names.forEach((name, i) => {
+      const tip = tips[i];
+      if (tip) remotes.set(name, tip);
+    });
+    return { local, remotes };
+  }
+
+  /** Both tracker tips, resolved fresh: never cached across calls (spec §4). */
+  private async resolveTips(): Promise<Tips> {
+    const { local, remotes } = await this.trackerRefs();
+    const names = [...remotes.keys()].sort();
+    if (names.length === 0) return { local, remote: null };
     // `grimoire.remote`, else the remote that has the tracker (origin first).
-    const pick = chosen ?? (tracked.includes('origin') ? 'origin' : tracked[0]!);
-    return { local, remote: remoteTips[names.indexOf(pick)] ?? null };
+    const chosen = (await this.remotes()).chosen ?? (names.includes('origin') ? 'origin' : names[0]!);
+    return { local, remote: remotes.get(chosen) ?? null };
+  }
+
+  /** The tracker root R the checkout's `.grimoire/config.yml` names, re-read only when the file changes. */
+  private async namedRoot(): Promise<string | null> {
+    const file = path.join(this.location.root, '.grimoire', 'config.yml');
+    const info = await stat(file).catch(() => null);
+    const stamp = info ? `${info.mtimeMs}:${info.size}` : 'none';
+    if (this.checkoutConfig?.stamp !== stamp) {
+      const text = info ? await readFile(file, 'utf8').catch(() => '') : '';
+      this.checkoutConfig = { stamp, root: namedTrackerRoot(text) };
+    }
+    return this.checkoutConfig.root;
+  }
+
+  /**
+   * NOT_SYNCED unless a tracker is here: with no tracker ref at all, or, when
+   * `config.yml` names root R, with no tip whose history holds R (spec §4,
+   * Missing tracker). Reads never show an empty tracker in its place.
+   */
+  private async checkTracker(tips: Tips): Promise<void> {
+    const { local, remote } = tips;
+    const root = await this.namedRoot();
+    if (!local && !remote) throw root ? missingTracker(this.location.root, root, false) : notSynced(this.location.root);
+    if (!root) return;
+    const shallow = await this.shallowTips(tips);
+    for (const tip of [local, remote]) {
+      if (!tip) continue;
+      // R may lie past a shallow boundary: reads go on, writes refuse as shallow, and sync deepens the history.
+      if (shallow.has(tip) || (await this.holdsRoot(tip, root))) return;
+    }
+    throw missingTracker(this.location.root, root, true);
+  }
+
+  /**
+   * Whether `tip`'s history holds the commit `root`; memoized, and inherited
+   * from a commit already known to hold it, walking back from `tip` (git
+   * decides past the walk). Only asked of a tip whose whole history is here,
+   * so a no is as final as a yes.
+   */
+  private async holdsRoot(tip: string, root: string): Promise<boolean> {
+    const key = `${root} ${tip}`;
+    let holds = this.holds.get(key);
+    if (holds === undefined) {
+      holds =
+        (await this.reaches(tip, (commit) => commit.startsWith(root) || this.holds.get(`${root} ${commit}`) === true)) ||
+        (await runGit(this.location.root, ['merge-base', '--is-ancestor', root, tip])).code === 0;
+      this.holds.set(key, holds);
+    }
+    return holds;
+  }
+
+  /**
+   * Whether the tracker's history is shallow here: one of its commits is a
+   * shallow boundary, so it reads as a root (spec §4: writes refuse, sync
+   * deepens it). Costs a stat unless the clone is shallow.
+   */
+  private async isShallow(tips: Tips): Promise<boolean> {
+    return (await this.shallowTips(tips)).size > 0;
+  }
+
+  /** The tips whose history reaches a shallow boundary, memoized by the `shallow` file and the tips. */
+  private async shallowTips({ local, remote }: Tips): Promise<ReadonlySet<string>> {
+    const file = path.join(this.location.commonDir, 'shallow');
+    const info = await stat(file).catch(() => null);
+    const tips = [...new Set([local, remote].filter((tip): tip is string => tip !== null))];
+    if (!info || tips.length === 0) return new Set();
+    const key = `${info.mtimeMs}:${info.size}:${tips.join(' ')}`;
+    if (this.shallowMemo?.key !== key) {
+      const boundary = new Set((await readFile(file, 'utf8').catch(() => '')).split(/\r?\n/).filter((line) => line !== ''));
+      const shallow = new Set<string>();
+      for (const tip of tips) {
+        const run = await runGit(this.location.root, ['rev-list', '--max-parents=0', tip]);
+        const roots = run.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '');
+        if (roots.some((root) => boundary.has(root))) shallow.add(tip);
+      }
+      this.shallowMemo = { key, tips: shallow };
+    }
+    return this.shallowMemo.tips;
   }
 
   /** The clone's remotes and `grimoire.remote`, re-read only when its config file changes. */
@@ -370,7 +519,7 @@ class GitTrackerStore implements TrackerStore {
    * by the tip pair.
    */
   private async snapshotOf({ local, remote }: Tips): Promise<Snapshot> {
-    if (!local && !remote) throw notSynced(this.location.root);
+    await this.checkTracker({ local, remote });
     if (!local || !remote || local === remote) return this.snapshotAt(local ?? remote!);
     // One merge-base answers all three cases: remote ahead, local ahead, or diverged (and the fold's bases).
     const bases = await this.mergeBases([local, remote]);
@@ -430,21 +579,28 @@ class GitTrackerStore implements TrackerStore {
   }
 
   /**
-   * Whether `tip` descends from `ancestor`, found by walking back from `tip`
-   * to `ancestor` or to a commit already known to descend from it. False when
-   * the walk gives up (after ANCESTRY_WALK commits) or can't read a commit:
-   * `git merge-base` decides then. Writes extend the tracker a commit or a
-   * few at a time, so a local tip ahead of the remote-tracking one usually
-   * takes a few cached reads here instead of a git process inside the
-   * fairness lock.
+   * Whether `tip` descends from `ancestor`: walked back from `tip` to
+   * `ancestor` or to a commit already known to descend from it (`reaches`).
    */
-  private async descends(tip: string, ancestor: string): Promise<boolean> {
-    const knownToDescend = (commit: string) =>
-      commit === ancestor || this.bases.get(`${commit} ${ancestor}`)?.join(' ') === ancestor;
+  private descends(tip: string, ancestor: string): Promise<boolean> {
+    return this.reaches(
+      tip,
+      (commit) => commit === ancestor || this.bases.get(`${commit} ${ancestor}`)?.join(' ') === ancestor,
+    );
+  }
+
+  /**
+   * Whether walking back from `tip` meets a commit `found` accepts. False
+   * when the walk gives up (after ANCESTRY_WALK commits) or can't read a
+   * commit: a git process decides then. Writes extend the tracker a commit or
+   * a few at a time, so a new tip usually takes a few cached reads here
+   * instead of a git process inside the fairness lock.
+   */
+  private async reaches(tip: string, found: (commit: string) => boolean): Promise<boolean> {
     const seen = new Set<string>();
     try {
       for (let frontier = [tip]; frontier.length > 0 && seen.size < ANCESTRY_WALK; ) {
-        if (frontier.some(knownToDescend)) return true;
+        if (frontier.some(found)) return true;
         for (const commit of frontier) seen.add(commit);
         const headers = await Promise.all(frontier.map((commit) => this.objects.commit(commit)));
         frontier = [...new Set(headers.flatMap((header) => header.parents))].filter((commit) => !seen.has(commit));

@@ -3,6 +3,8 @@
 import { shardOf } from './ids';
 
 export const TRACKER_REF = 'refs/grimoire/tracker';
+/** The tracker's branch on a remote: what fetch and push name in their explicit refspecs (spec §3, Refs). */
+export const TRACKER_BRANCH = 'refs/heads/grimoire/tracker';
 /** The remote-tracking ref of `remote`'s `grimoire/tracker` branch. */
 export function remoteTrackerRef(remote: string): string {
   return `refs/remotes/${remote}/grimoire/tracker`;
@@ -53,6 +55,12 @@ export function attemptDir(issue: string, attempt: string): string {
   return `${ATTEMPTS_DIR}/${a}/${b}/${issue}/${attempt}`;
 }
 
+/** Whether `file` is an attempt's `end.md`, the seal an attempt-ending write puts on it. */
+export function isAttemptEnd(file: string): boolean {
+  const parts = file.split('/');
+  return parts.length === 6 && parts[0] === ATTEMPTS_DIR && parts[5] === 'end.md';
+}
+
 /** `attempts/<a>/<b>/<issue-id>/<attempt-id>/activity/<entry>.md` */
 export function activityFile(issue: string, attempt: string, entry: string): string {
   return `${attemptDir(issue, attempt)}/${ACTIVITY_DIR}/${entry}.md`;
@@ -66,7 +74,22 @@ export function outcomeFile(issue: string, attempt: string): string {
 
 export const CONFLICTS_DIR = 'conflicts';
 
+/** `issues/<a>/<b>/<id>/conflicts`: the issue's fold conflict records. */
+export function conflictsDir(issue: string): string {
+  return `${issueDir(issue)}/${CONFLICTS_DIR}`;
+}
+
 /** `issues/<a>/<b>/<id>/conflicts/<hash>.md` */
 export function conflictFile(issue: string, name: string): string {
-  return `${issueDir(issue)}/${CONFLICTS_DIR}/${name}.md`;
+  return `${conflictsDir(issue)}/${name}.md`;
+}
+
+/** `deleted/<id>.md`: the delete tombstone. */
+export function deletedFile(id: string): string {
+  return `${DELETED_DIR}/${id}.md`;
+}
+
+/** `forwards/<id>.md`: the forwarding record of a resolved id collision. */
+export function forwardFile(id: string): string {
+  return `${FORWARDS_DIR}/${id}.md`;
 }

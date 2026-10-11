@@ -14,7 +14,7 @@
 // section: from when the lock is let go to a write waiting for it until the
 // write returns. Later tests use the same spy to find the long-lived gits.
 import * as childProcess from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { describe, expect, vi } from 'vitest';
@@ -44,11 +44,16 @@ function forgetStarts(): void {
 
 /**
  * Runs `write` while the fairness lock is held elsewhere: lets it get ready
- * (until no process has started for 300 ms), then lets go of the lock.
+ * (until no process has started for 300 ms), runs `meanwhile` (what the
+ * lock's holder does while the write waits), then lets go of the lock.
  * Returns what the write returned, and the processes started from the release
  * on, which is inside the write's critical section.
  */
-async function insideTheLock<T>(checkout: Checkout, write: () => Promise<T>): Promise<{ value: T; started: string[] }> {
+async function insideTheLock<T>(
+  checkout: Checkout,
+  write: () => Promise<T>,
+  meanwhile?: () => Promise<void>,
+): Promise<{ value: T; started: string[] }> {
   const machine = new MachineLocalStore(path.join(checkout.dir, '.git'));
   const held = await machine.locks.acquire('tracker-write');
   if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
@@ -57,6 +62,7 @@ async function insideTheLock<T>(checkout: Checkout, write: () => Promise<T>): Pr
     seen = started().length;
     await setTimeout(300);
   }
+  await meanwhile?.();
   forgetStarts();
   await held.lock.release();
   return { value: await pending, started: started() };
@@ -80,20 +86,29 @@ describe('the write path', () => {
     expect(await world.a.git(['rev-list', '--count', (await trackerTip(world.a))!])).toBe('4');
   });
 
-  test('a write ahead of a fetched remote-tracking tracker starts no process inside the lock either', async ({
+  test('a write ahead of a fetched remote-tracking tracker, with the tracker root named, starts no process inside the lock either', async ({
     world,
     grimoire,
   }) => {
+    // What `init` commits: config.yml names the tracker's root, which every tip's history must hold.
+    await mkdir(path.join(world.a.dir, '.grimoire'), { recursive: true });
+    const root = await world.a.git(['rev-list', '--max-parents=0', TRACKER_REF]);
+    await writeFile(path.join(world.a.dir, '.grimoire', 'config.yml'), `install_format: 1\ntracker_root: "${root}"\n`);
     await pushTracker(world.a);
     await fetchTracker(world.a);
     await commitToTracker(world.a, { 'notes/another-writer.txt': 'x\n' }, 'another writer');
     expect(await grimoire.core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
 
     const own = await insideTheLock(world.a, () => grimoire.core.call('create', { title: 'Mine' }, grimoire.ctx));
-    // Commits by other writers since this core last looked are walked too.
-    for (let i = 0; i < 3; i++) await commitToTracker(world.a, { 'notes/another-writer.txt': `${i}\n` }, 'another writer');
-    const after = await insideTheLock(world.a, () =>
-      grimoire.core.call('create', { title: 'After others' }, grimoire.ctx),
+    // Commits other writers make while this one waits for the lock are walked too.
+    const after = await insideTheLock(
+      world.a,
+      () => grimoire.core.call('create', { title: 'After others' }, grimoire.ctx),
+      async () => {
+        for (let i = 0; i < 3; i++) {
+          await commitToTracker(world.a, { 'notes/another-writer.txt': `${i}\n` }, 'another writer');
+        }
+      },
     );
 
     expect(own.value).toMatchObject({ ok: true });

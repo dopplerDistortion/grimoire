@@ -55,6 +55,21 @@ export function fieldConflict(view: TrackerView, id: string): IssueConflict | nu
   return { fields: [...fields].sort(), theirs, base };
 }
 
+/**
+ * The issue's whole conflict as reads show it: its field conflicts, plus two
+ * open attempts (claims made on two clones) as `open_attempts`. Null when it
+ * has neither.
+ */
+export function issueConflict(view: TrackerView, id: string, openAttempts: readonly OpenAttemptFacts[]): IssueConflict | null {
+  const conflict = fieldConflict(view, id);
+  if (openAttempts.length < 2) return conflict;
+  return {
+    fields: [...(conflict?.fields ?? []), OPEN_ATTEMPTS_FIELD].sort(),
+    theirs: { ...conflict?.theirs, [OPEN_ATTEMPTS_FIELD]: openAttempts.map((a) => a.record.id) },
+    base: { ...conflict?.base, [OPEN_ATTEMPTS_FIELD]: [] },
+  };
+}
+
 /** STATE_CONFLICT: the write needs the conflict resolved first (a human op). */
 export function stateConflict(id: string, conflict: IssueConflict, what: string): GrimoireError {
   return new GrimoireError(
@@ -93,6 +108,33 @@ export interface Derivations {
 function stateOf(issue: IssueRecord | undefined): RelationState {
   if (!issue) return 'unknown';
   return issue.status === 'done' || issue.status === 'canceled' ? issue.status : 'open';
+}
+
+/**
+ * The live issue a stored relation (`parent`, `blocked_by`) names: the id
+ * itself, or for the bare id of a resolved collision, the record its
+ * forwarding record names. Undefined for a dangling id.
+ */
+export function relatedIssue(view: TrackerView, id: string): IssueRecord | undefined {
+  const issue = view.issue(id);
+  if (issue) return issue;
+  const forward = view.forwardOf(id);
+  return forward === undefined ? undefined : view.issue(forward);
+}
+
+/**
+ * Whether a stored relation id names the live record `id`: the id itself, or
+ * a bare id written before a collision whose forwarding record maps it there.
+ * Every lookup from a record to the issues that name it (its sub-issues, the
+ * issues it blocks) goes through this.
+ */
+export function namesIssue(view: TrackerView, stored: string, id: string): boolean {
+  return stored === id || relatedIssue(view, stored)?.id === id;
+}
+
+/** The record id a stored relation id names in `view` (itself when it is dangling): `findCycle`'s `named`. */
+export function namedIn(view: TrackerView): (stored: string) => string {
+  return (stored) => relatedIssue(view, stored)?.id ?? stored;
 }
 
 /** The facts of an open attempt. */
@@ -136,12 +178,13 @@ export function derivations(view: TrackerView, staleBefore = Number.NEGATIVE_INF
   const children = new Map<string, IssueRecord[]>();
   for (const issue of view.issues()) {
     if (issue.parent === null) continue;
-    let list = children.get(issue.parent);
-    if (!list) children.set(issue.parent, (list = []));
+    const parent = relatedIssue(view, issue.parent)?.id ?? issue.parent;
+    let list = children.get(parent);
+    if (!list) children.set(parent, (list = []));
     list.push(issue);
   }
   const cache = new Map<string, Derived>();
-  const state = (id: string) => stateOf(view.issue(id));
+  const state = (id: string) => stateOf(relatedIssue(view, id));
   const derived: Derivations = {
     state,
     of(id) {
@@ -156,15 +199,7 @@ export function derivations(view: TrackerView, staleBefore = Number.NEGATIVE_INF
       }).length;
       const openAttempts = openAttemptsOf(view, id);
       const claimed = openAttempts.length > 0;
-      let conflict = fieldConflict(view, id);
-      if (openAttempts.length > 1) {
-        // Two open attempts (claims made on two clones) count as a conflict.
-        conflict = {
-          fields: [...(conflict?.fields ?? []), OPEN_ATTEMPTS_FIELD].sort(),
-          theirs: { ...conflict?.theirs, [OPEN_ATTEMPTS_FIELD]: openAttempts.map((a) => a.record.id) },
-          base: { ...conflict?.base, [OPEN_ATTEMPTS_FIELD]: [] },
-        };
-      }
+      const conflict = issueConflict(view, id, openAttempts);
       const ready =
         issue !== undefined &&
         stateOf(issue) === 'open' &&
@@ -197,9 +232,10 @@ export function derivations(view: TrackerView, staleBefore = Number.NEGATIVE_INF
  * for each of its blockers, and a parent waits for each of its sub-issues (it
  * isn't claimable while one is open). So pure parent cycles, pure blocker
  * cycles, and a sub-issue blocked by its own ancestor (neither could ever be
- * ready) are all cycles.
+ * ready) are all cycles. `named` maps a stored relation id to the record it
+ * names (a forwarded bare id to its record; see `namesIssue`).
  */
-export function findCycle(issues: readonly IssueRecord[], start: string): string[] | null {
+export function findCycle(issues: readonly IssueRecord[], start: string, named: (stored: string) => string = (id) => id): string[] | null {
   const waitsFor = new Map<string, string[]>();
   const edge = (from: string, to: string) => {
     let list = waitsFor.get(from);
@@ -207,8 +243,8 @@ export function findCycle(issues: readonly IssueRecord[], start: string): string
     list.push(to);
   };
   for (const issue of issues) {
-    for (const blocker of issue.blocked_by) edge(issue.id, blocker);
-    if (issue.parent !== null) edge(issue.parent, issue.id);
+    for (const blocker of issue.blocked_by) edge(issue.id, named(blocker));
+    if (issue.parent !== null) edge(named(issue.parent), issue.id);
   }
   const visited = new Set<string>();
   const path: string[] = [start];

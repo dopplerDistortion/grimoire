@@ -8,6 +8,28 @@ describe('the op registry', () => {
       const byName = Object.fromEntries(core.ops.map((op) => [op.name, op]));
 
       expect(Object.keys(byName).sort()).toEqual([
+        'assign',
+        'claim',
+        'close',
+        'comment',
+        'create',
+        'delete',
+        'labels',
+        'list',
+        'outcome_set',
+        'reassign',
+        'release',
+        'reopen',
+        'resolve',
+        'settings_get',
+        'settings_set',
+        'show',
+        'sync',
+        'sync_status',
+        'update',
+      ]);
+      // MCP lists exactly the agent tools of spec §8 (so far).
+      expect(core.ops.filter((op) => op.mcp).map((op) => op.name).sort()).toEqual([
         'claim',
         'close',
         'comment',
@@ -18,6 +40,9 @@ describe('the op registry', () => {
         'show',
         'update',
       ]);
+      // Runtime verbs: the CLI and the dashboard reach them; MCP never lists them (spec §8, §10).
+      expect(byName.sync).toMatchObject({ kind: 'write', policy: 'agent', mcp: false, inputSchema: { type: 'object', additionalProperties: false } });
+      expect(byName.sync_status).toMatchObject({ kind: 'read', policy: 'agent', mcp: false, annotations: { readOnlyHint: true } });
       expect(byName.show).toMatchObject({
         kind: 'read',
         policy: 'agent',

@@ -2,9 +2,19 @@
 // attempt lifecycle, as compare-and-set writes on the tracker.
 import { GrimoireError, invalid } from '../errors';
 import type { SecretScanner } from '../scanner';
-import { ATTEMPT_PATTERN, bareId, parseWriteRef, type AttemptRecord, type IssueRecord, type TrackerView, type Verdict } from '../tracker';
-import type { Actor } from './context';
-import { fieldConflict, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
+import {
+  ATTEMPT_PATTERN,
+  bareId,
+  parseWriteRef,
+  type AttemptEnding,
+  type AttemptRecord,
+  type IssueRecord,
+  type TrackerDraft,
+  type TrackerView,
+  type Verdict,
+} from '../tracker';
+import { humanSurface, type Actor } from './context';
+import { fieldConflict, namesIssue, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
 import { define, oneLine, writer, type OpEnv } from './op';
 import { applyPatch, patchOps, type PatchOp } from './patch';
 import { s } from './schema';
@@ -54,6 +64,27 @@ function alreadyClaimed(id: string, open: readonly OpenAttemptFacts[], person: s
   });
 }
 
+/**
+ * Refuses to open an attempt on an issue that isn't claimable, in the order a
+ * claim checks (spec §9): ALREADY_CLAIMED, STATE_CONFLICT, NOT_OPEN, then
+ * HAS_OPEN_CHILDREN. `person` is the caller's, for `held_by_you`.
+ */
+export function checkClaimable(view: TrackerView, id: string, person: string): void {
+  const issue = view.issue(id)!;
+  const open = openAttemptsOf(view, id);
+  if (open.length > 0) throw alreadyClaimed(id, open, person);
+  const conflict = fieldConflict(view, id);
+  if (conflict) throw stateConflict(id, conflict, 'it can’t be claimed');
+  if (issue.status !== 'open') throw new GrimoireError('NOT_OPEN', `${id} is ${issue.status}, not open`);
+  const openChildren = view.issues().filter((kid) => kid.parent !== null && namesIssue(view, kid.parent, id) && kid.status === 'open');
+  if (openChildren.length > 0) {
+    throw new GrimoireError(
+      'HAS_OPEN_CHILDREN',
+      `${id} has open sub-issues (${openChildren.map((kid) => kid.id).join(', ')}); claim the leaf you will work`,
+    );
+  }
+}
+
 export interface ClaimResult {
   id: string;
   /** The attempt handle: name it on update, comment, close and release. */
@@ -81,19 +112,7 @@ export const claim = define({
     const spec = { op: 'claim', author, actor, ...(key ? { idempotency: { key, fingerprint: { issue: ref } } } : {}) };
     const write = await tracker.transact(spec, (draft) => {
       const id = draft.resolveWrite(ref, 'id');
-      const issue = draft.issue(id)!;
-      const open = openAttemptsOf(draft, id);
-      if (open.length > 0) throw alreadyClaimed(id, open, author.email);
-      const conflict = fieldConflict(draft, id);
-      if (conflict) throw stateConflict(id, conflict, 'it can’t be claimed');
-      if (issue.status !== 'open') throw new GrimoireError('NOT_OPEN', `${id} is ${issue.status}, not open`);
-      const openChildren = draft.issues().filter((kid) => kid.parent === id && kid.status === 'open');
-      if (openChildren.length > 0) {
-        throw new GrimoireError(
-          'HAS_OPEN_CHILDREN',
-          `${id} has open sub-issues (${openChildren.map((kid) => kid.id).join(', ')}); claim the leaf you will work`,
-        );
-      }
+      checkClaimable(draft, id, author.email);
       const attempt = draft.openAttempt(id, {
         assignee: author.email,
         actor: recordedActor(author.email, actor),
@@ -278,7 +297,8 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
         if (yours) throw attemptOpen(id, yours, me);
         throw notAssignee(`${record.id} already ended (${record.end.ended}); nobody holds it now`);
       }
-      const othersAbandoned = ending === 'release-abandoned' && actor.kind === 'human';
+      // Only a human surface may release another person's attempt as abandoned (spec §7, §8).
+      const othersAbandoned = ending === 'release-abandoned' && humanSurface(ctx);
       if (record.start.assignee !== me && !othersAbandoned) {
         throw notAssignee(
           ending === 'release-abandoned'
@@ -335,27 +355,16 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
 
     const superseded = !issue || issue.status !== 'open';
     const ended = superseded ? 'superseded' : ending;
-    const sealing = draft.attempt(handle)!;
-    const fieldChanges = new Set(
-      sealing.activity.flatMap((entry) => (entry.detail?.kind === 'update' ? entry.detail.fields : [])),
-    );
-    if (issue && !superseded && (ending === 'done' || ending === 'canceled')) {
-      draft.putIssue({ ...issue, status: ending, updated_at: now });
-      fieldChanges.add('status');
-    }
-    const binding = [...bindingActors(sealing), ...(binds ? [by] : [])];
-    const assignee = sealing.start.assignee;
-    draft.sealAttempt(handle, {
+    const closes = issue !== undefined && !superseded && (ending === 'done' || ending === 'canceled');
+    if (closes) draft.putIssue({ ...issue, status: ending, updated_at: now });
+    const verdict = sealOpenAttempt(draft, handle, {
       ended,
-      ended_by: by,
+      by,
+      binds,
       debrief,
-      worker_kind: binding.some((a) => a.person === assignee && a.kind === 'agent') ? 'agent' : 'human',
-      wiki_exposed: sealing.start.wiki_exposed || binding.some((a) => a.chore_exposure !== undefined),
-      field_changes: [...fieldChanges].sort(),
+      fields: closes ? ['status'] : [],
       ...(superseded ? { requested: ending } : {}),
     });
-    const verdict = VERDICT[ended]!;
-    draft.putOutcome(handle, { verdict, reason: ended, set_by: 'grimoire' });
     const parentNoops = issue
       ? (parentEdit?.noops ?? []).map((op) => ({
           field: `parent_patch[${op}]`,
@@ -372,6 +381,47 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     return { result, issue: id, ...named };
   });
   return write.result;
+}
+
+/** How an attempt is sealed. */
+export interface Seal {
+  readonly ended: AttemptEnding;
+  /** The recorded actor ending it. */
+  readonly by: Readonly<Record<string, unknown>>;
+  /** Whether the ending write binds (it names the handle as the worker's own write). */
+  readonly binds: boolean;
+  readonly debrief?: string | null;
+  /** Issue fields this ending changes (a close's status). */
+  readonly fields?: readonly string[];
+  /** For a superseded seal: the ending the call asked for. */
+  readonly requested?: string;
+}
+
+/**
+ * Seals an open attempt and records grimoire's verdict for how it ended
+ * (spec §19, Outcomes): `end.md` with the worker kind, the wiki-exposed OR and
+ * the fields changed during the attempt, then the outcome. Returns the verdict.
+ */
+export function sealOpenAttempt(draft: TrackerDraft, handle: string, seal: Seal): Verdict {
+  const sealing = draft.attempt(handle)!;
+  const fieldChanges = new Set(
+    sealing.activity.flatMap((entry) => (entry.detail?.kind === 'update' ? entry.detail.fields : [])),
+  );
+  for (const field of seal.fields ?? []) fieldChanges.add(field);
+  const binding = [...bindingActors(sealing), ...(seal.binds ? [seal.by] : [])];
+  const assignee = sealing.start.assignee;
+  draft.sealAttempt(handle, {
+    ended: seal.ended,
+    ended_by: seal.by,
+    debrief: seal.debrief ?? null,
+    worker_kind: binding.some((a) => a.person === assignee && a.kind === 'agent') ? 'agent' : 'human',
+    wiki_exposed: sealing.start.wiki_exposed || binding.some((a) => a.chore_exposure !== undefined),
+    field_changes: [...fieldChanges].sort(),
+    ...(seal.requested !== undefined ? { requested: seal.requested } : {}),
+  });
+  const verdict = VERDICT[seal.ended]!;
+  draft.putOutcome(handle, { verdict, reason: seal.ended, set_by: 'grimoire' });
+  return verdict;
 }
 
 export const close = define({
