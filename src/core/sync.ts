@@ -139,6 +139,11 @@ async function pendingMarkers(machine: MachineLocalStore): Promise<PendingMarker
   return (await machine.coordination.list<PendingMarker>(PENDING)).map((entry) => entry.value).filter((m) => typeof m?.tip === 'string');
 }
 
+/** Whether any tip of this clone still waits to reach the remote (a sync-pending marker is set): upkeep's cue. */
+export async function syncPending(commonDir: string): Promise<boolean> {
+  return (await pendingMarkers(new MachineLocalStore(commonDir))).length > 0;
+}
+
 /** Clears every marker whose tip the remote holds (`remoteTip` or an ancestor), or that names no commit here. */
 async function clearHeld(machine: MachineLocalStore, root: string, remoteTip: string | null): Promise<void> {
   for (const marker of await pendingMarkers(machine)) {

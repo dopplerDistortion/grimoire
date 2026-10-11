@@ -62,9 +62,17 @@ _Avoid_: Dirty flag, outbox, queue
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config
 
+**Content pointer file**:
+A pointer file, or a marked block in one, that holds text grimoire ships and may change in any release, such as the instruction text or the issue-tracker adapter block; upkeep rewrites it when it drifts from the pinned version's text and asks the person to commit it, unlike the pointer files that carry entry commands or permission grants, which only an install or upgrade writes.
+_Avoid_: Doc file, generated file
+
 **Upkeep**:
 Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files and skill copies, done on the side by grimoire's own long-running processes rather than by any one command, and never by an LLM.
 _Avoid_: Housekeeping, maintenance, background job, daemon
+
+**Upkeep part**:
+One kind of upkeep work, done either once for the whole clone or once for each worktree that pins the running version, which a process skips while another process is doing the same part and which runs at most so often across the clone.
+_Avoid_: Task, job, step
 
 **Agent client**:
 A program that runs an AI agent's sessions on a developer's machine and through which the agent talks to grimoire, such as Claude Code or Codex.
