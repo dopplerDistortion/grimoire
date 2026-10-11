@@ -2,6 +2,7 @@
 // derivation; surfaces only render them): children, blocker states, open
 // attempts and their assignees, stale claims, ready, and the relation cycles
 // writes refuse.
+import { GrimoireError } from '../errors';
 import type { AttemptRecord, IssueRecord, TrackerView } from '../tracker';
 
 /** A blocker's state as a reader sees it: a dangling id reads as `unknown`, and it blocks. */
@@ -19,6 +20,50 @@ export interface OpenAttemptFacts {
   readonly clientsSeen: readonly string[];
 }
 
+/**
+ * A fold conflict as reads and STATE_CONFLICT show it: the conflicted fields,
+ * the value each had before both changes (`base`), and the one the fold set
+ * aside (`theirs`); the issue itself holds the value that stands.
+ */
+export interface IssueConflict {
+  fields: string[];
+  theirs: Record<string, unknown>;
+  base: Record<string, unknown>;
+}
+
+/** The field the conflict of two open attempts (after a cross-clone fold) names. */
+export const OPEN_ATTEMPTS_FIELD = 'open_attempts';
+
+/**
+ * The issue's field conflicts from its fold records, or null. Later records
+ * win `theirs`; the earliest one keeps `base`. This is what blocks claims,
+ * full-body replaces and writes to a conflicted field.
+ */
+export function fieldConflict(view: TrackerView, id: string): IssueConflict | null {
+  const records = view.conflicts(id);
+  if (records.length === 0) return null;
+  const fields = new Set<string>();
+  const theirs: Record<string, unknown> = {};
+  const base: Record<string, unknown> = {};
+  for (const record of records) {
+    for (const field of record.fields) {
+      if (!fields.has(field)) base[field] = record.base[field] ?? null;
+      fields.add(field);
+      theirs[field] = record.theirs[field] ?? null;
+    }
+  }
+  return { fields: [...fields].sort(), theirs, base };
+}
+
+/** STATE_CONFLICT: the write needs the conflict resolved first (a human op). */
+export function stateConflict(id: string, conflict: IssueConflict, what: string): GrimoireError {
+  return new GrimoireError(
+    'STATE_CONFLICT',
+    `${id} has a fold conflict on ${conflict.fields.join(', ')}: ${what} until a human resolves it; comments and anchored patches still work`,
+    { conflict },
+  );
+}
+
 /** Facts derived for one live issue. */
 export interface Derived {
   /** Live sub-issues, ordered by (seq, id). */
@@ -34,8 +79,8 @@ export interface Derived {
   readonly claimed: boolean;
   /** An open attempt has shown no activity since the stale cutoff. */
   readonly stale: boolean;
-  /** The fold conflict, or null (`{fields, theirs, base}` once folds land). */
-  readonly conflict: null;
+  /** The fold conflict, or null: field conflicts, and two open attempts (`open_attempts`). */
+  readonly conflict: IssueConflict | null;
   /** Ready = claimable: open, unclaimed, unconflicted, unblocked and with no open sub-issue. */
   readonly ready: boolean;
 }
@@ -111,8 +156,15 @@ export function derivations(view: TrackerView, staleBefore = Number.NEGATIVE_INF
       }).length;
       const openAttempts = openAttemptsOf(view, id);
       const claimed = openAttempts.length > 0;
-      // Fold conflicts arrive with the fold slice; until then nothing is conflicted.
-      const conflict = null;
+      let conflict = fieldConflict(view, id);
+      if (openAttempts.length > 1) {
+        // Two open attempts (claims made on two clones) count as a conflict.
+        conflict = {
+          fields: [...(conflict?.fields ?? []), OPEN_ATTEMPTS_FIELD].sort(),
+          theirs: { ...conflict?.theirs, [OPEN_ATTEMPTS_FIELD]: openAttempts.map((a) => a.record.id) },
+          base: { ...conflict?.base, [OPEN_ATTEMPTS_FIELD]: [] },
+        };
+      }
       const ready =
         issue !== undefined &&
         stateOf(issue) === 'open' &&
