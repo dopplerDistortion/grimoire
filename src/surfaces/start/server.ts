@@ -14,8 +14,9 @@
 //   GET  /open?ref=<text>             to the issue or attempt any text with a full id names
 //   GET  anything else                the static app: index.html (no-cache) for every route
 //
-// Every `/api` path needs the session (401 NO_SESSION); non-GET requests also
-// need a same-origin `Origin` and `X-Grimoire: 1`.
+// Every `/api` path but the sign-in needs the session (401 NO_SESSION, checked
+// first); non-GET requests, the sign-in included, also need a same-origin
+// `Origin` and `X-Grimoire: 1` (403 INVALID).
 import { readFile, stat } from 'node:fs/promises';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -163,20 +164,27 @@ export function createDashboardServer(options: DashboardServerOptions): http.Ser
   const cookieName = sessionCookieName(options.cloneId);
   const assetsDir = path.resolve(options.assetsDir);
 
+  /** A non-GET request's same-origin `Origin` and `X-Grimoire: 1`: the refusal when either is missing, else null. */
+  const crossSite = (request: IncomingMessage): ErrorBody | null => {
+    const method = request.method ?? 'GET';
+    if (method === 'GET' || method === 'HEAD') return null;
+    const host = request.headers.host?.trim().toLowerCase();
+    const origin = request.headers.origin?.trim().toLowerCase();
+    if (!origin || origin !== `http://${host}`) {
+      return refusal('INVALID', 'the dashboard takes writes only from its own pages (same-origin Origin)', { fields: { origin: 'must be this dashboard’s own origin' } });
+    }
+    if (request.headers['x-grimoire'] !== '1') {
+      return refusal('INVALID', 'the dashboard takes writes only with the X-Grimoire: 1 header', { fields: { 'x-grimoire': 'must be 1' } });
+    }
+    return null;
+  };
+
   const api = async (request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> => {
     const method = request.method ?? 'GET';
-    if (method !== 'GET' && method !== 'HEAD') {
-      // Before the session: a cross-site page can't even probe what it would get.
-      const host = request.headers.host?.trim().toLowerCase();
-      const origin = request.headers.origin?.trim().toLowerCase();
-      if (!origin || origin !== `http://${host}`) {
-        return failure(response, refusal('INVALID', 'the dashboard takes writes only from its own pages (same-origin Origin)', { fields: { origin: 'must be this dashboard’s own origin' } }), {}, 403);
-      }
-      if (request.headers['x-grimoire'] !== '1') {
-        return failure(response, refusal('INVALID', 'the dashboard takes writes only with the X-Grimoire: 1 header', { fields: { 'x-grimoire': 'must be 1' } }), {}, 403);
-      }
-    }
     if (url.pathname === '/api/session' && method === 'POST') {
+      // The sign-in itself needs no session, only a request from the dashboard's own page.
+      const refused = crossSite(request);
+      if (refused) return failure(response, refused, {}, 403);
       const input = parseJson(await readBody(request), 'body') as { code?: unknown } | null;
       const token = options.signIns.exchange(input && typeof input === 'object' ? input.code : undefined);
       if (token === null) {
@@ -192,6 +200,9 @@ export function createDashboardServer(options: DashboardServerOptions): http.Ser
     if (!session) {
       return failure(response, refusal('NO_SESSION', 'this browser isn’t signed in to the dashboard; run `grimoire open` in a terminal to sign in'));
     }
+    // The session cookie also rides along from another page on 127.0.0.1 (same site, another port).
+    const refused = crossSite(request);
+    if (refused) return failure(response, refused, {}, 403);
     if (url.pathname === '/api/session') {
       if (method === 'DELETE') {
         options.signIns.revoke(cookie);

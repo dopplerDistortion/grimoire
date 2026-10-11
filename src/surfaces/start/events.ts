@@ -177,7 +177,7 @@ export class LiveEvents {
     }
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
-        for (const { response } of this.streams) response.write('event: heartbeat\ndata: {}\n\n');
+        for (const { response } of this.streams) if (!response.destroyed && !response.writableEnded) response.write('event: heartbeat\ndata: {}\n\n');
       }, this.options.heartbeatMs ?? HEARTBEAT_MS);
       this.heartbeatTimer.unref();
     }

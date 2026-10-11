@@ -64,6 +64,9 @@ describe('start: sign-in and sessions', () => {
         { path: '/api/nothing-here' },
         { method: 'POST', path: '/api/op/create', headers: writeHeaders(port), body: '{"title":"x"}' },
         { method: 'DELETE', path: '/api/session', headers: writeHeaders(port) },
+        // No session comes first, whatever else a write lacks.
+        { method: 'POST', path: '/api/op/create', headers: { 'content-type': 'application/json' }, body: '{"title":"x"}' },
+        { method: 'DELETE', path: '/api/session', headers: { origin: 'http://evil.example', 'x-grimoire': '1' } },
       ].map((options) => request(port, options)),
     );
 
