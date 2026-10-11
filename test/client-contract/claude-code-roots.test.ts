@@ -14,6 +14,12 @@ const AGENT = 'aa0434c9616245e9e';
 /** The subagent's `mcp__grimoire__show`, and the plain session's `mcp__grimoire__comment`. */
 const SUBAGENT_CALL = 'toolu_01RgZkxkBkrfVmCHWzxZ2nWH';
 const PLAIN_CALL = 'toolu_01FGkSuaFCkBXSzKt8JWTnv7';
+/** A `--resume --fork-session` pair: the origin, and the fork that copied its history from the compaction on. */
+const FORK_ORIGIN = '18aa1670-988c-4aaf-bb6f-ca64e8e30d07';
+const FORKED = 'c90649d0-b4ab-422d-83f0-0869304b2c19';
+/** The origin's `show gr-3`, after its compaction (so the fork copied it), and the fork's own `show gr-4`. */
+const ORIGIN_SHOW = 'toolu_017brzJ1nF9GyFQfV2bk76Lg';
+const FORK_SHOW = 'toolu_01PXHMnGYrAn3jdSZckZizwH';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -90,6 +96,27 @@ describe('a context known only by its tool-use ids', () => {
 
     expect(await findClaudeTranscript({ configDir: dir, callIds: [PLAIN_CALL], calledAt: '2026-10-11T03:30:40.000Z' })).toEqual({ status: 'not_found' });
     expect(await findClaudeTranscript({ configDir: dir, callIds: [PLAIN_CALL], calledAt: '2026-10-11T02:30:40.000Z' })).toMatchObject({ session: PLAIN });
+  });
+
+  it('held by a fork only in the history it copied belongs to the origin, which wrote it, however much newer the fork is', async () => {
+    const dir = await configDir({
+      'C--a': [
+        { folder: 'fork', session: FORK_ORIGIN },
+        { folder: 'fork', session: FORKED },
+      ],
+    });
+    const at = (session: string, iso: string) => utimes(path.join(dir, 'projects', 'C--a', `${session}.jsonl`), new Date(iso), new Date(iso));
+    await at(FORK_ORIGIN, '2026-10-11T03:30:00.000Z');
+    await at(FORKED, '2026-10-11T04:00:00.000Z');
+
+    expect(await findClaudeTranscript({ configDir: dir, callIds: [ORIGIN_SHOW], calledAt: '2026-10-11T03:27:30.000Z' })).toMatchObject({
+      status: 'found',
+      session: FORK_ORIGIN,
+    });
+    // The fork's own call is the fork's.
+    expect(await findClaudeTranscript({ configDir: dir, callIds: [FORK_SHOW] })).toMatchObject({ status: 'found', session: FORKED });
+    // And so is the copied call when the spawn-env session is the fork: only the origin wrote it.
+    expect(await findClaudeTranscript({ configDir: dir, callIds: [ORIGIN_SHOW], spawnEnv: FORKED })).toMatchObject({ session: FORK_ORIGIN });
   });
 
   it('gives budget once the search overruns its deadline', async () => {

@@ -1,6 +1,8 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isCall } from '../steps';
+import { readClaudeCodeTranscript } from './reader';
 
 // Finding a Claude Code context's transcript by id (spec §14 Roots), under
 // `$CLAUDE_CONFIG_DIR` or `~/.claude`, in `projects/<slug>/`:
@@ -10,7 +12,9 @@ import path from 'node:path';
 // in the spawn-env session's project folder, then in every project folder. With
 // no session, only a tool-use id to go on, the transcript holding the call is
 // searched for: the spawn-env session's files first, then every transcript
-// modified at or after the call, newest first.
+// modified at or after the call, newest first. A transcript holds a call only
+// if it wrote it: a fork that holds it only in the history it copied from
+// another session doesn't (spec §14 Forks).
 
 export interface FindClaudeTranscriptOptions {
   /** `$CLAUDE_CONFIG_DIR`, or `~/.claude`. */
@@ -74,15 +78,22 @@ export async function findClaudeTranscript(options: FindClaudeTranscriptOptions)
 
   const ids = (options.callIds ?? []).filter((id) => id !== '');
   if (ids.length === 0) return { status: 'not_found' };
-  const holds = async (file: string) => {
-    const text = await readFile(file, 'utf8').catch(() => '');
-    return ids.some((id) => text.includes(JSON.stringify(id)));
+  const holds = async (file: { path: string; agentId?: string }, slug: string, session: string) => {
+    const text = await readFile(file.path, 'utf8').catch(() => '');
+    if (!ids.some((id) => text.includes(JSON.stringify(id)))) return false;
+    // Only the transcript that wrote the call: a fork's copied history holds its origin's calls too.
+    const read = await readClaudeCodeTranscript(path.join(projects, slug, `${session}.jsonl`), file.agentId !== undefined ? { agentId: file.agentId } : {}).catch(
+      () => null,
+    );
+    if (read === null || !read.found) return true;
+    const own = new Set(read.transcript.steps.slice(read.transcript.copiedSteps).flatMap((step) => (isCall(step) ? [step.id] : [])));
+    return ids.some((id) => own.has(id));
   };
   // The spawn-env session's own files first.
   if (spawnSlug !== undefined && options.spawnEnv !== undefined) {
     for (const file of await sessionFiles(projects, spawnSlug, options.spawnEnv)) {
       if (overrun()) return { status: 'budget' };
-      if (await holds(file.path)) return found(projects, spawnSlug, options.spawnEnv, file.agentId);
+      if (await holds(file, spawnSlug, options.spawnEnv)) return found(projects, spawnSlug, options.spawnEnv, file.agentId);
     }
   }
   const since = options.calledAt === undefined ? NaN : Date.parse(options.calledAt);
@@ -103,7 +114,7 @@ export async function findClaudeTranscript(options: FindClaudeTranscriptOptions)
   candidates.sort((a, b) => b.mtime - a.mtime);
   for (const candidate of candidates) {
     if (overrun()) return { status: 'budget' };
-    if (await holds(candidate.path)) return found(projects, candidate.slug, candidate.session, candidate.agentId);
+    if (await holds(candidate, candidate.slug, candidate.session)) return found(projects, candidate.slug, candidate.session, candidate.agentId);
   }
   return { status: 'not_found' };
 }
