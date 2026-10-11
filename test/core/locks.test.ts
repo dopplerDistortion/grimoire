@@ -1,6 +1,8 @@
-import { mkdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { rm, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, expect } from 'vitest';
+import { MachineLocalStore } from '../../src/machine-local';
 import { coreTest as test, expectRefUnmoved, trackerTip } from './support';
 
 const ago = (ms: number) => new Date(Date.now() - ms);
@@ -58,25 +60,41 @@ describe('ref locks and the fairness lock', () => {
     await rm(lock);
   });
 
-  test('a fairness lock held by a live writer delays writes; past the budget they get BUSY', async ({
+  test('the fairness lock held by another writer delays writes, which land once it is released', async ({
     world,
     grimoire,
   }) => {
-    const fairness = path.join(world.a.dir, '.git', 'grimoire', 'locks', 'tracker-write.lock');
-    await mkdir(path.dirname(fairness), { recursive: true });
-    await writeFile(fairness, JSON.stringify({ token: 'other', pid: 1, at: new Date().toISOString() }));
-    const core = grimoire.makeCore({ writeBudgetMs: 800 });
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const held = await machine.locks.acquire('tracker-write');
+    if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+    setTimeout(() => void held.lock.release(), 600);
+    const started = Date.now();
 
-    const outcome = await expectRefUnmoved(world.a, () => core.call('create', { title: 'Waiting' }, grimoire.ctx));
+    const outcome = await grimoire.core.call('create', { title: 'Waited' }, grimoire.ctx);
 
-    expect(outcome).toMatchObject({ ok: false, error: { code: 'BUSY', retryable: true, details: {} } });
+    expect(outcome).toMatchObject({ ok: true, result: { created: true } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(500);
   });
 
-  test('an abandoned fairness lock (no heartbeat) is taken over', async ({ world, grimoire }) => {
-    const fairness = path.join(world.a.dir, '.git', 'grimoire', 'locks', 'tracker-write.lock');
-    await mkdir(path.dirname(fairness), { recursive: true });
-    await writeFile(fairness, JSON.stringify({ token: 'dead', pid: 1, at: ago(60_000).toISOString() }));
-    await utimes(fairness, ago(60_000), ago(60_000));
+  test('the fairness lock held past the write budget gives BUSY and changes nothing', async ({ world, grimoire }) => {
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const held = await machine.locks.acquire('tracker-write');
+    if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+    const core = grimoire.makeCore({ writeBudgetMs: 800 });
+    try {
+      const outcome = await expectRefUnmoved(world.a, () => core.call('create', { title: 'Waiting' }, grimoire.ctx));
+
+      expect(outcome).toMatchObject({ ok: false, error: { code: 'BUSY', retryable: true, details: {} } });
+    } finally {
+      await held.lock.release();
+    }
+  });
+
+  test('a lapsed fairness lock (no heartbeat) is taken over', async ({ world, grimoire }) => {
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const held = await machine.locks.acquire('tracker-write', { ttlMs: 50 });
+    expect(held.status).toBe('acquired');
+    await sleep(100);
 
     const outcome = await grimoire.core.call('create', { title: 'Taking over' }, grimoire.ctx);
 
