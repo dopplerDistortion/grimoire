@@ -82,6 +82,15 @@ that copy too (`src/surfaces/delegate.ts`), or exits 3 with the join command.
 A hook verb always exits 0 and swallows its own failures; set `GRIMOIRE_DEBUG=1`
 to see them on stderr.
 
+`init` (`src/installer/init.ts`, its verb in `src/surfaces/cli/init.ts`) installs
+or joins: a read-only preflight (remote, explicit tracker fetch, Node, identity),
+the plan with the grants and the excerpt disclosure and one consent, then the
+tracker (adopted, or minted with its settings seeded and pushed), the version
+copy, launcher and join record, the pointer files and the manifest
+(`src/installer/{pointers,writer,manifest}.ts`), and `.grimoire/config.yml`
+last. `--yes` takes the safe defaults; `--json` alone prints the plan and
+writes nothing.
+
 The dashboard (Preact) lives in
 `src/surfaces/dashboard/`, and `npm run dev:dashboard` serves it.
 

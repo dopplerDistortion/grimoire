@@ -6,12 +6,12 @@
 // Model turns were scripted by a local stand-in for the Responses API (Codex
 // was not logged in); everything else in these artifacts is the real Codex.
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixturePath, makeTempDir, readFixture, readFixtureBytes, readFixtureJson, removeDir } from '#harness';
+import { codexHookGroupHash } from '../../src/installer/pointers';
 import { foreignUserPaths, userNameLeftovers } from './codex-mcp-hooks-transcripts/sanitize.mjs';
 
 interface CodexToolsCallMeta {
@@ -690,27 +690,21 @@ describe('Codex hook trust (P4)', () => {
     expect(hook).toMatchObject({ key: main.key, sourcePath: main.sourcePath, trustStatus: 'trusted' });
   });
 
-  it('the trust hash Codex reports is reproducible from the hook definition alone', () => {
+  it('the trust hash Codex reports is reproducible from the hook definition alone, by the recipe grimoire uses', () => {
     // Codex 0.162.1 (hooks/src/engine/discovery.rs hook_hash, config/src/fingerprint.rs):
     // sha256 over compact JSON, keys sorted, of {event_name, matcher?, hooks: [handler]}.
-    const sortKeys = (v: unknown): unknown =>
-      Array.isArray(v)
-        ? v.map(sortKeys)
-        : v && typeof v === 'object'
-          ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys((v as Record<string, unknown>)[k])]))
-          : v;
-    const codexHookHash = (hook: HookMetadata) => {
-      const handler = { type: hook.handlerType, command: hook.command, timeout: hook.timeoutSec, async: hook.async };
-      // The event name is the snake_case one in the key, e.g. pre_tool_use.
-      const eventName = hook.key.slice(hook.sourcePath.length + 1).split(':')[0]!;
-      const identity = { event_name: eventName, ...(hook.matcher !== null && { matcher: hook.matcher }), hooks: [handler] };
-      return `sha256:${createHash('sha256').update(JSON.stringify(sortKeys(identity))).digest('hex')}`;
-    };
+    const hashOf = (hook: HookMetadata) =>
+      codexHookGroupHash({
+        // The event name is the snake_case one in the key, e.g. pre_tool_use.
+        event_name: hook.key.slice(hook.sourcePath.length + 1).split(':')[0]!,
+        matcher: hook.matcher,
+        hooks: [{ type: hook.handlerType, command: hook.command, timeout: hook.timeoutSec, async: hook.async }],
+      });
 
     const all = ['untrusted', 'group-inserted', 'timeout-changed', 'second-clone', 'mixed-groups'].flatMap(listing);
     expect(all.length).toBe(9);
     expect(all.filter((h) => h.matcher !== null)).toHaveLength(1);
-    for (const hook of all) expect(codexHookHash(hook)).toBe(hook.currentHash);
+    for (const hook of all) expect(hashOf(hook)).toBe(hook.currentHash);
   });
 
   it('trust is written to the user config as hooks.state.<key>.trusted_hash', () => {

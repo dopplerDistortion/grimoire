@@ -1,7 +1,7 @@
 // Shared setup for the installer's tests: packages to install as version
 // copies, joined clones, and client entries run as the clients run them.
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -132,4 +132,22 @@ export async function packGrimoire(version: string): Promise<{ tarball: string; 
     await removeDir(dir);
     throw error;
   }
+}
+
+/**
+ * Installs a packed tarball the way `npx` installs a package: `npm install`
+ * into a fresh prefix, which records npm's integrity for it in
+ * `node_modules/.package-lock.json`. Returns the package's bin. The prefix
+ * gets its own package.json first: without one, npm installs into the first
+ * folder above it that has a package.json or node_modules.
+ */
+export function npxInstall(tarball: string, prefix: string): string {
+  writeFileSync(path.join(prefix, 'package.json'), `${JSON.stringify({ private: true })}\n`);
+  const result = spawnSync(
+    process.execPath,
+    [npmCli(), 'install', '--offline', '--no-audit', '--no-fund', '--ignore-scripts', '--loglevel=error', tarball],
+    { cwd: prefix, encoding: 'utf8', windowsHide: true, timeout: 120_000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  return path.join(prefix, 'node_modules', '@goksening', 'grimoire', 'dist', 'grimoire.mjs');
 }

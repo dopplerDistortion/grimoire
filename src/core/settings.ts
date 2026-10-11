@@ -128,6 +128,51 @@ const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(
   },
 } satisfies Record<string, SettingSpec>));
 
+/** The store setting that holds the excerpt mode (spec §14, The setting). */
+export const EXCERPTS_SETTING = 'excerpts';
+export const EXCERPT_MODES = ['excerpts', 'facts', 'none'] as const;
+export type ExcerptMode = (typeof EXCERPT_MODES)[number];
+/**
+ * What a tracker without the setting is treated as: `init` seeds it on every
+ * mint, so only a tracker made some other way lacks it, and it gets the mode
+ * that commits no transcript text.
+ */
+export const EXCERPTS_UNSET: ExcerptMode = 'facts';
+
+export function isExcerptMode(value: unknown): value is ExcerptMode {
+  return typeof value === 'string' && (EXCERPT_MODES as readonly string[]).includes(value);
+}
+
+/** The store's excerpt mode in `view`. */
+export function storeExcerptMode(view: Pick<TrackerView, 'settings'>): ExcerptMode {
+  const value = view.settings().get(EXCERPTS_SETTING)?.value;
+  return isExcerptMode(value) ? value : EXCERPTS_UNSET;
+}
+
+/**
+ * The full settings a new tracker is seeded with (spec §12, init step 4): the
+ * excerpt mode chosen at the mint, and every store setting this release knows
+ * at its default. (The excerpt mode itself joins the catalog with the slice
+ * that governs changing it.)
+ */
+export function seedStoreSettings(mode: ExcerptMode): Map<string, unknown> {
+  const seed = new Map<string, unknown>([[EXCERPTS_SETTING, mode]]);
+  for (const [key, spec] of SETTINGS) if (spec.scope === 'store') seed.set(key, spec.fallback(''));
+  return seed;
+}
+
+/** Sets a machine setting for this clone (`settings_set`'s machine half, for init's join). */
+export async function putMachineSetting(commonDir: string, key: string, value: unknown): Promise<void> {
+  const spec = SETTINGS.get(key);
+  if (!spec || spec.scope !== 'machine' || spec.parse(value) === undefined) throw new Error(`${key} can't be set to ${JSON.stringify(value)}`);
+  await new MachineLocalStore(commonDir).records.write(MACHINE_SETTINGS, key, spec.parse(value) as never);
+}
+
+/** A machine setting as this clone has it, or undefined when never set. */
+export function readMachineSetting(commonDir: string, key: string): Promise<unknown> {
+  return new MachineLocalStore(commonDir).records.read(MACHINE_SETTINGS, key);
+}
+
 /**
  * A store setting's value in `view`: the one set when it is valid for this
  * release, else its default.

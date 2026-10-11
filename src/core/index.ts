@@ -185,7 +185,7 @@ function watched(tracker: TrackerStore, requestSync: (commit: string) => void, b
       if (write.commit && write.attempt && write.issue) bindings.push({ handle: write.attempt, issue: write.issue });
       return write;
     },
-    initialize: (spec) => tracker.initialize(spec),
+    initialize: (spec, options) => tracker.initialize(spec, options),
     fold: (spec) => tracker.fold(spec),
     sync: (spec) => tracker.sync(spec),
     close: () => tracker.close(),
