@@ -10,7 +10,12 @@ export interface LockOptions {
   readonly ttlMs?: number;
   /** Extra fields for other processes to see (the `start` lock's port and nonce). */
   readonly data?: { readonly [key: string]: Json };
+  /** A further staleness check, asked only of a holder that otherwise holds it (the `start` lock's health probe). */
+  readonly staleIf?: StaleCheck;
 }
+
+/** Whether a holder whose process lives no longer holds the lock all the same. */
+export type StaleCheck = (holder: Holder) => Promise<boolean>;
 
 /** A lock this process holds: `renew(ttlMs)` and `release()`. */
 export class Lock extends Held {}
@@ -64,7 +69,7 @@ export class Locks {
           expires_at: options.ttlMs === undefined ? null : Date.now() + options.ttlMs,
           ...(options.data ? { data: options.data } : {}),
         },
-        (state) => this.isStale(state),
+        (state) => this.isStale(state, options.staleIf),
       );
       if ('taken' in result) return { status: 'acquired', lock: new Lock(slot, result.taken) };
       if (Date.now() >= deadline) return { status: 'held', holder: holderOf(result.held) };
@@ -83,22 +88,22 @@ export class Locks {
     }
   }
 
-  /** The lock's state, without touching it. */
-  async inspect(name: string): Promise<LockState> {
+  /** The lock's state, without touching it; `staleIf` as for acquire. */
+  async inspect(name: string, options: { readonly staleIf?: StaleCheck } = {}): Promise<LockState> {
     const state = await this.slot(name).current();
     if (!state || state.holder?.released_at) return { status: 'free' };
-    if (await this.isStale(state)) return { status: 'stale', holder: state.holder };
+    if (await this.isStale(state, options.staleIf)) return { status: 'stale', holder: state.holder };
     return { status: 'held', holder: holderOf(state) };
   }
 
-  private async isStale(state: SlotState): Promise<boolean> {
+  private async isStale(state: SlotState, staleIf?: StaleCheck): Promise<boolean> {
     const holder = state.holder;
     const now = Date.now();
     if (!holder) return now > state.mtimeMs + UNREADABLE_GRACE_MS;
     if (holder.released_at !== null) return true;
     if (holder.expires_at !== null && now > holder.expires_at) return true;
-    if (holder.host !== this.host) return false;
-    return !(await this.isLive(holder));
+    if (holder.host === this.host && !(await this.isLive(holder))) return true;
+    return staleIf ? staleIf(holder) : false;
   }
 
   private async isLive(holder: Holder): Promise<boolean> {

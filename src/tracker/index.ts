@@ -5,6 +5,7 @@ export {
   DEFAULT_BUDGET_MS,
   STALE_REF_LOCK_MS,
   type TrackerStore,
+  type TrackerTips,
   type TrackerOptions,
   type WriteSpec,
   type WriteOutcome,

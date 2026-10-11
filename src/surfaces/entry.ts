@@ -44,6 +44,11 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
     const { runInitVerb } = await import('./cli/init');
     return runInitVerb(withFrom(rest.slice(1)), { bin: options.bin });
   }
+  if (rest[0] === 'start' || rest[0] === 'open') {
+    const { runOpenVerb, runStartVerb } = await import('./start/run');
+    const run = rest[0] === 'start' ? runStartVerb : runOpenVerb;
+    return run(withFrom(rest.slice(1)), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
+  }
   const { runCli } = await import('./cli/run');
   return runCli(withFrom(rest), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
 }

@@ -33,3 +33,14 @@ export {
 export { Caches, type CacheOptions } from './caches';
 export { cloneId, cloneTag, defaultDashboardPort, START_LOCK, type StartLockData } from './clone';
 export { readTextIfExists, retryTransient, writeFileAtomic } from './fs-atomic';
+export {
+  probeStart,
+  runningStart,
+  startLockData,
+  startStaleness,
+  START_HEALTH_PATH,
+  START_PROBE_MS,
+  START_SERVICE,
+  type RunningStart,
+} from './start-lock';
+export type { StaleCheck } from './locks';
