@@ -33,14 +33,14 @@ const liveTest = coreTest.extend('served', async ({ world, grimoire: _ }, { onCl
 });
 
 describe('start: live events', () => {
-  liveTest('a tracker write by another process produces a change event naming its issue within ~2 s', async ({ world, grimoire, served }) => {
+  // How soon it arrives is timed alone, in live-latency.test.ts.
+  liveTest('a tracker write by another process produces a change event naming its issue', async ({ world, grimoire, served }) => {
     const { port, cookie } = served;
     const events = await SseClient.connect(port, cookie);
     const ready = await events.next((event) => event.event === 'ready');
 
     // This test process is the other process: an agent's write through its own core.
     const created = await grimoire.makeCore().call('create', { title: 'Written by another process' }, grimoire.ctx);
-    const written = Date.now();
     if (!created.ok) throw new Error(JSON.stringify(created.error));
     const change = await events.next((event) => event.event === 'change');
     events.close();
@@ -49,8 +49,6 @@ describe('start: live events', () => {
     expect(change.data).toMatchObject({ issues: [created.result.id], attempts: [], knowledge: false, settings: false, sync: true, agent: true });
     expect((change.data.tips as { local: string }).local).toBe(await world.a.git(['rev-parse', 'refs/grimoire/tracker']));
     expect(change.id).toMatch(new RegExp(`^${(change.data.tips as { local: string }).local}:0:[0-9a-f]{12}$`));
-    // The tips are checked about every second: ~2 s, with room for a loaded machine.
-    expect(change.receivedAt - written).toBeLessThan(3_000);
   });
 
   liveTest('Last-Event-ID resumes without loss: writes made while the stream was down arrive on reconnect', async ({ world, served }) => {
