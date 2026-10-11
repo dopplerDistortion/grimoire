@@ -52,6 +52,10 @@ _Avoid_: Grab, pick up, self-assign
 Giving up a claim without closing the issue, which ends the attempt as a fail.
 _Avoid_: Unclaim, unassign, drop
 
+**Stale claim**:
+A claim whose open attempt has shown no activity for longer than a set time; because attempts never time out, it holds until a human releases it as abandoned.
+_Avoid_: Expired claim, dead claim, zombie claim
+
 **Assignee**:
 The person who holds an issue's open attempt: always a human, known by their git identity, even while an agent works the issue on their behalf; an issue with no open attempt has none.
 _Avoid_: Owner, agent, worker
@@ -63,6 +67,16 @@ _Avoid_: Author, user, caller
 **Session**:
 One conversation an agent client runs, known by the client's own id for it; work a subagent does belongs to the session that launched it, and clearing or forking a conversation starts a new session.
 _Avoid_: Thread, chat, conversation
+
+### Surfaces
+
+**Dashboard**:
+The local web page a running grimoire serves to the person at the machine for one host repo; it shows the live store and, together with human-only CLI commands, is the only place a human-only operation can be done.
+_Avoid_: UI, web app, admin panel, console
+
+**Human-only operation**:
+An operation grimoire never offers to agents, available only in the dashboard and in CLI commands that need an interactive terminal, such as reopening an issue, purging a trace or deciding a skill proposal.
+_Avoid_: Admin action, privileged operation
 
 ### Knowledge
 
