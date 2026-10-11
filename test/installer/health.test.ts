@@ -142,9 +142,31 @@ describe('doctor', () => {
 
     const help = await shim(root, ['doctor', '--help']);
     const usage = await shim(root, ['doctor', '--frobnicate']);
+    const statusHelp = await shim(root, ['status', '--help']);
 
     expect(help).toMatchObject({ code: 0, json: { verb: 'doctor', flags: { '--fix': expect.any(String) } } });
     expect(usage).toMatchObject({ code: 2, json: { usage_error: { help: 'grimoire doctor --help' } } });
+    expect(statusHelp).toMatchObject({ code: 0, json: { verb: 'status', flags: { '--json': expect.any(String) } } });
+  }, LONG);
+
+  gitTest('--from names the repo through the shim too, in either spelling; no repo there is an error object and exit 1', async ({ world }) => {
+    const root = await installed(world);
+    const nowhere = await makeTempDir('grimoire-no-repo-');
+    try {
+      const other = await shim(root, ['status', '--json', `--from=${world.b.dir}`]);
+      const otherDoctor = await shim(root, ['doctor', '--json', '--from', world.b.dir]);
+      const lost = await shim(root, ['status', `--from=${nowhere}`]);
+      const lostDoctor = await shim(root, ['doctor', '--from', nowhere]);
+
+      expect(other).toMatchObject({ code: 0, stderr: '', json: { version: PIN, root: world.b.dir, pin: null } });
+      expect(otherDoctor).toMatchObject({ code: 0, stderr: '', json: { root: world.b.dir, pin: null } });
+      for (const run of [lost, lostDoctor]) {
+        expect(run.code).toBe(1);
+        expect(run.json).toEqual({ error: expect.objectContaining({ code: 'NO_REPO' }) });
+      }
+    } finally {
+      await removeDir(nowhere);
+    }
   }, LONG);
 });
 

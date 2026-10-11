@@ -63,8 +63,10 @@ export class Slot {
     root: string,
     readonly name: string,
     private readonly host: string = currentHost(),
+    /** The slot's folder under `root`: the name's own, unless a listing found it. */
+    folder: string = fileNameForKey(name),
   ) {
-    this.dir = path.join(root, fileNameForKey(name));
+    this.dir = path.join(root, folder);
   }
 
   private genFile(gen: number): string {
@@ -203,10 +205,11 @@ export class Held {
  */
 export async function slotNames(root: string): Promise<string[]> {
   const names: string[] = [];
-  for (const dir of (await readdir(root).catch(() => [] as string[])).sort()) {
-    const state = await new Slot(root, dir).current().catch(() => null);
+  for (const folder of (await readdir(root).catch(() => [] as string[])).sort()) {
+    // Read the folder as listed: a hashed folder name is no slot name of its own.
+    const state = await new Slot(root, folder, undefined, folder).current().catch(() => null);
     const name = state?.holder?.name;
-    if (typeof name === 'string' && name !== '' && new Slot(root, name).dir === path.join(root, dir)) names.push(name);
+    if (typeof name === 'string' && name !== '' && fileNameForKey(name) === folder) names.push(name);
   }
   return names;
 }

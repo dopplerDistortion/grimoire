@@ -8,7 +8,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { GitWorld } from '#harness';
 import type { CallContext } from '../../src/core';
-import { runDoctor, type DoctorReport } from '../../src/installer/doctor';
+import { DOCTOR_CHECKS, runDoctor, type DoctorReport } from '../../src/installer/doctor';
 import type { Finding } from '../../src/installer/health';
 import { agentContext, commitToTracker, coreTest as test, fetchTracker, issuePath, pushTracker, T0 } from '../core/support';
 
@@ -24,6 +24,9 @@ function found(report: DoctorReport, kind: string): Finding[] {
 }
 
 const T1 = new Date(T0.getTime() + 60_000);
+
+/** The checks about refs and sync: the runs that only look at those skip the rest. */
+const REF_CHECKS = DOCTOR_CHECKS.filter((check) => ['store.ref-locks', 'store.sync', 'store.ref-names'].includes(check.name));
 
 /** A remote pre-receive hook that rejects every push the way GitHub's rulesets do. */
 const REJECTING_HOOK = ['#!/bin/sh', 'echo "GH013: Repository rule violations found for refs/heads/grimoire/tracker." >&2', 'exit 1', ''].join('\n');
@@ -46,7 +49,10 @@ function trackerText(world: GitWorld, file: string): Promise<string> {
   return world.a.git(['cat-file', 'blob', `refs/grimoire/tracker:${file}`]);
 }
 
-describe('store checks', () => {
+/** Each test drives clones, a bare remote and every store check: room for a loaded machine. */
+const SLOW = { timeout: 240_000 };
+
+describe('store checks', SLOW, () => {
   test('a record the canonical serializer did not write is reported non-canonical, by its path', async ({ world, grimoire }) => {
     const { id } = await ok(grimoire.core.call('create', { title: 'Tidy the records' }, grimoire.ctx));
     const file = issuePath(id);
@@ -123,7 +129,9 @@ describe('store checks', () => {
 
     const report = await runDoctor({ root: world.a.dir });
 
-    expect(found(report, 'conflict')).toEqual([expect.objectContaining({ subject: titled, details: expect.objectContaining({ fields: ['title'] }) })]);
+    expect(found(report, 'conflict')).toEqual([
+      expect.objectContaining({ subject: titled, remedy: expect.stringContaining(`grimoire resolve ${titled}`), details: expect.objectContaining({ fields: ['title'] }) }),
+    ]);
     expect(found(report, 'double-open-attempts')).toEqual([expect.objectContaining({ subject: contested })]);
   });
 
@@ -223,6 +231,40 @@ describe('store checks', () => {
     const report = await runDoctor({ root: world.a.dir });
 
     expect(found(report, 'df-ref-conflict')).toEqual([expect.objectContaining({ subject: 'refs/remotes/origin/grimoire' })]);
+  });
+
+  test('a push the remote refused over a ref named like a folder of the tracker branch is a D/F conflict', async ({ world, grimoire }) => {
+    await pushTracker(world.a);
+    // Someone pushed a branch named `grimoire`: the remote can't hold `grimoire/tracker` beside it.
+    await world.a.git(['push', '--quiet', 'origin', '--delete', 'grimoire/tracker']);
+    await world.a.git(['push', '--quiet', 'origin', 'HEAD:refs/heads/grimoire']);
+    // Only the remote holds it: this clone's own D/F refs are another finding.
+    await world.a.git(['update-ref', '-d', 'refs/remotes/origin/grimoire']);
+    await ok(grimoire.core.call('create', { title: 'Waiting to go out' }, grimoire.ctx));
+    await grimoire.core.call('sync', {}, grimoire.ctx);
+
+    const report = await runDoctor({ root: world.a.dir, checks: REF_CHECKS });
+
+    expect(found(report, 'df-ref-conflict')).toEqual([expect.objectContaining({ subject: 'remote', message: expect.stringContaining('refs/heads/grimoire') })]);
+  });
+
+  test('a sync that failed on a stale ref lock is reported as the lock, not as a D/F conflict', async ({ world, grimoire }) => {
+    const { bob } = await shared(world);
+    // The remote moved, so a's fetch has a remote-tracking ref to update.
+    await ok(grimoire.core.call('create', { title: 'Only there' }, bob));
+    await pushTracker(world.b);
+    const lock = path.join(world.a.dir, '.git', 'refs', 'remotes', 'origin', 'grimoire', 'tracker.lock');
+    await mkdir(path.dirname(lock), { recursive: true });
+    await writeFile(lock, '');
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lock, old, old);
+    await grimoire.core.call('sync', {}, grimoire.ctx);
+
+    const report = await runDoctor({ root: world.a.dir, checks: REF_CHECKS });
+
+    expect(found(report, 'sync-failed')).toEqual([expect.objectContaining({ message: expect.stringContaining('cannot lock ref') })]);
+    expect(found(report, 'stale-ref-lock')).toEqual([expect.objectContaining({ subject: 'refs/remotes/origin/grimoire/tracker.lock' })]);
+    expect(found(report, 'df-ref-conflict')).toEqual([]);
   });
 
   test('a healthy tracker gives a clean store section', async ({ world, grimoire }) => {

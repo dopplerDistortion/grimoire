@@ -69,8 +69,12 @@ function printJson(io: CliIo, value: unknown): void {
   io.stdout.write(`${JSON.stringify(value, null, io.stdout.isTTY ? 2 : undefined)}\n`);
 }
 
-/** Runs `status` or `doctor` and returns the exit code. */
-export async function runHealthVerb(verb: 'status' | 'doctor', argv: readonly string[], options: { io?: CliIo } = {}): Promise<number> {
+/**
+ * Runs `status` or `doctor` and returns the exit code. The host repo search
+ * starts at the command's `--from`, else at `startDir` (the shim's checkout),
+ * else at the cwd.
+ */
+export async function runHealthVerb(verb: 'status' | 'doctor', argv: readonly string[], options: { io?: CliIo; startDir?: string } = {}): Promise<number> {
   const io: CliIo = options.io ?? { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env: process.env, cwd: process.cwd() };
   io.stdout.on('error', () => {});
   try {
@@ -79,7 +83,7 @@ export async function runHealthVerb(verb: 'status' | 'doctor', argv: readonly st
       printJson(io, HELP[verb]);
       return 0;
     }
-    const root = await findHostRoot(command.from === null ? io.cwd : path.resolve(io.cwd, command.from));
+    const root = await findHostRoot(path.resolve(io.cwd, command.from ?? options.startDir ?? '.'));
     if (verb === 'status') {
       const { report, lines } = await readStatus({ root, env: io.env });
       printJson(io, report);

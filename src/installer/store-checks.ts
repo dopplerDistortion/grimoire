@@ -128,7 +128,7 @@ const storeConflicts: DoctorCheck = {
             severity: 'warning',
             subject: issue.id,
             message: `${issue.id} has a fold conflict on ${conflict.fields.join(', ')}: claims and writes to those fields wait until a person resolves it`,
-            remedy: `a person resolves it in the dashboard, or with grimoire update ${issue.id}`,
+            remedy: `a person picks whose value stands, in the dashboard or with grimoire resolve ${issue.id}`,
             details: { fields: conflict.fields },
           });
         }
@@ -250,8 +250,13 @@ const storeSync: DoctorCheck = {
   },
 };
 
-/** What a push's refusal says when the remote holds a ref named like a folder of the tracker branch. */
-const DF_REJECTION = /directory file conflict|cannot lock ref|exists; cannot create|is a directory|unable to resolve reference/i;
+/**
+ * What a push's refusal says when the remote holds a ref named like a folder
+ * of the tracker branch (`'refs/heads/grimoire' exists; cannot create …`,
+ * `(refname conflict)`). Not git's bare `cannot lock ref`: a stale lock file
+ * says that too (`Unable to create '….lock': File exists`), and is its own finding.
+ */
+const DF_REJECTION = /exists; cannot create|refname conflict|directory file conflict|blocking reference/i;
 
 const storeRefNames: DoctorCheck = {
   name: 'store.ref-names',

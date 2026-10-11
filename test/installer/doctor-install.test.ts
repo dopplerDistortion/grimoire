@@ -3,16 +3,16 @@
 // the way `init` writes them, with this clone joined to the version under
 // test. Each test injects defects the way a person, another tool or a crash
 // leaves them, and asserts what the report says and what --fix repairs.
-import { appendFile, mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { gitTest, makeTempDir, removeDir, type Checkout } from '#harness';
-import { codexHookHash } from '../../src/installer';
-import { runDoctor, type DoctorReport } from '../../src/installer/doctor';
+import { codexHookHash, UPGRADE_RECORDS } from '../../src/installer';
+import { DOCTOR_CHECKS, runDoctor, type DoctorReport } from '../../src/installer/doctor';
 import type { Finding } from '../../src/installer/health';
 import { instructionRulesText } from '../../src/installer/texts';
 import { MachineLocalStore, START_LOCK } from '../../src/machine-local';
-import { refreshedPointerFiles } from '../../src/upkeep';
+import { refreshedPointerFiles, worktreeLeaseName } from '../../src/upkeep';
 import { VERSION } from '../../src/version';
 import { installed, read } from '../upkeep/support';
 import { joinClone, reportingPackage } from './support';
@@ -41,7 +41,10 @@ function withNodeOnPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...env, [key]: `${path.dirname(process.execPath)}${path.delimiter}${env[key] ?? ''}` };
 }
 
-describe('install checks', () => {
+/** Each test installs a checkout and runs doctor more than once: room for a loaded machine. */
+const SLOW = { timeout: 240_000 };
+
+describe('install checks', SLOW, () => {
   gitTest('a checkout as init leaves it reports nothing but the Codex hook awaiting approval', async ({ world }) => {
     const { root, env, cleanup } = await setUp(world.a);
     try {
@@ -172,7 +175,7 @@ describe('install checks', () => {
   });
 });
 
-describe('doctor --fix', () => {
+describe('doctor --fix', SLOW, () => {
   gitTest('repairs only content pointer files and stale locks; changed grants and records stay as they are', async ({ world }) => {
     const { root, store, env, cleanup } = await setUp(world.a);
     try {
@@ -202,6 +205,57 @@ describe('doctor --fix', () => {
       expect(kinds(report, 'install')).toEqual(['codex-hook-unapproved', 'permission-drift']);
       expect(found(report, 'stale-ref-lock')).toEqual([]);
       expect((await refreshedPointerFiles(store, root))?.paths).toEqual(['.claude/rules/grimoire.md']);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  /** Only the pointer comparison: these runs are about what --fix does with a drifted content pointer. */
+  const POINTERS = DOCTOR_CHECKS.filter((check) => check.name === 'install.pointers');
+  const DRIFTED = '# grimoire\n\nmy own words\n';
+  const skippedWhy = (report: DoctorReport) => report.fix?.skipped.filter((entry) => entry.kind === 'content-drift').map((entry) => entry.why) ?? [];
+
+  gitTest('leaves content pointers alone during a git operation, an upgrade to another pin, or another process’s work on the worktree, and says why', async ({ world }) => {
+    const { root, store, env, cleanup } = await setUp(world.a);
+    try {
+      await writeFile(path.join(root, '.claude/rules/grimoire.md'), DRIFTED);
+      const rebase = path.join(root, '.git', 'rebase-merge');
+      await mkdir(rebase);
+      const rebasing = await runDoctor({ root, env, fix: true, checks: POINTERS });
+      await rm(rebase, { recursive: true });
+      await store.coordination.write(UPGRADE_RECORDS, 'upgrade-a', { worktree: root, from: VERSION, to: '9.9.9', started_at: Date.now() });
+      const upgrading = await runDoctor({ root, env, fix: true, checks: POINTERS });
+      await store.coordination.remove(UPGRADE_RECORDS, 'upgrade-a');
+      const held = await store.leases.acquire(await worktreeLeaseName(root), { ttlMs: 60_000 });
+      const busy = await runDoctor({ root, env, fix: true, checks: POINTERS, leaseWaitMs: 200 });
+      if (held.status === 'acquired') await held.lease.release();
+      const otherVersion = await runDoctor({ root, env, fix: true, checks: POINTERS, version: '9.0.0' });
+
+      expect(await read(root, '.claude/rules/grimoire.md')).toBe(DRIFTED);
+      expect(skippedWhy(rebasing)).toEqual([expect.stringContaining('rebase is in progress')]);
+      expect(skippedWhy(upgrading)).toEqual([expect.stringContaining('upgrade to 9.9.9 is in progress')]);
+      expect(upgrading.fix?.notices).toEqual([expect.stringContaining('an upgrade to 9.9.9 is in progress there')]);
+      expect(skippedWhy(busy)).toEqual([expect.stringContaining('another grimoire process')]);
+      for (const report of [rebasing, upgrading, busy, otherVersion]) expect(report.fix?.fixed).toEqual([]);
+      expect(found(rebasing, 'content-drift')).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  gitTest('a machine-local store it can’t write leaves the pointers as they are and still gives the report', async ({ world }) => {
+    const { root, store, env, cleanup } = await setUp(world.a);
+    try {
+      await writeFile(path.join(root, '.claude/rules/grimoire.md'), DRIFTED);
+      // Where the leases live, a file: every lease write fails, as in a sandbox that can't write .git/.
+      await rm(path.join(store.dir, 'leases'), { recursive: true, force: true });
+      await writeFile(path.join(store.dir, 'leases'), 'not a folder\n');
+
+      const report = await runDoctor({ root, env, fix: true, checks: POINTERS });
+
+      expect(await read(root, '.claude/rules/grimoire.md')).toBe(DRIFTED);
+      expect(skippedWhy(report)).toEqual([expect.stringContaining('can’t write this clone’s machine-local store')]);
+      expect(found(report, 'content-drift')).toHaveLength(1);
     } finally {
       await cleanup();
     }

@@ -4,13 +4,13 @@
 // in ./store-checks.ts, the install's in ./install-checks.ts), so later slices
 // add their own (capture statistics, knowledge facts, the runner) the same way.
 import { GrimoireError } from '../errors';
-import { findGitDirs, MachineLocalStore, type GitDirs } from '../machine-local';
+import { findGitDirs, MachineLocalStore, type GitDirs, type Lease } from '../machine-local';
 import { inspectTrees, openTracker, removeStaleRefLocks, trackerTips, type TrackerStore, type TrackerTips, type TrackerView, type TreeInspection } from '../tracker';
 import { holdWorktreeLease, noteRefreshed, operationInProgress, refreshNotice, upgradeInProgress, upgradeSkipNotice } from '../upkeep';
 import { VERSION } from '../version';
 import { readInstallConfig, type CheckoutInstall } from './config';
 import { INSTALL_CHECKS } from './install-checks';
-import { refreshContentPointers } from './refresh';
+import { refreshContentPointers, type ContentRefresh } from './refresh';
 import { STORE_CHECKS } from './store-checks';
 import { countBySeverity, messageOf, type CheckFinding, type CheckRun, type Finding, type Severity } from './health';
 
@@ -53,6 +53,8 @@ export interface DoctorOptions {
   readonly checks?: readonly DoctorCheck[];
   /** Make the single-answer repairs (content pointer files, stale locks), then report what is left. */
   readonly fix?: boolean;
+  /** How long `fix` waits for the (live store, worktree) lease while another process holds it (default 30 s). */
+  readonly leaseWaitMs?: number;
 }
 
 export interface DoctorReport {
@@ -127,7 +129,7 @@ async function runChecks(options: DoctorOptions, dirs: GitDirs, config: Checkout
  * a process at another version than the pin, a git operation in progress, an
  * upgrade in progress to another pin (checked again under the lease).
  */
-async function refreshPointers(input: DoctorInput, fix: FixReport): Promise<void> {
+async function refreshPointers(input: DoctorInput, fix: FixReport, leaseWaitMs: number | undefined): Promise<void> {
   const { root, store, version } = input;
   const skip = (why: string): void => void fix.skipped.push({ kind: 'content-drift', why });
   if (input.config?.version !== version) return skip(`this is grimoire ${version} and the checkout pins ${input.config?.version ?? 'nothing'}: only the pinned version rewrites its text`);
@@ -141,11 +143,23 @@ async function refreshPointers(input: DoctorInput, fix: FixReport): Promise<void
     return true;
   };
   if (await upgradeGate()) return;
-  const lease = await holdWorktreeLease(store, root);
+  let lease: Lease | null;
+  try {
+    lease = await holdWorktreeLease(store, root, leaseWaitMs === undefined ? {} : { waitMs: leaseWaitMs });
+  } catch (error) {
+    // A sandboxed shell (Codex's) can't write .git/: the report still goes out.
+    return skip(`grimoire can’t write this clone’s machine-local store (${messageOf(error)})`);
+  }
   if (!lease) return skip(`another grimoire process keeps working on ${root} (upkeep, init or doctor --fix); run doctor --fix again in a moment`);
   try {
     if (await upgradeGate()) return;
-    const { refreshed, skipped } = await refreshContentPointers(root);
+    let refresh: ContentRefresh;
+    try {
+      refresh = await refreshContentPointers(root);
+    } catch (error) {
+      return skip(`grimoire couldn’t plan the pointer files’ refresh (${messageOf(error)})`);
+    }
+    const { refreshed, skipped } = refresh;
     for (const file of refreshed) fix.fixed.push({ kind: 'content-drift', subject: file, action: 'rewrote it with the shipped text' });
     for (const left of skipped) fix.skipped.push({ kind: 'content-drift', subject: left.path, why: left.why });
     // `status` and the session line ask to commit them, as for upkeep's own refreshes.
@@ -157,7 +171,7 @@ async function refreshPointers(input: DoctorInput, fix: FixReport): Promise<void
 }
 
 /** The single-answer repairs (spec §12 `--fix`): content pointer files and stale locks. Nothing else is touched. */
-async function applyFixes(input: DoctorInput, findings: readonly Finding[]): Promise<FixReport> {
+async function applyFixes(input: DoctorInput, findings: readonly Finding[], leaseWaitMs: number | undefined): Promise<FixReport> {
   const fix: FixReport = { fixed: [], skipped: [], notices: [] };
   const fixable = (kind: string) => findings.filter((finding) => finding.fixable && finding.kind === kind);
   if (fixable('stale-ref-lock').length > 0) {
@@ -175,7 +189,7 @@ async function applyFixes(input: DoctorInput, findings: readonly Finding[]): Pro
     if (cleared) fix.fixed.push({ kind: finding.kind, subject: finding.subject!, action: 'released it' });
     else fix.skipped.push({ kind: finding.kind, subject: finding.subject!, why: 'it is held again' });
   }
-  if (fixable('content-drift').length > 0) await refreshPointers(input, fix);
+  if (fixable('content-drift').length > 0) await refreshPointers(input, fix, leaseWaitMs);
   return fix;
 }
 
@@ -222,7 +236,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   let run = await runChecks(options, dirs, config, version);
   let fix: FixReport | undefined;
   if (options.fix) {
-    fix = await applyFixes(run.input, run.findings);
+    fix = await applyFixes(run.input, run.findings, options.leaseWaitMs);
     // The report shows what is left after the repairs.
     if (fix.fixed.length > 0) run = await runChecks(options, dirs, config, version);
   }
