@@ -1,7 +1,8 @@
 // The detached sync child (spec §4, Where it runs; §22 R4): a CLI write can't
 // sync in its own short-lived process, so it spawns `grimoire sync
 // --background`, which registers a process record, runs one automatic sync
-// and exits. Spike E: `codex exec` waits for such a child, so it stays short;
+// and exits. Spike E: `codex exec` waits for such a child, so it stays short
+// (the automatic sync's budget, AUTO_BUDGET_MS, bounds it as a whole);
 // spike F: some Codex sandboxes kill it, so the sync-pending marker the core
 // set first is what makes the push happen eventually.
 import { spawn } from 'node:child_process';

@@ -88,7 +88,11 @@ export interface Core {
     input: unknown,
     ctx: CallContext,
   ): Promise<Outcome<N extends keyof OpResults ? OpResults[N] : unknown>>;
-  /** Waits for the background syncs this core started, then releases the git processes it holds open. */
+  /**
+   * Waits for the background syncs (or spawns of the sync child) this core
+   * started, then releases the git processes it holds open. A surface awaits
+   * it before its process exits; the sync-pending markers are set either way.
+   */
   close(): Promise<void>;
 }
 
@@ -121,6 +125,28 @@ function checkInstallFormat(format: number | null, pin: string | null): void {
     `this checkout's .grimoire/config.yml has ${shown}, which grimoire ${VERSION} can't run against${pin ? ` (the checkout pins ${pin})` : ''}; stop grimoire work and relay the remedies to the user`,
     { marker: 'install', why, requires: pin },
   );
+}
+
+/**
+ * The tracker an op writes through: every commit that seals an attempt asks
+ * for the automatic sync itself (spec §4: every attempt-ending write), so no
+ * op that ends attempts can forget to.
+ */
+function syncingOnSeal(tracker: TrackerStore, requestSync: (commit: string) => void): TrackerStore {
+  return {
+    location: tracker.location,
+    read: () => tracker.read(),
+    now: () => tracker.now(),
+    async transact(spec, body) {
+      const write = await tracker.transact(spec, body);
+      if (write.commit && write.sealed) requestSync(write.commit);
+      return write;
+    },
+    initialize: (spec) => tracker.initialize(spec),
+    fold: (spec) => tracker.fold(spec),
+    sync: (spec) => tracker.sync(spec),
+    close: () => tracker.close(),
+  };
 }
 
 function annotationsOf(op: OpDefinition<unknown, unknown>): Record<string, boolean> {
@@ -168,12 +194,16 @@ export function createCore(options: CoreOptions = {}): Core {
     }
   };
 
-  /** After a triggering write: set the sync-pending marker, then sync (spec §4); after the call answers. */
-  const afterWrite = (tracker: TrackerStore, tip: string, ctx: CallContext): void => {
+  /**
+   * After a triggering write (spec §4): the sync-pending marker is set before
+   * the call answers, so a process that exits or is killed right after still
+   * leaves it; the sync itself runs after the call answers.
+   */
+  const afterWrite = async (tracker: TrackerStore, tip: string, ctx: CallContext): Promise<void> => {
     if (autoSyncMode === 'off') return;
+    const { commonDir } = tracker.location;
+    await markSyncPending(commonDir, tip).catch(() => {});
     later(async () => {
-      const { commonDir } = tracker.location;
-      await markSyncPending(commonDir, tip).catch(() => {});
       if (typeof autoSyncMode === 'function') {
         await autoSyncMode({ root: ctx.repo.root, commonDir, tip, ctx });
         return;
@@ -217,15 +247,16 @@ export function createCore(options: CoreOptions = {}): Core {
         const opened = await trackerFor(ctx.repo.root);
         tracker = opened;
         const syncTips: string[] = [];
+        const requestSync = (commit: string): void => void syncTips.push(commit);
         const result = await op.run(parsed, {
           ctx,
-          tracker: opened,
+          tracker: syncingOnSeal(opened, requestSync),
           actor: actorOf(ctx),
           scanner,
-          requestSync: (commit) => void syncTips.push(commit),
+          requestSync,
         });
         const syncTip = syncTips.at(-1);
-        if (syncTip !== undefined) afterWrite(opened, syncTip, ctx);
+        if (syncTip !== undefined) await afterWrite(opened, syncTip, ctx);
         return { ok: true, result } as never;
       } catch (error) {
         if (!(error instanceof GrimoireError)) throw error;

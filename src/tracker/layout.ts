@@ -55,6 +55,12 @@ export function attemptDir(issue: string, attempt: string): string {
   return `${ATTEMPTS_DIR}/${a}/${b}/${issue}/${attempt}`;
 }
 
+/** Whether `file` is an attempt's `end.md`, the seal an attempt-ending write puts on it. */
+export function isAttemptEnd(file: string): boolean {
+  const parts = file.split('/');
+  return parts.length === 6 && parts[0] === ATTEMPTS_DIR && parts[5] === 'end.md';
+}
+
 /** `attempts/<a>/<b>/<issue-id>/<attempt-id>/activity/<entry>.md` */
 export function activityFile(issue: string, attempt: string, entry: string): string {
   return `${attemptDir(issue, attempt)}/${ACTIVITY_DIR}/${entry}.md`;

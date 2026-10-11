@@ -22,10 +22,14 @@ import type { Person, WriteSpec } from './store';
 export interface SyncSpec {
   /** Author and committer of a fold commit; null when the person has no git identity (a fold then gives NO_GIT_IDENTITY). */
   readonly author: Person | null;
+  /** The git identity as resolved, for the details of NO_GIT_IDENTITY (default: none of it). */
+  readonly identity?: { readonly name: string | null; readonly email: string | null };
   /** `Grimoire-Actor` of a fold commit. */
   readonly actor: WriteSpec['actor'];
   /** How long each network step may take. */
   readonly timeoutMs: number;
+  /** When the whole sync must be done (epoch ms): each step gets at most what is left. */
+  readonly deadline?: number;
 }
 
 export interface SyncFailure {
@@ -184,17 +188,28 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
   if (remote === null) return local ? outcome({ state: 'pending', reason: 'no-remote' }) : outcome({ state: 'in-sync' });
 
   const tracking = remoteTrackerRef(remote);
-  const net = (args: readonly string[], input?: string) =>
-    runNetworkGit(root, args, {
-      timeoutMs: spec.timeoutMs,
+  /** A network step, bounded by the step timeout and by what is left of the sync's deadline. */
+  const net = async (args: readonly string[], input?: string): Promise<NetworkGitRun & { limitMs: number }> => {
+    const limitMs = Math.min(spec.timeoutMs, spec.deadline === undefined ? Infinity : spec.deadline - Date.now());
+    if (limitMs <= 0) return { code: null, stdout: Buffer.alloc(0), stderr: '', timedOut: true, limitMs: 0 };
+    const run = await runNetworkGit(root, args, {
+      timeoutMs: limitMs,
       sshChosen: config.sshChosen,
       ...(input !== undefined ? { input } : {}),
     });
-  const failed = (step: string, run: NetworkGitRun): SyncOutcome =>
+    return { ...run, limitMs };
+  };
+  const failed = (step: string, run: NetworkGitRun & { limitMs: number }): SyncOutcome =>
     outcome({
       state: 'pending',
       reason: 'failed',
-      failure: { class: classifyFailure(run), message: failureMessage(step, run, spec.timeoutMs) },
+      failure: {
+        class: classifyFailure(run),
+        message:
+          run.timedOut && run.limitMs < spec.timeoutMs
+            ? `git ${step} timed out: the sync used up its time budget`
+            : failureMessage(step, run, run.limitMs),
+      },
     });
   /** The tips of the tracker's history here, with their merge bases: the objects every read and fold needs. */
   const tipCommits = async (): Promise<string[]> => {
@@ -257,6 +272,8 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     refs = await host.trackerRefs();
     local = refs.local;
     remoteTip = refs.remotes.get(remote) ?? null;
+    /** The remote-tracking ref as this sync left it: the push moves it on only from there. */
+    const tracked = remoteTip;
     if (local !== null && remoteTip !== null && local !== remoteTip) {
       if (spec.author) {
         const folded = await host.fold({ author: spec.author, actor: spec.actor });
@@ -266,8 +283,8 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
         }
       } else if (!(await isAncestor(root, local, remoteTip)) && !(await isAncestor(root, remoteTip, local))) {
         throw new GrimoireError('NO_GIT_IDENTITY', `git user.email is not set in ${root}, so the fetched tracker can't be folded`, {
-          name: null,
-          email: null,
+          name: spec.identity?.name ?? null,
+          email: spec.identity?.email ?? null,
         });
       }
     }
@@ -280,14 +297,15 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     if (head === null) return outcome({ state: 'pending', reason: 'no-default-branch' });
     const push = await net(['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-recurse-submodules', remote, `${local}:${TRACKER_BRANCH}`]);
     if (push.code === 0 && !push.timedOut) {
-      // git updates the remote-tracking ref only when a fetch refspec maps the branch.
-      await runGit(root, ['update-ref', tracking, local]);
+      // git updates the remote-tracking ref only when a fetch refspec maps the branch. A
+      // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile.
+      await runGit(root, ['update-ref', tracking, local, tracked ?? '']);
       remoteTip = local;
       return outcome({ state: 'pushed' });
     }
     if (push.timedOut) return failed('push', push);
     const pushed = pushedRef(push.stdout.toString('utf8'), TRACKER_BRANCH);
-    if (pushed && lostRace(pushed) && round < PUSH_ROUNDS) continue;
+    if (pushed && lostRace(pushed, push.stderr) && round < PUSH_ROUNDS) continue;
     if (pushed?.flag === '!') {
       const reason = /\(([^)]*)\)\s*$/.exec(pushed.summary)?.[1] ?? pushed.summary;
       const said = remoteLines(push.stderr);

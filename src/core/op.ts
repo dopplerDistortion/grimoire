@@ -16,9 +16,10 @@ export interface OpEnv {
   readonly scanner: SecretScanner;
   /**
    * Asks for the automatic sync after a write that triggers one (spec §4,
-   * Sync: attempt-ending writes, session-record attachments, accepted chore
-   * submits, knowledge decisions), naming the commit it made. It runs after
-   * the call answers and never fails or delays it.
+   * Sync: session-record attachments, accepted chore submits, knowledge
+   * decisions), naming the commit it made. Attempt-ending writes need not:
+   * the core asks for every commit that seals an attempt. It runs after the
+   * call answers and never fails or delays it.
    */
   readonly requestSync: (commit: string) => void;
 }

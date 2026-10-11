@@ -5,7 +5,15 @@
 import { GrimoireError } from '../errors';
 import { runGit } from '../git/run';
 import { MachineLocalStore } from '../machine-local';
-import { TRACKER_REF, type Person, type SyncFailureClass, type SyncOutcome, type TrackerStore, type TrackerView } from '../tracker';
+import {
+  TRACKER_REF,
+  type Person,
+  type SyncFailureClass,
+  type SyncOutcome,
+  type SyncSpec,
+  type TrackerStore,
+  type TrackerView,
+} from '../tracker';
 import type { Actor, CallContext } from './context';
 import { define, writer } from './op';
 import { s } from './schema';
@@ -31,6 +39,12 @@ const LEASE_TTL_MS = 10 * 60_000;
 /** Each network step's timeout: short for automatic syncs (a detached child keeps `codex exec` waiting), long for `sync`. */
 export const AUTO_STEP_TIMEOUT_MS = 20_000;
 export const EXPLICIT_STEP_TIMEOUT_MS = 120_000;
+/**
+ * An automatic sync's time as a whole, every step and round included (spikes
+ * E and F: `codex exec` and some sandboxed shells wait for the detached
+ * child). What it leaves undone, the sync-pending marker keeps.
+ */
+export const AUTO_BUDGET_MS = 60_000;
 /** Failures back off exponentially from this, up to an hour (spec §4). */
 export const BACKOFF_BASE_MS = 60_000;
 export const BACKOFF_MAX_MS = 60 * 60_000;
@@ -69,6 +83,8 @@ export interface SyncStatusRecord {
 export interface SyncRequest {
   /** Author of a fold commit; null without a git identity. */
   readonly author: Person | null;
+  /** The git identity as resolved (`user.name`, `user.email`), reported with NO_GIT_IDENTITY. */
+  readonly identity?: { readonly name: string | null; readonly email: string | null };
   readonly actor: Actor;
   /** The client whose process runs the sync (`claude-code`, `codex-mcp-client`, `cli`, …), recorded with a failure. */
   readonly client: string;
@@ -76,6 +92,8 @@ export interface SyncRequest {
   readonly surface: string;
   /** Each network step's timeout. */
   readonly timeoutMs?: number;
+  /** The sync's time as a whole (default: AUTO_BUDGET_MS for automatic syncs, none for `sync`). */
+  readonly budgetMs?: number;
 }
 
 /** What a custom automatic sync is handed: the sync-pending marker for `tip` is already set. */
@@ -96,6 +114,7 @@ export type SyncSkip = 'auto-sync-off' | 'backoff' | 'busy' | 'error';
 export function syncRequestOf(ctx: CallContext, actor: Actor): SyncRequest {
   return {
     author: ctx.person.email ? writer(ctx) : null,
+    identity: { name: ctx.person.name, email: ctx.person.email },
     actor,
     client: actor.client ?? ctx.surface,
     surface: ctx.surface,
@@ -165,43 +184,82 @@ async function readStatus(machine: MachineLocalStore): Promise<SyncStatusRecord 
   return machine.records.read<SyncStatusRecord>(STATUS, STATUS_KEY);
 }
 
-/** Runs the tracker's sync, again while writes land meanwhile, then records it and settles the markers. */
-async function syncAndRecord(tracker: TrackerStore, machine: MachineLocalStore, request: SyncRequest, timeoutMs: number): Promise<SyncOutcome> {
-  const { root } = tracker.location;
-  const spec = { author: request.author, actor: request.actor, timeoutMs };
-  let outcome = await tracker.sync(spec);
-  for (let round = 1; round < DRAIN_ROUNDS && outcome.state !== 'pending' && (await localTip(root)) !== outcome.local; round++) {
-    outcome = await tracker.sync(spec);
-  }
+/** One sync: the tracker's fetch → fold → push, then its record and the markers settled. */
+async function syncOnce(tracker: TrackerStore, machine: MachineLocalStore, request: SyncRequest, spec: SyncSpec): Promise<SyncOutcome> {
+  const outcome = await tracker.sync(spec);
   // The record and the markers are best-effort: the sync itself already happened.
   await recordStatus(machine, outcome, request).catch(() => {});
-  if (outcome.state !== 'pending') await clearHeld(machine, root, outcome.remoteTip).catch(() => {});
-  else if (outcome.local) await markSyncPending(tracker.location.commonDir, outcome.local).catch(() => {});
+  const pending = outcome.state === 'pending';
+  if (pending && outcome.local) await markSyncPending(tracker.location.commonDir, outcome.local).catch(() => {});
+  // A failed sync still knows what the remote held when last seen: markers for those tips settle too.
+  if (!pending || outcome.remoteTip !== null) await clearHeld(machine, tracker.location.root, outcome.remoteTip).catch(() => {});
   return outcome;
 }
 
 /**
+ * Syncs holding the sync lease, then again while writes landed meanwhile, at
+ * most DRAIN_ROUNDS times in all and never past the budget. The check for new
+ * writes comes after the lease is let go: a process whose own sync found the
+ * lease held had committed its write by then, so this one sees it. A round
+ * that finds the lease held leaves it to the holder, which checks the same
+ * way. `explicit`: the first round runs even while the lease is held.
+ */
+async function syncRounds(
+  tracker: TrackerStore,
+  machine: MachineLocalStore,
+  request: SyncRequest,
+  options: { readonly explicit: boolean; readonly timeoutMs: number; readonly budgetMs?: number },
+): Promise<SyncOutcome | { skipped: 'busy' }> {
+  const deadline = options.budgetMs === undefined ? undefined : Date.now() + options.budgetMs;
+  const spec: SyncSpec = {
+    author: request.author,
+    ...(request.identity ? { identity: request.identity } : {}),
+    actor: request.actor,
+    timeoutMs: options.timeoutMs,
+    ...(deadline !== undefined ? { deadline } : {}),
+  };
+  let outcome: SyncOutcome | null = null;
+  for (let round = 0; round < DRAIN_ROUNDS; round++) {
+    if (outcome && deadline !== undefined && Date.now() >= deadline) break;
+    const acquired = options.explicit
+      ? await machine.leases.acquire(LEASE, { ttlMs: LEASE_TTL_MS }).catch(() => null)
+      : await machine.leases.acquire(LEASE, { ttlMs: LEASE_TTL_MS });
+    const lease = acquired?.status === 'acquired' ? acquired.lease : null;
+    // A held lease is only efficiency: git's compare-and-set push keeps two syncs correct.
+    if (!lease && !(options.explicit && round === 0)) break;
+    try {
+      outcome = await syncOnce(tracker, machine, request, spec);
+    } finally {
+      await lease?.release().catch(() => {});
+    }
+    if (outcome.state === 'pending' || (await localTip(tracker.location.root)) === outcome.local) break;
+  }
+  return outcome ?? { skipped: 'busy' };
+}
+
+/**
  * The explicit sync (`grimoire sync`, the dashboard's Sync now): always runs,
- * whatever the auto-sync setting or the backoff says. Sets the pending marker
- * for the local tip first.
+ * whatever the auto-sync setting, the backoff or another sync says. Sets the
+ * pending marker for the local tip first.
  */
 export async function syncNow(tracker: TrackerStore, request: SyncRequest): Promise<SyncOutcome> {
   const machine = machineOf(tracker);
-  const lease = await machine.leases.acquire(LEASE, { ttlMs: LEASE_TTL_MS }).catch(() => null);
-  try {
-    const local = await localTip(tracker.location.root);
-    if (local) await markSyncPending(tracker.location.commonDir, local).catch(() => {});
-    // A held lease is only efficiency: git's compare-and-set push keeps two syncs correct.
-    return await syncAndRecord(tracker, machine, request, request.timeoutMs ?? EXPLICIT_STEP_TIMEOUT_MS);
-  } finally {
-    if (lease?.status === 'acquired') await lease.lease.release().catch(() => {});
-  }
+  const local = await localTip(tracker.location.root);
+  if (local) await markSyncPending(tracker.location.commonDir, local).catch(() => {});
+  const outcome = await syncRounds(tracker, machine, request, {
+    explicit: true,
+    timeoutMs: request.timeoutMs ?? EXPLICIT_STEP_TIMEOUT_MS,
+    ...(request.budgetMs !== undefined ? { budgetMs: request.budgetMs } : {}),
+  });
+  // The first round of an explicit sync always runs.
+  return outcome as SyncOutcome;
 }
 
 /**
  * An automatic sync (spec §4): skipped while auto-sync is off, while failures
  * back off, or while another process holds the sync lease (that process
- * syncs again when writes land meanwhile). Never throws.
+ * syncs again for writes that landed before it let go). Bounded by its
+ * budget as a whole, so a detached child stays short. Never throws.
  */
 export async function autoSync(tracker: TrackerStore, request: SyncRequest): Promise<SyncOutcome | { skipped: SyncSkip }> {
   const machine = machineOf(tracker);
@@ -209,13 +267,11 @@ export async function autoSync(tracker: TrackerStore, request: SyncRequest): Pro
     const status = await readStatus(machine).catch(() => undefined);
     if (status?.retry_at && Date.now() < status.retry_at) return { skipped: 'backoff' };
     if (!(await autoSyncAllowed(tracker))) return { skipped: 'auto-sync-off' };
-    const lease = await machine.leases.acquire(LEASE, { ttlMs: LEASE_TTL_MS });
-    if (lease.status === 'held') return { skipped: 'busy' };
-    try {
-      return await syncAndRecord(tracker, machine, request, request.timeoutMs ?? AUTO_STEP_TIMEOUT_MS);
-    } finally {
-      await lease.lease.release().catch(() => {});
-    }
+    return await syncRounds(tracker, machine, request, {
+      explicit: false,
+      timeoutMs: request.timeoutMs ?? AUTO_STEP_TIMEOUT_MS,
+      budgetMs: request.budgetMs ?? AUTO_BUDGET_MS,
+    });
   } catch {
     // An automatic sync never fails anything: the marker stays for the next one.
     return { skipped: 'error' };

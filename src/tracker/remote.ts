@@ -181,7 +181,15 @@ export function pushedRef(stdout: string, ref: string): PushedRef | null {
   return null;
 }
 
-/** Whether a rejected push only lost a race: the remote moved since the fetch, so fetch, fold and push again. */
-export function lostRace(pushed: PushedRef): boolean {
-  return pushed.flag === '!' && /^\[rejected\]/.test(pushed.summary) && /non-fast-forward|fetch first|stale info/.test(pushed.summary);
+/**
+ * Whether a rejected push only lost a race, so fetch, fold and push again:
+ * the remote moved since the fetch (git saw it in the ref advertisement), or
+ * another push moved it while this one ran (the remote's compare-and-set
+ * failed). A D/F ref conflict or a hook's refusal is no race.
+ */
+export function lostRace(pushed: PushedRef, stderr: string): boolean {
+  if (pushed.flag !== '!') return false;
+  if (/^\[rejected\]/.test(pushed.summary)) return /non-fast-forward|fetch first|stale info/.test(pushed.summary);
+  if (!/^\[remote rejected\]/.test(pushed.summary)) return false;
+  return /incorrect old value|failed to lock|is at [0-9a-f]+ but expected/.test(`${pushed.summary}\n${remoteLines(stderr)}\n${stderr}`);
 }
