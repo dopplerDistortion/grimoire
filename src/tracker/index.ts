@@ -9,6 +9,7 @@ export {
   type WriteSpec,
   type WriteOutcome,
   type WriteResult,
+  type InitializeOptions,
   type Person,
   TRACKER_ROOT_KEY,
   namedTrackerRoot,

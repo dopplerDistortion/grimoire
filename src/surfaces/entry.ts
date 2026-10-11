@@ -40,6 +40,10 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
       return 0;
     }
   }
+  if (rest[0] === 'init') {
+    const { runInitVerb } = await import('./cli/init');
+    return runInitVerb(withFrom(rest.slice(1)), { bin: options.bin });
+  }
   const { runCli } = await import('./cli/run');
   return runCli(withFrom(rest), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
 }
