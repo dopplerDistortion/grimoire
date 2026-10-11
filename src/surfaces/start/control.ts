@@ -275,16 +275,25 @@ export async function callControl(
   const at = Date.now();
   const text = JSON.stringify(args);
   const request = { v: CONTROL_PROTOCOL, op, args: text, nonce, at, mac: mac(secret, [op, nonce, at, text]) };
+  const limitMs = options.timeoutMs ?? 10_000;
+  const timedOut = () => new ControlError(`grimoire start didn’t answer within ${limitMs / 1000} s on its control channel`, 'unreachable');
   const socket = net.connect(paths.endpoint);
-  const timer = setTimeout(() => socket.destroy(), options.timeoutMs ?? 10_000);
+  let late = false;
+  // Covers the connect too: a pipe whose instances are all busy can keep it waiting for good.
+  const timer = setTimeout(() => {
+    late = true;
+    socket.destroy(timedOut());
+  }, limitMs);
   try {
     await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
-      socket.once('error', (error) => reject(new ControlError(`grimoire start isn't listening on its control channel (${(error as NodeJS.ErrnoException).code ?? error.message})`, 'unreachable')));
+      socket.once('error', (error) =>
+        reject(late ? error : new ControlError(`grimoire start isn't listening on its control channel (${(error as NodeJS.ErrnoException).code ?? error.message})`, 'unreachable')),
+      );
     });
     socket.write(`${JSON.stringify(request)}\n`);
     const line = await readLine(socket);
-    if (line === null) throw new ControlError('grimoire start closed the control channel without answering', 'refused');
+    if (line === null) throw late ? timedOut() : new ControlError('grimoire start closed the control channel without answering', 'refused');
     let reply: Record<string, unknown>;
     try {
       reply = JSON.parse(line) as Record<string, unknown>;
