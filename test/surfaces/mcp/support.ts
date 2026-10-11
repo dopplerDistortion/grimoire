@@ -81,7 +81,9 @@ export interface JsonRpcMessage {
 
 /**
  * Writes raw JSON-RPC lines to a fresh `grimoire mcp`, exactly as given, and
- * collects the response to every request among them, by id.
+ * collects the response to every request among them, by id. Resolves once the
+ * server has answered them all, been told the client is done (stdin closed),
+ * and exited, so nothing still runs in `cwd` when a test removes it.
  */
 export function rawSession(bin: string, cwd: string, lines: string[]): Promise<Map<string | number, JsonRpcMessage>> {
   const pending = new Set(
@@ -93,10 +95,16 @@ export function rawSession(bin: string, cwd: string, lines: string[]): Promise<M
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [bin, 'mcp'], { cwd, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
     const responses = new Map<string | number, JsonRpcMessage>();
+    // A backstop: a server that never answers, or never exits, is killed.
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`no response to ${[...pending].join(', ')}`));
+      reject(new Error(pending.size > 0 ? `no response to ${[...pending].join(', ')}` : 'the server did not exit'));
     }, 30_000);
+    child.once('close', () => {
+      clearTimeout(timer);
+      if (pending.size === 0) resolve(responses);
+      else reject(new Error(`the server exited without answering ${[...pending].join(', ')}`));
+    });
     let buffered = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -109,11 +117,7 @@ export function rawSession(bin: string, cwd: string, lines: string[]): Promise<M
         responses.set(message.id, message);
         pending.delete(message.id);
       }
-      if (pending.size === 0) {
-        clearTimeout(timer);
-        child.stdin.end();
-        resolve(responses);
-      }
+      if (pending.size === 0) child.stdin.end();
     });
     child.on('error', reject);
     for (const line of lines) child.stdin.write(`${line}\n`);

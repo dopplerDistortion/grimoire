@@ -13,12 +13,16 @@ export const RESULT_LIMIT = 24 * 1024;
 /**
  * `body` as a tool result: `notices` (when any) go after the result's own
  * fields, and `truncated` and `cursor` go last, so a client that middle-cuts a
- * long output (Codex keeps the head and the tail) still shows them. Notices
- * are dropped rather than push a result past the limit.
+ * long output (Codex keeps the head and the tail) still shows them.
+ * `notices` come most important first: rather than push a result past the
+ * limit, they are dropped from the end, one at a time.
  */
 export function toolResult(body: Record<string, unknown>, notices: readonly string[], isError = false): CallToolResult {
+  let kept = notices.length;
   let text = JSON.stringify(arrange(body, notices));
-  if (notices.length > 0 && Buffer.byteLength(text, 'utf8') > RESULT_LIMIT) text = JSON.stringify(arrange(body, []));
+  while (kept > 0 && Buffer.byteLength(text, 'utf8') > RESULT_LIMIT) {
+    text = JSON.stringify(arrange(body, notices.slice(0, --kept)));
+  }
   return {
     content: [{ type: 'text', text }],
     // Parsed back from the text, so the two can never differ (undefined fields included).

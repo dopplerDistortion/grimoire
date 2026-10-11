@@ -1,5 +1,7 @@
 // Seam 3: `grimoire mcp` over real stdio, in both MCP eras (spec §8; spikes B and E).
 import { spawn } from 'node:child_process';
+import { rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { gitTest, readFixture, readFixtureJson } from '#harness';
 import { SERVER_INSTRUCTIONS } from '../../../src/instructions';
@@ -47,7 +49,9 @@ describe('grimoire mcp over stdio', () => {
       ['ALREADY_CLAIMED means move on', /ALREADY_CLAIMED means move on/],
       ['finish with close or release and a debrief', /finish .*`close` or `release`.*debrief/i],
       ['never edit, stage or commit .grimoire/', /never edit, stage or commit `\.grimoire\/`/i],
-      ['the CLI only when no tools are listed', /CLI only when no grimoire tools are listed/i],
+      // Codex (and Claude Code with many tools) defer MCP tools behind a tool search, so none
+      // are "listed" until the model searches: the fallback must wait for the search (spike E).
+      ['the CLI only when no tools are listed, even through tool search', /CLI only when no grimoire tools are listed or found by tool search/i],
       ['when no tools are listed, run status', /`node \.grimoire\/run\.cjs status`/],
       ['hand-written skills outrank evolved skills', /hand-written skills outrank evolved skills \(`skill_list`, `skill_read`\)/i],
     ];
@@ -275,5 +279,30 @@ describe('the server process', () => {
 
     expect(lines.find((line) => line.id === 2)?.result).toMatchObject({ structuredContent: { created: true } });
     expect(code).toBe(0);
+  });
+
+  gitTest('a write still running when the client closes stdin finishes before the process exits', async ({ world }) => {
+    await initializeTracker(world.a, world.a);
+    // A fresh ref lock (another writer mid-update) holds the write for 3 s, longer than
+    // the process's 2 s last-resort exit, which only a drained shutdown arms after the write.
+    const lock = path.join(world.a.dir, '.git', 'refs', 'grimoire', 'tracker.lock');
+    await writeFile(lock, '');
+    const child = spawn(process.execPath, [bin, 'mcp'], { cwd: world.a.dir, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+    const send = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '0' } } });
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create', arguments: { title: 'Written on the way out' } } });
+    child.stdin.end();
+    const unlocked = setTimeout(() => void rm(lock, { force: true }), 3_000);
+
+    const code = await Promise.race([exited, new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 20_000))]);
+    clearTimeout(unlocked);
+    await rm(lock, { force: true });
+    if (code === 'hung') child.kill();
+
+    expect(code).toBe(0);
+    const subjects = (await world.a.git(['log', '--format=%s', TRACKER_REF])).split('\n');
+    expect(subjects.filter((subject) => /^grimoire: create gr-/.test(subject))).toHaveLength(1);
   });
 });

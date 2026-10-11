@@ -65,9 +65,11 @@ export interface McpCallFacts {
   /**
    * The call's client `_meta` keys with string, number or boolean values (ids:
    * `claudecode/toolUseId`, Codex's `sessionId`, `threadId`, `callId`, …). The
-   * 2026-07-28 envelope keys are lifted out, and nested objects (Codex's
-   * `x-codex-turn-metadata`, which holds workspace paths) are dropped. Null when
-   * the call had no `_meta`.
+   * 2026-07-28 envelope keys are lifted out, and nested objects are dropped,
+   * except that Codex's `x-codex-turn-metadata` (which holds workspace paths)
+   * gives up its one `session_id`, as `x-codex-turn-metadata.session_id`: the
+   * session for a Codex that sends no top-level `sessionId` (spike E, T6).
+   * Null when the call had no `_meta`.
    */
   readonly meta: Readonly<Record<string, string | number | boolean>> | null;
 }

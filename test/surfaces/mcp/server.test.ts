@@ -8,8 +8,8 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { describe, expect } from 'vitest';
-import { gitTest, readFixtureJson, type Checkout } from '#harness';
-import { createCore, type CallContext, type Core } from '../../../src/core';
+import { gitTest, readFixture, readFixtureJson, type Checkout } from '#harness';
+import { createCore, findHostRoot, type CallContext, type Core } from '../../../src/core';
 import { grimoireServerFactory, type McpCore } from '../../../src/surfaces/mcp/server';
 import { VERSION } from '../../../src/version';
 import { commitToTracker, initializeTracker } from '../../core/support';
@@ -77,24 +77,25 @@ async function inBothEras(checkout: Checkout, body: (served: Served, era: Era) =
 }
 
 describe('the reserved hint key', () => {
-  gitTest('is stripped from the arguments before validation and handed to the core in the call context', async ({
+  gitTest("Claude Code's real call: the key is stripped before validation, and its ids and _meta reach the context", async ({
     world,
   }) => {
     await initializeTracker(world.a, world.a);
-    const hint = {
-      session_id: 'session-1',
-      tool_use_id: 'toolu_01',
-      agent_id: 'agent-1',
-      agent_type: 'general-purpose',
-      // The spike-era hint carried a path; the server never keeps it.
-      transcript_path: 'C:/Users/user/.claude/projects/x/session-1.jsonl',
-    };
+    // Claude Code 2.1.296's first hinted tools/call, as it went on the wire.
+    const real = readFixture('claude-code/mcp/session-hint-hook/c2s.jsonl')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { id?: unknown; params: { arguments: Record<string, unknown>; _meta: Record<string, unknown> } })
+      .find((message) => message.id === 1)!.params;
+    // The spike-era hint carries a transcript path; the server never keeps it.
+    const hint = real.arguments._grimoire as { session_id: string; tool_use_id: string; transcript_path: string };
+    expect(hint.transcript_path).toEqual(expect.any(String));
 
     await inBothEras(world.a, async ({ client, seen }, era) => {
       const result = await client.callTool({
         name: 'create',
         arguments: { title: `Hinted ${era}`, _grimoire: hint },
-        _meta: { 'claudecode/toolUseId': 'toolu_01' },
+        _meta: real._meta,
       });
 
       expect(result.isError, JSON.stringify(result.structuredContent)).toBeFalsy();
@@ -102,9 +103,23 @@ describe('the reserved hint key', () => {
       expect(call!.input).toEqual({ title: `Hinted ${era}` });
       expect(call!.ctx.mcp).toEqual({
         era,
-        hint: { session_id: 'session-1', tool_use_id: 'toolu_01', agent_id: 'agent-1', agent_type: 'general-purpose' },
-        meta: { 'claudecode/toolUseId': 'toolu_01' },
+        hint: { session_id: hint.session_id, tool_use_id: hint.tool_use_id },
+        meta: { 'claudecode/toolUseId': hint.tool_use_id, progressToken: real._meta.progressToken },
       });
+    });
+  });
+
+  gitTest("a subagent's hint keeps its agent ids", async ({ world }) => {
+    await initializeTracker(world.a, world.a);
+    // The ids a real subagent's PreToolUse payload gives the hook.
+    const payload = readFixtureJson<Record<string, string>>('claude-code/hook-payloads/pre-tool-use-subagent.json');
+    const { session_id, tool_use_id, agent_id, agent_type } = payload;
+    const hint = { session_id, tool_use_id, agent_id, agent_type };
+
+    await inBothEras(world.a, async ({ client, seen }) => {
+      await client.callTool({ name: 'labels', arguments: { _grimoire: hint }, _meta: { 'claudecode/toolUseId': tool_use_id } });
+
+      expect(seen[0]!.ctx.mcp?.hint).toEqual(hint);
     });
   });
 
@@ -196,6 +211,35 @@ describe('result layout', () => {
       expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(24 * 1024);
       expect(Object.keys(result.structuredContent!)).toEqual(['rows', 'total', 'notices', 'truncated', 'cursor']);
       expect(result.structuredContent).toMatchObject({ total: 12, truncated: true, cursor: expect.any(String) });
+    } finally {
+      await served.close();
+    }
+  });
+
+  gitTest('when not every notice fits a cut result, the launch-from-root notice goes first and the restart notice stays', async ({
+    world,
+  }) => {
+    await initializeTracker(world.a, world.a);
+    // A deep, non-ASCII start directory makes the launch-from-root notice long.
+    const below = path.join(world.a.dir, 'docs', '設計資料'.repeat(40));
+    await mkdir(below, { recursive: true });
+    const served = await serve(world.a, 'legacy', { startDir: below });
+    try {
+      const body = Array.from({ length: 1000 }, (_, i) => `Line ${i}: ${'detail '.repeat(6)}`).join('\n');
+      const { structuredContent } = await served.client.callTool({ name: 'create', arguments: { title: 'Huge', body } });
+      await mkdir(path.join(world.a.dir, '.grimoire'), { recursive: true });
+      await writeFile(path.join(world.a.dir, '.grimoire', 'config.yml'), 'version: 9.9.9\ninstall_format: 1\n');
+      const result = await served.client.callTool({
+        name: 'show',
+        arguments: { ref: (structuredContent as { id: string }).id, comments: 'none' },
+      });
+
+      const text = (result.content as { text: string }[])[0]!.text;
+      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(24 * 1024);
+      expect(result.structuredContent).toMatchObject({
+        notices: [`this checkout now pins 9.9.9; this session runs ${VERSION}; restart it`],
+        truncated: true,
+      });
     } finally {
       await served.close();
     }
@@ -302,8 +346,11 @@ describe('failures', () => {
     }
   });
 
-  gitTest('a server started outside any git repository answers every call with NO_REPO', async ({ world }) => {
-    // The world's root holds the remote and the clones but is no repository itself.
+  gitTest('a server started outside any git repository answers every call with NO_REPO', async ({ world, skip }) => {
+    // The world's root holds the remote and the clones but is no repository itself. On a
+    // machine whose temp dir sits inside a repo (a dotfiles home), no directory is outside one.
+    const enclosing = await findHostRoot(world.root).catch(() => null);
+    if (enclosing !== null) skip(`${world.root} is inside the repository at ${enclosing}`);
     const served = await serve(world.a, 'legacy', { startDir: world.root });
     try {
       const result = await served.client.callTool({ name: 'labels', arguments: {} });
@@ -330,23 +377,31 @@ describe('per-call _meta', () => {
     }
   });
 
-  gitTest("Codex's real _meta reaches the context as ids, without the turn metadata and its paths", async ({ world }) => {
+  gitTest("Codex's real _meta reaches the context as ids, keeping only the turn metadata's session id", async ({ world }) => {
     await initializeTracker(world.a, world.a);
     const { params } = readFixtureJson<{ params: { _meta: Record<string, unknown> } }>('codex/meta/tools-call.json');
+    const turn = params._meta['x-codex-turn-metadata'] as { session_id: string };
+    // Codex up to at least 0.150.0 sends no top-level sessionId: the turn metadata's is the session's (spike E, T6).
+    const { sessionId, ...older } = params._meta;
     const served = await serve(world.a, 'legacy');
     try {
       await served.client.callTool({ name: 'labels', arguments: {}, _meta: params._meta });
+      await served.client.callTool({ name: 'labels', arguments: {}, _meta: older });
 
-      const { meta } = served.seen[0]!.ctx.mcp!;
-      expect(meta).toEqual({
+      const [current, previous] = served.seen.map((call) => call.ctx.mcp!.meta);
+      expect(current).toEqual({
         callId: params._meta.callId,
         threadId: params._meta.threadId,
-        sessionId: params._meta.sessionId,
+        sessionId,
         windowId: params._meta.windowId,
         itemId: params._meta.itemId,
         progressToken: params._meta.progressToken,
+        'x-codex-turn-metadata.session_id': turn.session_id,
       });
-      expect(JSON.stringify(meta)).not.toContain('\\\\');
+      expect(previous).toMatchObject({ 'x-codex-turn-metadata.session_id': turn.session_id });
+      expect(previous).not.toHaveProperty('sessionId');
+      // Nothing else of the turn metadata, so none of its workspace paths.
+      expect(JSON.stringify([current, previous])).not.toContain('\\\\');
     } finally {
       await served.close();
     }

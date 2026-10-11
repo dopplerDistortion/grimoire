@@ -8,11 +8,13 @@
 // instructions, and the model reads them to decide what to search for.
 
 const CONTRACT = [
-  "grimoire is this repo's issue tracker. Issues live in grimoire, so use these grimoire tools for all issue work.",
-  'Claim only the leaf issue you will work now; ALREADY_CLAIMED means move on.',
+  "grimoire is this repo's issue tracker. Issues live in grimoire, so use these tools for all issue work.",
+  "Claim only the leaf you'll work now; ALREADY_CLAIMED means move on.",
   'Finish every claim with `close` or `release` and a debrief.',
   'Never edit, stage or commit `.grimoire/`.',
-  'Use the CLI only when no grimoire tools are listed; then run `node .grimoire/run.cjs status` and relay its output.',
+  // A client that defers tools behind a tool search (Codex for gpt-5.x) lists none
+  // until the model searches, so the fallback waits for the search (spike E).
+  'Use the CLI only when no grimoire tools are listed or found by tool search; then run `node .grimoire/run.cjs status` and relay it.',
   "The repo's own instructions and hand-written skills outrank evolved skills (`skill_list`, `skill_read`).",
 ].join(' ');
 

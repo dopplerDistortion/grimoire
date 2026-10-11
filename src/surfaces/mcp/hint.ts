@@ -39,17 +39,27 @@ export function takeHint(args: Readonly<Record<string, unknown>> | undefined): {
   };
 }
 
+/** Codex's per-turn `_meta` object; it holds absolute workspace paths. */
+const CODEX_TURN = 'x-codex-turn-metadata';
+
 /**
  * The call's client `_meta` keys whose values are ids (strings, numbers,
- * booleans). The SDK has already lifted the 2026-07-28 envelope keys out;
- * nested objects such as Codex's `x-codex-turn-metadata` (which holds absolute
- * workspace paths) are dropped. Null when nothing is left.
+ * booleans). The SDK has already lifted the 2026-07-28 envelope keys out.
+ * Nested objects are dropped, with one exception: Codex's turn metadata gives
+ * up its `session_id` alone, as `x-codex-turn-metadata.session_id` (Codex up
+ * to at least 0.150.0 sends no top-level `sessionId`; spike E, T6). Null when
+ * nothing is left.
  */
 export function metaIds(meta: Readonly<Record<string, unknown>> | undefined): McpCallFacts['meta'] {
   const out: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(meta ?? {})) {
     if (key.startsWith('io.modelcontextprotocol/')) continue;
     if (isId(value) || typeof value === 'number' || typeof value === 'boolean') out[key] = value;
+  }
+  const turn = meta?.[CODEX_TURN];
+  if (turn && typeof turn === 'object' && !Array.isArray(turn)) {
+    const { session_id } = turn as Record<string, unknown>;
+    if (isId(session_id)) out[`${CODEX_TURN}.session_id`] = session_id;
   }
   return Object.keys(out).length > 0 ? out : null;
 }

@@ -14,6 +14,7 @@ import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
 import { completeUpgradeDetails } from './upgrade';
 import { INSTALL_FORMAT_RANGE } from './host';
+import { findGitDirs } from '../machine-local/git-dirs';
 import { VERSION } from '../version';
 
 export type {
@@ -156,7 +157,9 @@ export function createCore(options: CoreOptions = {}): Core {
         if (!(error instanceof GrimoireError)) throw error;
         const body = error.toBody();
         if (body.code === 'UPGRADE_REQUIRED') {
-          body.details = await completeUpgradeDetails(body.details, ctx, tracker?.location.commonDir ?? null);
+          // The install check fails before the tracker opens: find the common dir without it.
+          const commonDir = tracker?.location.commonDir ?? (await findGitDirs(ctx.repo.root))?.commonDir ?? null;
+          body.details = await completeUpgradeDetails(body.details, ctx, commonDir);
         }
         return { ok: false, error: body };
       }

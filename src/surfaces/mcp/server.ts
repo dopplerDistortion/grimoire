@@ -134,7 +134,8 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
  * What every result of this call also says (spec §8, Other server output): a
  * checkout that moved to another pin since this process started, and a server
  * launched below the repo root (whose client then misses grimoire's pointer
- * files).
+ * files). Most important first: the restart notice, which every result must
+ * carry, is the last a cut result gives up.
  */
 function noticesFor(root: string, startDir: string, pin: string | null): string[] {
   const notices: string[] = [];
@@ -148,7 +149,7 @@ function noticesFor(root: string, startDir: string, pin: string | null): string[
   return notices;
 }
 
-/** The envelope for a failure outside the core's own outcomes: grimoire's errors as they are, anything else as INTERNAL. */
+/** The envelope for a failure outside the core's own outcomes: grimoire's errors as they are, anything else as INTERNAL (ADR 0012). */
 function errorBody(error: unknown): ErrorBody {
   if (error instanceof GrimoireError) return error.toBody();
   const message = error instanceof Error ? error.message : String(error);

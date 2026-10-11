@@ -24,20 +24,34 @@ afterAll(async () => {
   await removeDir(cwd);
 });
 
-/** Milliseconds from spawn to the first line on stdout, after writing `opening`. */
+/**
+ * Milliseconds from spawn to the first line on stdout, after writing `opening`.
+ * Resolves only once that server has exited (outside the timed window), so no
+ * sample overlaps the previous one's shutdown.
+ */
 function timeToFirstLine(opening: string): Promise<{ ms: number; line: string }> {
   return new Promise((resolve, reject) => {
     const started = performance.now();
     const child = spawn(process.execPath, [bin, 'mcp'], { cwd, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    let first: { ms: number; line: string } | null = null;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(first ? 'the server did not exit' : 'no response to the opening'));
+    }, 30_000);
+    child.once('close', () => {
+      clearTimeout(timer);
+      if (first) resolve(first);
+      else reject(new Error('the server exited without answering the opening'));
+    });
     let buffered = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
+      if (first) return;
       buffered += chunk;
       const newline = buffered.indexOf('\n');
       if (newline < 0) return;
-      const ms = performance.now() - started;
+      first = { ms: performance.now() - started, line: buffered.slice(0, newline) };
       child.stdin.end();
-      resolve({ ms, line: buffered.slice(0, newline) });
     });
     child.on('error', reject);
     child.stdin.write(`${opening}\n`);

@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { VERSION } from '../../src/version';
 import { commitToTracker, coreTest as test, expectRefUnmoved, trackerFile, trackerTip, TRACKER_REF } from './support';
@@ -157,6 +159,20 @@ describe("the checkout's install_format", () => {
     };
     expect(write).toEqual(expected);
     expect(read).toEqual(expected);
+  });
+
+  test('on a machine that already has the pinned copy, the only remedy is the restart', async ({ world, grimoire }) => {
+    await mkdir(path.join(world.a.dir, '.git', 'grimoire', 'pkg', '2.3.0'), { recursive: true });
+    await writeFile(path.join(world.a.dir, '.git', 'grimoire', 'pkg', '2.3.0', '.complete'), '');
+    const ctx = { ...grimoire.ctx, repo: { ...grimoire.ctx.repo, pin: '2.3.0', installFormat: 2 } };
+
+    const outcome = await grimoire.core.call('labels', {}, ctx);
+
+    // toMatchObject matches arrays at their full length: the restart, and no join.
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: { code: 'UPGRADE_REQUIRED', details: { marker: 'install', remedies: [{ kind: 'restart' }] } },
+    });
   });
 
   test('an older or unreadable install_format is refused too; the current one, or none read, runs', async ({ grimoire }) => {
