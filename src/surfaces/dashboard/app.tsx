@@ -78,9 +78,9 @@ function Shell({ session: who, instance: running }: { session: SessionInfo; inst
     () =>
       connectLive({
         onState: setLive,
-        onReload: () => location.reload(),
-        onChange: (change) => {
-          if (change.instance) void instance().then(setInfo, () => {});
+        // Views refetch through onLive; the shell keeps its own instance facts fresh. Never a page reload.
+        onSignal: (signal) => {
+          if (signal.kind === 'reload' || signal.change.instance) void instance().then(setInfo, () => {});
         },
       }),
     [],

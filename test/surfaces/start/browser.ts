@@ -95,6 +95,10 @@ export interface HeadlessPage {
   /** Navigates and waits until `ready` (a JS expression) is true. */
   goto(url: string, ready: string, timeoutMs?: number): Promise<void>;
   evaluate<T>(expression: string): Promise<T>;
+  /** Waits until `ready` (a JS expression) is true on the current page. */
+  waitFor(ready: string, timeoutMs?: number): Promise<void>;
+  /** The URLs the page requested so far, in order. */
+  requests(): string[];
   report(): Promise<PageReport>;
   close(): Promise<void>;
 }
@@ -134,6 +138,10 @@ export async function openHeadless(executable: string): Promise<HeadlessPage> {
     const { sessionId } = (await cdp.send('Target.attachToTarget', { targetId, flatten: true })) as { sessionId: string };
     const consoleViolations: string[] = [];
     const errors: string[] = [];
+    const requested: string[] = [];
+    cdp.on('Network.requestWillBeSent', (params, from) => {
+      if (from === sessionId) requested.push((params.request as { url: string }).url);
+    });
     cdp.on('Log.entryAdded', (params, from) => {
       const entry = params.entry as { text?: string; source?: string };
       if (from === sessionId && /Content Security Policy/i.test(entry.text ?? '')) consoleViolations.push(entry.text ?? '');
@@ -148,6 +156,7 @@ export async function openHeadless(executable: string): Promise<HeadlessPage> {
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Log.enable', {}, sessionId);
+    await cdp.send('Network.enable', {}, sessionId);
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: COLLECT }, sessionId);
 
     const evaluate = async <T>(expression: string): Promise<T> => {
@@ -162,19 +171,24 @@ export async function openHeadless(executable: string): Promise<HeadlessPage> {
     const harvest = async () => {
       collected = [...collected, ...((await evaluate<string[] | undefined>('window.__cspViolations ?? []')) ?? [])];
     };
+    const waitFor = async (ready: string, timeoutMs = 20_000) => {
+      const until = Date.now() + timeoutMs;
+      for (;;) {
+        const done = await evaluate<boolean>(`Boolean(${ready})`).catch(() => false);
+        if (done) return;
+        if (Date.now() > until) throw new Error(`the page never became ready (${ready}); page text: ${await evaluate<string>('document.body?.innerText ?? ""').catch(() => '?')}`);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    };
     return {
       async goto(url, ready, timeoutMs = 20_000) {
         await harvest().catch(() => {});
         await cdp.send('Page.navigate', { url }, sessionId);
-        const until = Date.now() + timeoutMs;
-        for (;;) {
-          const done = await evaluate<boolean>(`Boolean(${ready})`).catch(() => false);
-          if (done) return;
-          if (Date.now() > until) throw new Error(`${url} never became ready (${ready}); page text: ${await evaluate<string>('document.body?.innerText ?? ""').catch(() => '?')}`);
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
+        await waitFor(ready, timeoutMs);
       },
       evaluate,
+      waitFor,
+      requests: () => [...requested],
       async report() {
         await harvest();
         const violations = [...collected, ...consoleViolations];
