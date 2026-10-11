@@ -1,0 +1,13 @@
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "node -e \"process.stdout.write(1+String())\""
+timeout = 10
+
+# >>> grimoire (managed block)
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "node -e \"const f=require('fs'),p=require('path'),a=process.argv.slice(1),i=a.indexOf('--from');let d=p.resolve(i<0?'.':a[i+1]),g;for(;;){g=p.join(d,'.git');if(f.existsSync(g))break;const u=p.dirname(d);if(u==d)process.exit(0);d=u}if(f.statSync(g).isFile()){g=p.resolve(d,f.readFileSync(g,'utf8').trim().slice(7).trim());const c=p.join(g,'commondir');if(f.existsSync(c))g=p.resolve(g,f.readFileSync(c,'utf8').trim())}const l=p.join(g,'grimoire','launcher.cjs');if(f.existsSync(l))require(l)(a,d)\" hook session-start"
+timeout = 10
+# <<< grimoire

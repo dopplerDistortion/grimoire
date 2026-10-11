@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a12958-3abc-7ec1-a8af-d7e02ec51bc2"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"summary\":\"from the stdin bundle\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}
