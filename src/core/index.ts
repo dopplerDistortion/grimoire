@@ -58,6 +58,8 @@ export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSk
 export { AUTO_SYNC_SETTING, autoSync, markSyncPending, syncNow, syncRequestOf } from './sync';
 export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
 export type { ErrorBody, ErrorCode } from '../errors';
+export { traceCapture, captureMode, type TraceCapture, type CaptureEntry } from './capture';
+export type { CaptureOptions } from '../capture/end';
 
 export type Outcome<R> = { ok: true; result: R } | { ok: false; error: ErrorBody };
 
