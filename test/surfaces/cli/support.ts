@@ -170,16 +170,29 @@ export async function cliAtTerminal(
 /** The last JSON object a terminal screen shows (the CLI's stdout, among prompts and echoes). */
 export function lastJsonOnScreen(screen: string): Record<string, unknown> {
   const lines = screen.split('\n').map((line) => line.trim());
-  for (let i = lines.length - 1; i >= 0; i--) {
+  let last: Record<string, unknown> | null = null;
+  // Top to bottom, skipping past each object found, so a nested object of a
+  // pretty-printed one is never taken for the whole.
+  for (let i = 0; i < lines.length; i++) {
     if (!lines[i]!.startsWith('{')) continue;
-    // Pretty-printed output spans lines: take from here to the line that closes it.
     for (let j = i; j < lines.length; j++) {
-      try {
-        return oneJsonObject(lines.slice(i, j + 1).join('\n'));
-      } catch {
-        // not closed yet
+      const parsed = parsedObject(lines.slice(i, j + 1).join('\n'));
+      if (parsed) {
+        last = parsed;
+        i = j;
+        break;
       }
     }
   }
-  throw new Error(`no JSON object on the screen:\n${screen}`);
+  if (!last) throw new Error(`no JSON object on the screen:\n${screen}`);
+  return last;
+}
+
+function parsedObject(text: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }

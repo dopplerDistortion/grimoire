@@ -56,11 +56,12 @@ async function inputOf(command: Command, io: CliIo): Promise<Record<string, unkn
   if (!command.stdinInput) return mergeInput(command, undefined);
   if (io.stdin.isTTY && mayConfirm(command.op)) {
     throw new UsageError(
-      `${command.verb} asks for a typed confirmation at this terminal, so its input can't come from stdin here; give its fields as arguments and flags`,
+      `${command.verb} asks for a typed confirmation at this terminal, so its input can't come from stdin here; give its fields as arguments and flags (JSON on the flag of a field that isn't a plain value)`,
       command.verb,
     );
   }
-  const text = await readStdin(io.stdin);
+  // Windows tools (PowerShell 5.1's UTF-8, files it saved) lead with a byte order mark.
+  const text = (await readStdin(io.stdin)).replace(/^﻿/, '');
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -93,7 +94,7 @@ async function call(command: Command, input: Record<string, unknown>, ctx: CallC
   // HUMAN_ONLY (agent markers, no terminal) before anything is asked or probed.
   checkSurface(op, ctx);
   if (humanSurface(ctx)) {
-    const subject = await confirmationFor(op, input, ctx, core);
+    const subject = await confirmationFor(op, command.verb, input, ctx, core);
     if (subject !== null && !(await confirmTyped(io, command.verb, subject))) {
       throw new GrimoireError('INVALID', `${command.verb} was not confirmed: type ${subject} exactly to run it; nothing changed`, {
         fields: { confirmation: `must be ${subject}` },
@@ -105,16 +106,19 @@ async function call(command: Command, input: Record<string, unknown>, ctx: CallC
   try {
     return await core.call(op.name, input, ctx);
   } catch (error) {
-    // The probe passed, but a write was refused all the same: the store's
-    // compare-and-set publishes last, so nothing was published.
+    // The probe passed, but a write below the probed directories was refused
+    // all the same: the tracker's compare-and-set publishes last and
+    // machine-local records are written whole (temp file, rename), so
+    // nothing changed.
     if (!refusedWrite(error)) throw error;
     throw new GrimoireError('NOT_WRITABLE', `this process can't write grimoire's live store (${(error as NodeJS.ErrnoException).code})`, {});
   }
 }
 
 /** Prints the error object (a refused write in a Codex shell says why, spike F); exit 1. */
-function failed(io: CliIo, body: ErrorBody): number {
-  const error = body.code === 'NOT_WRITABLE' && inCodexShell(io.env) ? withCodexHint(body) : body;
+function failed(io: CliIo, body: ErrorBody, command: Command | null): number {
+  const refused = body.code === 'NOT_WRITABLE' && command !== null && inCodexShell(io.env);
+  const error = refused ? withCodexHint(body, command.op, command.verb) : body;
   printJson(io, { error });
   return 1;
 }
@@ -135,12 +139,14 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
   // spawns the detached sync child, after setting the sync-pending marker
   // that covers a child that dies (spec §4; spikes A, E, F).
   const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [options.bin, 'sync', '--background'] }) });
+  let command: Command | null = null;
   try {
     const parsed = parseCommand(argv, core.ops);
     if (parsed.kind === 'help') {
       printJson(io, parsed.op ? verbHelp(parsed.op) : globalHelp(core.ops));
       return 0;
     }
+    command = parsed;
     const input = await inputOf(parsed, io);
     const ctx = await contextOf(parsed, io);
     if (parsed.background) {
@@ -152,11 +158,11 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
       printJson(io, outcome.result);
       return 0;
     }
-    return failed(io, outcome.error);
+    return failed(io, outcome.error, command);
   } catch (error) {
     if (error instanceof UsageError) return usage(io, error);
     const body = errorBodyOf(error, (line) => io.stderr.write(`grimoire: ${line}\n`));
-    return failed(io, body);
+    return failed(io, body, command);
   } finally {
     // Waits for the spawn of the sync child, then lets go of git processes.
     await core.close();

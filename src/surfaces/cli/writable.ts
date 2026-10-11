@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto';
 import { open, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import type { OpDescriptor } from '../../core';
 import { GrimoireError, type ErrorBody } from '../../errors';
 import { findGitDirs } from '../../machine-local';
 
@@ -58,11 +59,20 @@ export function refusedWrite(error: unknown): boolean {
   return REFUSED.has((error as NodeJS.ErrnoException | null)?.code ?? '');
 }
 
-/** The hint a refused write gets in a Codex agent's shell (spike F). */
-export const CODEX_SANDBOX_HINT =
-  'Codex’s sandbox keeps .git/ read-only for the agent’s shell, so CLI writes fail there; make this write with the grimoire MCP tools instead (Codex runs the grimoire MCP server outside the sandbox)';
+const CODEX_SANDBOX = 'Codex’s sandbox keeps .git/ read-only for the agent’s shell, so CLI writes fail there';
+
+/** Where a refused write can be made instead, for an op with no MCP tool. */
+const ELSEWHERE: Readonly<Record<string, string>> = {
+  sync: 'sync has no grimoire MCP tool: writes made through the grimoire MCP tools sync on their own, or a person runs `grimoire sync` outside the sandbox',
+};
+
+/** The hint a refused write of `op` gets in a Codex agent's shell (spike F): its MCP tool, when it has one. */
+function codexHint(op: Pick<OpDescriptor, 'name' | 'mcp'>, verb: string): string {
+  if (op.mcp) return `${CODEX_SANDBOX}; make this write with the grimoire MCP tools instead (Codex runs the grimoire MCP server outside the sandbox)`;
+  return `${CODEX_SANDBOX}; ${ELSEWHERE[op.name] ?? `${verb} has no grimoire MCP tool, so a person runs it outside the sandbox`}`;
+}
 
 /** Adds the Codex sandbox hint to a refused write's error. */
-export function withCodexHint(body: ErrorBody): ErrorBody {
-  return { ...body, message: `${body.message}. ${CODEX_SANDBOX_HINT}` };
+export function withCodexHint(body: ErrorBody, op: Pick<OpDescriptor, 'name' | 'mcp'>, verb: string): ErrorBody {
+  return { ...body, message: `${body.message}. ${codexHint(op, verb)}` };
 }

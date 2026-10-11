@@ -1,13 +1,24 @@
 // Seam 3: the built `grimoire` CLI against temporary repos (spec §10, §7, §4).
 // Thin: transport (argv, JSON stdin/stdout, exit codes) and gating, never
 // business rules, which seam 1 covers.
-import { writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { makeUnwritable, permissionsApply, type Clone } from '#harness';
 import type { CallContext, Core } from '../../../src/core';
 import { MachineLocalStore } from '../../../src/machine-local';
-import { coreTest, expectRefUnmoved, initializeTracker, trackerTip } from '../../core/support';
+import {
+  agentContext,
+  coreTest,
+  expectRefUnmoved,
+  fetchTracker,
+  initializeTracker,
+  pushTracker,
+  suffixQueue,
+  T0,
+  trackerTip,
+} from '../../core/support';
 import { buildGrimoire, cli, cliAtTerminal, humanEnv, lastJsonOnScreen } from './support';
 
 let bin: string;
@@ -19,8 +30,10 @@ beforeAll(async () => {
 afterAll(() => cleanup());
 
 /** coreTest whose clone `a` has a tracker, whether or not the test uses the in-process core. */
-const cliTest = coreTest.extend('a', async ({ world }) => {
+const cliTest = coreTest.extend('a', async ({ world }, { onCleanup }) => {
   await initializeTracker(world.a, world.a);
+  // No detached sync child of a CLI write outlives its test: the world is removed next.
+  onCleanup(() => until(async () => (await machineOf(world.a).processes.live({ role: 'sync' })).length === 0, 'the sync children to exit'));
   return world.a;
 });
 
@@ -147,6 +160,23 @@ describe('input, output and exit codes', () => {
     expect(ready.json).toMatchObject({ total: 3 });
   });
 
+  cliTest('`null` on a nullable field’s flag clears the field', async ({ a }) => {
+    const { json: parent } = await cli(bin, ['create', 'Parent'], { cwd: a.dir });
+    const { json: child } = await cli(bin, ['create', 'Child', '--parent', parent.id as string], { cwd: a.dir });
+
+    const cleared = await cli(bin, ['update', child.id as string, '--parent', 'null'], { cwd: a.dir });
+
+    expect(cleared.code, cleared.stdout).toBe(0);
+    expect((await cli(bin, ['show', child.id as string], { cwd: a.dir })).json).toMatchObject({ parent: null });
+  });
+
+  cliTest('JSON on stdin may start with a byte order mark (Windows tools write one)', async ({ a }) => {
+    const created = await cli(bin, ['create', '--input', '-'], { cwd: a.dir, input: '﻿{"title": "From PowerShell"}' });
+
+    expect(created.code, created.stdout).toBe(0);
+    expect((await cli(bin, ['show', created.json.id as string], { cwd: a.dir })).json).toMatchObject({ title: 'From PowerShell' });
+  });
+
   cliTest('usage errors exit 2 with one JSON object on stdout', async ({ a }) => {
     const cases: string[][] = [
       [],
@@ -156,7 +186,7 @@ describe('input, output and exit codes', () => {
       ['list', '--no-such-flag'],
       ['list', '--limit'],
       ['create', '--input', 'file.json'],
-      ['update', 'gr-aaaaa', '--body-patch', '[]'],
+      ['update', 'gr-aaaaa', '--body-patch', '[{'], // not JSON
       ['create', 'Title', '--title', 'Again'],
     ];
     for (const args of cases) {
@@ -188,9 +218,14 @@ describe('input, output and exit codes', () => {
       input_schema: { type: 'object', required: ['attempt', 'verdict', 'reason'] },
     });
     expect(help.json.flags).toContainEqual(expect.objectContaining({ flag: '--verdict <value>', field: 'verdict', required: true }));
+    // A human-only verb's help names what its person types.
+    expect(help.json.confirmation).toMatch(/types the attempt handle to confirm/);
+    expect((await cli(bin, ['settings', 'set', '--help'], { cwd: a.dir })).json.confirmation).toMatch(/types the key to confirm/);
+    expect((await cli(bin, ['delete', '--help'], { cwd: a.dir })).json.confirmation).toMatch(/types the id to confirm/);
+    expect((await cli(bin, ['release', '--help'], { cwd: a.dir })).json.confirmation).toMatch(/another person’s attempt.*types the issue id/);
 
     const close = await cli(bin, ['close', '--help'], { cwd: a.dir });
-    expect(close.json.flags).toContainEqual(expect.objectContaining({ field: 'debrief', flag: null, stdin_only: true }));
+    expect(close.json.flags).toContainEqual(expect.objectContaining({ field: 'debrief', flag: '--debrief <json>', json: true }));
     // The underscored op name works as well.
     expect((await cli(bin, ['outcome_set', '--help'], { cwd: a.dir })).json).toEqual(help.json);
 
@@ -200,6 +235,17 @@ describe('input, output and exit codes', () => {
     expect(verbs).toEqual(expect.arrayContaining(['show', 'list', 'create', 'claim', 'close', 'delete', 'outcome set', 'settings', 'settings set', 'sync', 'sync status']));
     // Help needs no repo.
     expect((await cli(bin, ['delete', '--help'], { cwd: world.root })).code).toBe(0);
+  });
+
+  cliTest('a failure grimoire didn’t expect exits 1 with one INTERNAL error object, and the stack goes to stderr', async ({ a }) => {
+    // The tracker ref names a tree, not a commit: nothing a core outcome covers.
+    await a.git(['update-ref', 'refs/grimoire/tracker', await a.git(['rev-parse', 'HEAD^{tree}'])]);
+
+    const run = await cli(bin, ['list'], { cwd: a.dir });
+
+    expect(run.code).toBe(1);
+    expect(run.json).toEqual({ error: { code: 'INTERNAL', message: expect.stringMatching(/unexpectedly/), retryable: false, details: {} } });
+    expect(run.stderr).toMatch(/^grimoire: Error: .*\n\s+at /m);
   });
 
   cliTest('outside any repository a call gives NO_REPO; --version stays a JSON object', async ({ world, a }) => {
@@ -310,12 +356,35 @@ describe('the human-only gate', () => {
     });
   });
 
+  cliTest('resolve takes its per-field picks as a JSON flag, so it runs at a terminal', async ({ world, grimoire, a }) => {
+    const bobCore = grimoire.makeCore({ clock: () => new Date(T0.getTime() + 60_000) });
+    const alice = personAtShell(a);
+    const bob = agentContext(world.b);
+    const { id } = (await coreResult(grimoire.core, 'create', { title: 'Shared' }, alice)) as { id: string };
+    await pushTracker(a);
+    await fetchTracker(world.b);
+    // Both clones retitle it; Bob's later title stands, Alice's is set aside.
+    await coreResult(grimoire.core, 'update', { id, title: 'Alice’s title' }, alice);
+    await coreResult(bobCore, 'update', { id, title: 'Bob’s title' }, bob);
+    await pushTracker(world.b);
+    await fetchTracker(a);
+
+    const run = await cliAtTerminal(bin, ['resolve', id, '--fields', '{"title": "theirs"}'], {
+      cwd: a.dir,
+      answers: [{ when: /Type gr-\w+ to confirm/, type: id }],
+    });
+
+    expect(run.code, run.screen).toBe(0);
+    expect(lastJsonOnScreen(run.screen)).toEqual({ id, resolved: [{ field: 'title', took: 'theirs' }] });
+    expect(await coreResult(grimoire.core, 'show', { ref: id }, alice)).toMatchObject({ title: 'Alice’s title', conflict: null });
+  });
+
   cliTest('release --abandoned of another person’s attempt needs the terminal and the typed id; of your own, neither', async ({
     world,
     grimoire,
     a,
   }) => {
-    const { json: created } = await cli(bin, ['create', 'Dead claim'], { cwd: a.dir });
+    const { json: created } = await cli(bin, ['create', 'Stale claim'], { cwd: a.dir });
     const id = created.id as string;
     // Bob claimed it from his agent on this clone, then went away.
     const bob: CallContext = { ...personAtShell(a), person: { name: world.b.identity.name, email: world.b.identity.email } };
@@ -331,11 +400,52 @@ describe('the human-only gate', () => {
     expect(run.code, run.screen).toBe(0);
     expect(lastJsonOnScreen(run.screen)).toMatchObject({ id, attempt, ended: 'release-abandoned' });
 
-    // Alice's own dead claim: no terminal needed.
+    // Alice's own claim: no terminal needed.
     const { json: mine } = await cli(bin, ['claim', id], { cwd: a.dir });
     const own = await cli(bin, ['release', id, mine.attempt as string, '--abandoned'], { cwd: a.dir });
     expect(own.code, own.stdout).toBe(0);
     expect(own.json).toMatchObject({ ended: 'release-abandoned' });
+    await syncedInBackground(a);
+  });
+
+  cliTest('release --abandoned of another person’s attempt asks for the id even when the handle is typed in capitals', async ({
+    world,
+    grimoire,
+    a,
+  }) => {
+    const { json: created } = await cli(bin, ['create', 'Stale claim'], { cwd: a.dir });
+    const id = created.id as string;
+    const bob: CallContext = { ...personAtShell(a), person: { name: world.b.identity.name, email: world.b.identity.email } };
+    const { attempt } = (await coreResult(grimoire.core, 'claim', { id }, bob)) as { attempt: string };
+
+    const typo = await expectRefUnmoved(a, () =>
+      cliAtTerminal(bin, ['release', id, attempt.toUpperCase(), '--abandoned'], { cwd: a.dir, answers: [{ when: /to confirm/, type: 'gr-wrong' }] }),
+    );
+
+    expect(typo.code, typo.screen).toBe(1);
+    expect(lastJsonOnScreen(typo.screen)).toMatchObject({ error: { code: 'INVALID', details: { fields: { confirmation: `must be ${id}` } } } });
+  });
+
+  cliTest('release --abandoned asks for the id when the bare id names both sides of a collision', async ({ world, grimoire, a }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => new Date(T0.getTime() + 60_000) });
+    await pushTracker(a);
+    await fetchTracker(world.b);
+    await coreResult(aliceCore, 'create', { title: 'Alice’s k1m0x' }, personAtShell(a));
+    await coreResult(bobCore, 'create', { title: 'Bob’s k1m0x' }, agentContext(world.b));
+    // Bob claimed his gr-k1m0x before anyone saw the collision; then a folds it.
+    const { attempt } = (await coreResult(bobCore, 'claim', { id: 'gr-k1m0x' }, agentContext(world.b))) as { attempt: string };
+    await pushTracker(world.b);
+    await fetchTracker(a);
+
+    const typo = await expectRefUnmoved(a, () =>
+      cliAtTerminal(bin, ['release', 'gr-k1m0x', attempt, '--abandoned'], { cwd: a.dir, answers: [{ when: /to confirm/, type: 'gr-wrong' }] }),
+    );
+
+    expect(typo.code, typo.screen).toBe(1);
+    expect(lastJsonOnScreen(typo.screen)).toMatchObject({
+      error: { code: 'INVALID', details: { fields: { confirmation: 'must be gr-k1m0x' } } },
+    });
   });
 });
 
@@ -356,6 +466,14 @@ describe('a shell that can’t write the live store', () => {
         );
         expect(codex.json).toMatchObject({ error: { code: 'NOT_WRITABLE' } });
         expect((codex.json.error as { message: string }).message).toMatch(/Codex.*sandbox.*\.git\/.*grimoire MCP tools/);
+        // sync has no MCP tool to point to.
+        const sync = await expectRefUnmoved(a, () =>
+          cli(bin, ['sync'], { cwd: a.dir, env: humanEnv({ CODEX_THREAD_ID: '019a-thread', CODEX_SANDBOX: 'windows' }) }),
+        );
+        expect(sync.json).toMatchObject({ error: { code: 'NOT_WRITABLE' } });
+        const syncMessage = (sync.json.error as { message: string }).message;
+        expect(syncMessage).toMatch(/Codex.*sandbox.*outside the sandbox/);
+        expect(syncMessage).not.toMatch(/with the grimoire MCP tools instead/);
 
         const read = await cli(bin, ['list'], { cwd: a.dir });
         expect(read.code, read.stdout).toBe(0);
@@ -364,6 +482,26 @@ describe('a shell that can’t write the live store', () => {
       }
     },
   );
+
+  cliTest.skipIf(!permissionsApply)('a write refused below the directories the probe checks still gives NOT_WRITABLE', async ({ grimoire, a }) => {
+    const settings = path.join(a.dir, '.git', 'grimoire', 'records', 'machine-settings');
+    await mkdir(settings, { recursive: true });
+    const restore = await makeUnwritable(settings);
+    try {
+      const run = await cliAtTerminal(bin, ['settings', 'set', 'dashboard.port', '4100'], {
+        cwd: a.dir,
+        answers: [{ when: /Type dashboard\.port to confirm/, type: 'dashboard.port' }],
+      });
+
+      expect(run.code, run.screen).toBe(1);
+      expect(lastJsonOnScreen(run.screen)).toEqual({ error: { code: 'NOT_WRITABLE', message: expect.any(String), retryable: false, details: {} } });
+    } finally {
+      await restore();
+    }
+    expect(await coreResult(grimoire.core, 'settings_get', { key: 'dashboard.port' }, personAtShell(a))).toMatchObject({
+      machine: { 'dashboard.port': { default: true } },
+    });
+  });
 });
 
 describe('the detached sync child', () => {
@@ -396,20 +534,37 @@ describe('the detached sync child', () => {
   });
 
   cliTest('a sync child that dies leaves the sync-pending marker for upkeep', async ({ world, a }) => {
-    // The push hangs, then fails: only a live child could have pushed.
-    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nsleep 5\nexit 1\n', { mode: 0o755 });
+    // The push waits at the remote until the test opens the gate, then fails:
+    // the child is caught mid-push, and only a live child could have pushed.
+    const signal = (name: string) => path.join(world.root, name);
+    const sh = (file: string) => file.split(path.sep).join('/');
+    const [alive, gate, done] = [signal('hook-alive'), signal('hook-gate'), signal('hook-done')];
+    await writeFile(
+      path.join(world.remote, 'hooks', 'pre-receive'),
+      `#!/bin/sh
+while [ ! -f '${sh(gate)}' ]; do touch '${sh(alive)}'; sleep 0.1; done
+touch '${sh(done)}'
+exit 1
+`,
+      { mode: 0o755 },
+    );
 
     await closeThroughCli(a);
     const machine = machineOf(a);
     await until(async () => (await machine.processes.live({ role: 'sync' })).length === 1, 'the child’s process record');
+    await until(async () => existsSync(alive), 'the child’s push to reach the remote');
     const [child] = await machine.processes.live({ role: 'sync' });
     process.kill(child!.pid);
     await until(async () => (await machine.processes.live({ role: 'sync' })).length === 0, 'the child to die');
 
     const status = await cli(bin, ['sync', 'status'], { cwd: a.dir });
-    expect(status.json.pending_since).toEqual(expect.any(String));
+    // No sync finished: a child that runs to its end records the result, a failed push included.
+    expect(status.json).toMatchObject({ pending_since: expect.any(String), last_result: null, failure: null });
     expect(await remoteTracker(a)).toBeNull();
-    // Let the orphaned push (and its hook) finish before the world goes.
-    await new Promise((resolve) => setTimeout(resolve, 6_000));
+
+    // Let the push end before the world goes: it fails once the gate opens,
+    // unless it died with the child (Windows ends a process's whole tree).
+    await writeFile(gate, '');
+    await until(async () => existsSync(done) || Date.now() - (await stat(alive)).mtimeMs > 2_000, 'the push to end');
   });
 });

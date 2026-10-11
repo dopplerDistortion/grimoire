@@ -1,9 +1,13 @@
 // The CLI's grammar (spec §10): verbs are op names, `<noun> <verb>` is an
 // alias for the op `<noun>_<verb>`, the op's input is a JSON object on stdin
-// (`--input -`), and flags and positionals are sugar for its scalar fields.
+// (`--input -`), and flags and positionals are sugar for its scalar fields. A
+// field that isn't scalar takes a JSON literal on its flag (`--fields
+// '{"title": "theirs"}'`): a human-only op's input can't come on the stdin of
+// the terminal it confirms at, so every field needs a flag.
 // Everything here is driven by the ops' JSON Schemas, so an op a later slice
 // adds to the registry is a verb with flags and `--help` at once.
 import type { OpDescriptor } from '../../core';
+import { confirmationHelp } from './gate';
 
 /** A malformed command line: exit 2, before anything runs. */
 export class UsageError extends Error {
@@ -92,7 +96,18 @@ function accept(schema: JsonSchema, raw: string): { value: unknown } | null {
 
 /** A command-line word as a value of `schema`: converted when it can be, else kept as text for the core to refuse. */
 function convert(schema: JsonSchema, raw: string): unknown {
-  return accept(schema, raw)?.value ?? raw;
+  // Not `?.value ?? raw`: an accepted null (clearing a nullable field) is a value.
+  const accepted = accept(schema, raw);
+  return accepted ? accepted.value : raw;
+}
+
+/** The value of a flag for a field that isn't a plain value (an object, a list of objects): a JSON literal. */
+function jsonFlag(name: string, raw: string, verb: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new UsageError(`--${name} takes the field’s value as JSON, and what follows it isn’t valid JSON`, verb);
+  }
 }
 
 /** `--idempotency-key` and `--idempotency_key` both name `idempotency_key`. */
@@ -227,10 +242,8 @@ export function parseCommand(argv: readonly string[], ops: readonly OpDescriptor
       given.add(field);
       continue;
     }
-    if (!isScalar(schema)) {
-      throw new UsageError(`${field} isn't a plain value: pass it in the JSON object on stdin (--input -)`, verb);
-    }
-    set(field, convert(schema, value()), `--${name}`);
+    // A human-only op's input can't come on a terminal's stdin, so every field has a flag.
+    set(field, isScalar(schema) ? convert(schema, value()) : jsonFlag(name, value(), verb), `--${name}`);
   }
 
   if (words.length > positionals.length) {
@@ -268,19 +281,19 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
   const positionals = positionalsOf(op);
   const verb = verbOf(op);
   const flags = Object.entries(properties).map(([field, schema]) => {
-    const scalar = isScalar(schema);
-    const repeated = isScalarArray(schema);
+    const json = !isScalar(schema) && !isScalarArray(schema);
     return {
-      flag: !scalar && !repeated ? null : schema.type === 'boolean' ? flagOf(field) : `${flagOf(field)} <value>`,
+      flag: json ? `${flagOf(field)} <json>` : schema.type === 'boolean' ? flagOf(field) : `${flagOf(field)} <value>`,
       field,
       required: required.has(field),
-      ...(repeated ? { repeatable: true } : {}),
+      ...(isScalarArray(schema) ? { repeatable: true } : {}),
       ...(positionals.includes(field) ? { positional: positionals.indexOf(field) + 1 } : {}),
-      ...(!scalar && !repeated ? { stdin_only: true } : {}),
+      ...(json ? { json: true } : {}),
       ...(typeof schema.description === 'string' ? { description: schema.description } : {}),
     };
   });
   const usage = [`grimoire ${verb}`, ...positionals.map((p) => `<${p}>`), '[flags]', '[--input -]'].join(' ');
+  const confirmation = confirmationHelp(op, verb);
   return {
     verb,
     op: op.name,
@@ -291,9 +304,7 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
     positionals,
     flags,
     input_schema: op.inputSchema,
-    ...(op.policy === 'human-only'
-      ? { confirmation: 'a person runs it at an interactive terminal, with no agent marker set, and types the id (the name, for skills) to confirm' }
-      : {}),
+    ...(confirmation !== null ? { confirmation } : {}),
   };
 }
 
@@ -301,7 +312,8 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
 export function globalHelp(ops: readonly OpDescriptor[]): Record<string, unknown> {
   return {
     usage: 'grimoire <verb> [arguments] [--field value]… [--input -]',
-    input: 'the op’s JSON object on stdin with --input -; flags and arguments are sugar for its plain fields',
+    input:
+      'the op’s JSON object on stdin with --input -; flags and arguments are sugar for its plain fields, and a field that isn’t a plain value takes JSON on its flag',
     repo: 'the host repo is the first directory at or above the cwd (or --from <dir>) that holds .git',
     output: 'stdout is always exactly one JSON object: the result, or {"error": {code, message, retryable, details}}',
     exit_codes: { 0: 'success', 1: 'stdout carries an error object', 2: 'usage error', 3: 'grimoire isn’t set up on this machine' },
