@@ -8,17 +8,16 @@
 // committed nor discarded (a failure, Ctrl+C) is kept in a file and named.
 //
 // Prompts go to stderr; stdout carries only the one JSON result (spec §10).
-import { spawn } from 'node:child_process';
+// The CLI runs this session for `skill edit` at a terminal (./run.ts) instead
+// of calling `skill_edit` itself.
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import readline from 'node:readline/promises';
 import type { CallContext, Core, ErrorBody, Outcome, SkillEditResult } from '../../core';
 import { checkSurface, writer } from '../../core/op';
 import { GrimoireError } from '../../errors';
-import { cleanGitEnv, runGit } from '../../git/run';
+import { runGit } from '../../git/run';
 import { normalizeSkillText, skillNameProblem } from '../../knowledge';
-import { cliContext } from './context';
 
 /** The terminal and the editor, as the flow uses them. */
 export interface SkillEditIo {
@@ -41,22 +40,6 @@ export interface SkillEditDiscarded {
   name: string;
   changed: false;
   discarded: true;
-}
-
-/**
- * Launches the user's git editor on a file the way git itself does, through
- * `git config --edit --file`: git resolves GIT_EDITOR, core.editor, VISUAL and
- * EDITOR, and runs the command line as it would for a commit message.
- */
-export function gitEditor(root: string, env: NodeJS.ProcessEnv = process.env): (file: string) => Promise<void> {
-  const editorEnv = cleanGitEnv(env);
-  if (env.GIT_EDITOR !== undefined) editorEnv.GIT_EDITOR = env.GIT_EDITOR;
-  return (file) =>
-    new Promise((resolve, reject) => {
-      const child = spawn('git', ['config', '--edit', '--file', file], { cwd: root, env: editorEnv, stdio: 'inherit' });
-      child.on('error', reject);
-      child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`the editor exited with code ${code}`))));
-    });
 }
 
 function failure(error: unknown): { ok: false; error: ErrorBody } {
@@ -242,71 +225,4 @@ export async function skillEditFlow(name: string, deps: SkillEditDeps): Promise<
     if (unsaved !== null) await keepDraft(io, name, unsaved);
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
-}
-
-const USAGE = 'grimoire skill edit <name>';
-
-/** The CLI verb: `grimoire skill edit <name>`, or `--help`. Returns the exit code (spec §10). */
-export async function runSkillEdit(argv: readonly string[], options: { readonly bin: string }): Promise<number> {
-  const { createCore, spawnedAutoSync } = await import('../../core');
-  if (argv.length === 1 && argv[0] === '--help') {
-    // Every verb's --help (spec §10): the op's input schema, as the one JSON object (the wiki verbs' shape).
-    const op = createCore({ autoSync: 'off' }).ops.find((descriptor) => descriptor.name === 'skill_edit')!;
-    const help = {
-      verb: 'skill edit',
-      op: op.name,
-      description: op.description,
-      kind: op.kind,
-      policy: op.policy,
-      usage: USAGE,
-      positionals: ['name'],
-      input_schema: op.inputSchema,
-      interactive: 'opens your git editor at an interactive terminal, with no agent marker set; you type the name to confirm',
-    };
-    process.stdout.write(`${JSON.stringify(help)}\n`);
-    return 0;
-  }
-  const name = argv[0];
-  if (name === undefined || argv.length > 1 || name.startsWith('-')) {
-    process.stderr.write(`usage: ${USAGE}\n`);
-    return 2;
-  }
-  // A CLI write leaves the sync to a detached `grimoire sync --background` (spec §4).
-  const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [options.bin, 'sync', '--background'] }) });
-  try {
-    const ctx = await cliContext({ cwd: process.cwd(), env: process.env, tty: process.stdin.isTTY === true && process.stdout.isTTY === true });
-    const io: SkillEditIo = {
-      edit: gitEditor(ctx.repo.root),
-      async ask(question) {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stderr, terminal: true });
-        try {
-          return await rl.question(question);
-        } finally {
-          rl.close();
-        }
-      },
-      say: (text) => process.stderr.write(text.endsWith('\n') ? text : `${text}\n`),
-    };
-    const outcome = await skillEditFlow(name, { core, ctx, io });
-    process.stdout.write(`${JSON.stringify(outcome.ok ? outcome.result : { error: outcome.error })}\n`);
-    return outcome.ok ? 0 : 1;
-  } catch (error) {
-    process.stdout.write(`${JSON.stringify({ error: errorBody(error) })}\n`);
-    return 1;
-  } finally {
-    await core.close();
-  }
-}
-
-/** grimoire's errors as they are; anything else (a bug) as INTERNAL, with its stack on stderr (ADR 0012). */
-function errorBody(error: unknown): ErrorBody {
-  if (error instanceof GrimoireError) return error.toBody();
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`grimoire skill edit: ${error instanceof Error && error.stack ? error.stack : message}\n`);
-  return {
-    code: 'INTERNAL',
-    message: `grimoire failed unexpectedly (${message}); grimoire skill show tells whether the edit was committed`,
-    retryable: false,
-    details: {},
-  };
 }

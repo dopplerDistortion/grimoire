@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../../src/core';
 import { cliContext } from '../../../src/surfaces/cli/context';
-import { gitEditor, skillEditFlow, type SkillEditIo } from '../../../src/surfaces/cli/skill-edit';
+import { openGitEditor } from '../../../src/surfaces/cli/editor';
+import { skillEditFlow, type SkillEditIo } from '../../../src/surfaces/cli/skill-edit';
 import { makeTempDir, removeDir, type GitWorld } from '#harness';
 import { writeSkillChange, type SkillChange } from '../../../src/knowledge';
 import { MachineLocalStore } from '../../../src/machine-local';
@@ -50,7 +51,7 @@ async function scripted(world: GitWorld, steps: EditorStep[], answers: Answer[],
   await writeFile(log, '');
   const quote = (file: string) => `"${file.replace(/\\/g, '/')}"`;
   const env = { ...process.env, GIT_EDITOR: `${quote(process.execPath)} ${quote(FAKE_EDITOR)}`, FAKE_EDITOR_PLAN: plan, FAKE_EDITOR_LOG: log };
-  const launch = gitEditor(world.a.dir, env);
+  const launch = (file: string) => openGitEditor(file, world.a.dir, env);
   const said: string[] = [];
   const asked: string[] = [];
   const io: SkillEditIo = {

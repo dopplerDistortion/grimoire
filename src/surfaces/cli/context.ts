@@ -1,12 +1,11 @@
 // The call context of a CLI verb (spec §7, §10): what the CLI observes about
-// the process that runs it. Agent markers make the call an agent's; a person's
-// human-only verb also needs a terminal on both stdin and stdout.
+// the process that runs it. Agent markers make the call an agent's (./shell.ts
+// reads them, with the agent's client and session); a person's human-only verb
+// also needs a terminal on both stdin and stdout.
 import { randomBytes } from 'node:crypto';
 import type { CallContext } from '../../core';
 import { findHostRoot, readCheckoutConfig, readPerson } from '../../core/host';
-
-/** The agent markers of spec §7: any one set (non-empty) makes a CLI call an agent's. */
-export const AGENT_MARKERS = ['AI_AGENT', 'CLAUDE_CODE_CHILD_SESSION', 'CODEX_CI', 'CODEX_THREAD_ID'] as const;
+import { clientIn, evidenceIn } from './shell';
 
 /** What the CLI observes about its process. */
 export interface CliProcess {
@@ -21,13 +20,12 @@ export interface CliProcess {
 export async function cliContext({ cwd, env, tty }: CliProcess): Promise<CallContext> {
   const root = await findHostRoot(cwd);
   const config = await readCheckoutConfig(root);
-  const markers = AGENT_MARKERS.filter((marker) => (env[marker] ?? '') !== '');
   return {
     surface: 'cli',
     repo: { root, pin: config?.pin ?? null, installFormat: config?.installFormat ?? null },
     person: await readPerson(root),
-    client: null,
-    evidence: markers.length > 0 ? { agentMarkers: markers } : {},
+    client: clientIn(env),
+    evidence: evidenceIn(env),
     tty,
     nonce: randomBytes(8).toString('hex'),
   };

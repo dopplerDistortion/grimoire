@@ -8,14 +8,16 @@
 // instructions, and the model reads them to decide what to search for.
 
 const CONTRACT = [
-  "grimoire is this repo's issue tracker. Issues live in grimoire, so use these tools for all issue work.",
-  "Claim only the leaf you'll work now; ALREADY_CLAIMED means move on.",
+  "grimoire is this repo's issue tracker. Issues live in grimoire, so use these tools.",
+  "Claim only the leaf you'll work; ALREADY_CLAIMED means move on.",
   'Finish every claim with `close` or `release` and a debrief.',
   'Never edit, stage or commit `.grimoire/`.',
   // A client that defers tools behind a tool search (Codex for gpt-5.x) lists none
   // until the model searches, so the fallback waits for the search (spike E).
   'Use the CLI only when no grimoire tools are listed or found by tool search; then run `node .grimoire/run.cjs status` and relay it.',
-  "The repo's own instructions and hand-written skills outrank evolved skills (`skill_list`, `skill_read`).",
+  // Spike F: Codex's sandboxes keep `.git/` read-only for the agent's shell.
+  'CLI writes fail in sandboxed shells.',
+  'Repo instructions and hand-written skills outrank evolved skills (`skill_list`, `skill_read`).',
 ].join(' ');
 
 const DETAILS = [
@@ -29,6 +31,7 @@ const DETAILS = [
   "- Evolved skills are procedures learned from past issues: `skill_list` names them, and `skill_read` gives one's text (a stub named `grimoire-<name>` points at the same skill). Follow one unless the repo's own instructions or hand-written skills say otherwise.",
   '- A result with `truncated: true` was cut to fit: pass its `cursor` back for the rest.',
   '- Read and write issue state only through grimoire. The only `.grimoire/` file you are ever pointed at is an evolved skill\'s copy, through its stub.',
+  "- Make every write with these tools. A sandboxed shell (Codex's keeps `.git/` read-only) can't write through the CLI, while the grimoire server runs outside the sandbox.",
   'When things go wrong:',
   '- On UPGRADE_REQUIRED, stop grimoire work and relay the remedies to the user. Relay any notice a result carries, such as a request to restart the session.',
   '- If a grimoire tool call is blocked or denied, stop and tell the user; never route around it through the CLI.',

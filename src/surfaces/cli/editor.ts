@@ -47,8 +47,8 @@ export async function editWorkspace(root: string): Promise<EditWorkspace> {
 }
 
 /** The editor command git would use: GIT_EDITOR, else what `git var GIT_EDITOR` says (core.editor, VISUAL, EDITOR, vi). */
-async function editorCommand(root: string): Promise<string> {
-  const fromEnv = process.env.GIT_EDITOR?.trim();
+async function editorCommand(root: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const fromEnv = env.GIT_EDITOR?.trim();
   if (fromEnv) return fromEnv;
   const run = await runGit(root, ['var', 'GIT_EDITOR']);
   const command = run.stdout.toString('utf8').trim();
@@ -73,9 +73,10 @@ async function gitShell(root: string): Promise<string | null> {
  * git, it runs the command through `sh -c '<editor> "$@"'`, so editor commands
  * with arguments and quoted paths work; on Windows without Git's `sh` it falls
  * back to the system shell. Rejects when the editor exits with an error.
+ * `env` is the editor's environment (default: this process's).
  */
-export async function openGitEditor(file: string, root: string): Promise<void> {
-  const editor = await editorCommand(root);
+export async function openGitEditor(file: string, root: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const editor = await editorCommand(root, env);
   if (editor === ':') return;
   const shell = await gitShell(root);
   // Ctrl-C while the editor is open is the editor's to handle: like git,
@@ -84,8 +85,8 @@ export async function openGitEditor(file: string, root: string): Promise<void> {
   process.on('SIGINT', ignore);
   try {
     const child = shell
-      ? spawn(shell, ['-c', `${editor} "$@"`, editor, file], { stdio: 'inherit' })
-      : spawn(`${editor} "${file}"`, { stdio: 'inherit', shell: true });
+      ? spawn(shell, ['-c', `${editor} "$@"`, editor, file], { stdio: 'inherit', env })
+      : spawn(`${editor} "${file}"`, { stdio: 'inherit', shell: true, env });
     await new Promise<void>((resolve, reject) => {
       child.on('error', reject);
       child.on('close', (code, signal) => {

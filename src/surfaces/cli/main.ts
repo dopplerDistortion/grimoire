@@ -1,9 +1,7 @@
 // The `grimoire` bin. esbuild bundles this file into dist/grimoire.mjs; each
-// verb's heavy code is a dynamic import, so it loads only for that verb.
-// So far: `--version`, the internal `mcp` entry, `skill edit`, the `wiki`
-// verbs and the detached `sync --background` child; the other verbs arrive
-// with their tickets (spec §10). These branches are interim: the CLI
-// surface's dispatcher replaces them (see ./interim.ts).
+// verb's heavy code is a dynamic import, so it loads only for that verb:
+// `--version` loads nothing, `mcp` loads the MCP surface, every other verb
+// loads the CLI surface and the core (spec §10).
 import { fileURLToPath } from 'node:url';
 import { VERSION } from '../../version';
 
@@ -18,25 +16,14 @@ async function main(argv: readonly string[]): Promise<number | null> {
     await runMcp(argv.slice(1));
     return null;
   }
-  // This module is the bundle's entry, so its URL is grimoire.mjs's: a write's sync child runs it.
-  const bin = fileURLToPath(import.meta.url);
-  if (argv[0] === 'skill' && argv[1] === 'edit') {
-    const { runSkillEdit } = await import('./skill-edit');
-    return runSkillEdit(argv.slice(2), { bin });
-  }
-  if (argv[0] === 'wiki') {
-    const { runWiki } = await import('./interim');
-    return runWiki(argv.slice(1), { bin });
-  }
-  if (argv[0] === 'sync') {
-    const { runSync } = await import('./interim');
-    return runSync(argv.slice(1));
-  }
-  process.stderr.write(
-    `grimoire ${VERSION}: usage: grimoire --version | grimoire skill edit <name> | grimoire wiki <list | show <slug> | edit <slug>>\n`,
-  );
-  return 2;
+  const { runCli } = await import('./run');
+  // This module is the bundle's entry, so its URL is grimoire.mjs's: the sync child runs it.
+  return runCli(argv, { bin: fileURLToPath(import.meta.url) });
 }
 
 const code = await main(process.argv.slice(2));
-if (code !== null) process.exitCode = code;
+if (code !== null) {
+  process.exitCode = code;
+  // Everything was awaited; a handle left open by mistake must not keep the process alive.
+  setTimeout(() => process.exit(), 5_000).unref();
+}

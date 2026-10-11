@@ -65,7 +65,12 @@ envelope, spec §9). Core operations are called as
 `openTracker(root)`.
 
 A folder is created by the first ticket that puts code in it. The bin entry is
-`src/surfaces/cli/main.ts`. The dashboard (Preact) lives in
+`src/surfaces/cli/main.ts`. Every core op is a CLI verb (`<noun> <verb>` for an
+op `<noun>_<verb>`), driven by the op's input schema: the input is a JSON object
+on stdin (`--input -`), flags and arguments are sugar for its plain fields (a
+field that isn't plain takes JSON on its flag), and stdout is always one JSON object (exit 0, 1 with an `error` object, 2 for a
+usage error). `grimoire <verb> --help` prints the schema and flags. A human-only
+verb's typed confirmation is registered in `src/surfaces/cli/gate.ts`. The dashboard (Preact) lives in
 `src/surfaces/dashboard/`, and `npm run dev:dashboard` serves it.
 
 Tests are `*.test.ts` files, either next to the module they test or under `test/`.

@@ -14,8 +14,9 @@ import {
 } from '@modelcontextprotocol/server';
 import type { CallContext, ClientInfo, Core } from '../../core';
 import { findHostRoot, readCheckoutConfig, readPerson } from '../../core/host';
-import { GrimoireError, invalid, type ErrorBody } from '../../errors';
+import { GrimoireError, invalid } from '../../errors';
 import { SERVER_INSTRUCTIONS } from '../../instructions';
+import { errorBodyOf } from '../internal';
 import { VERSION } from '../../version';
 import { metaIds, takeHint } from './hint';
 import { toolResult } from './result';
@@ -120,7 +121,7 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
     server.setRequestHandler('tools/call', (request, extra) => {
       const notices: string[] = [];
       const call = callTool(request, extra, notices).catch((error: unknown) =>
-        toolResult({ error: errorBody(error) }, notices, true),
+        toolResult({ error: errorBodyOf(error, (line) => process.stderr.write(`grimoire mcp: ${line}\n`)) }, notices, true),
       );
       deps.track?.(call);
       return call;
@@ -147,17 +148,4 @@ function noticesFor(root: string, startDir: string, pin: string | null): string[
     );
   }
   return notices;
-}
-
-/** The envelope for a failure outside the core's own outcomes: grimoire's errors as they are, anything else as INTERNAL (ADR 0012). */
-function errorBody(error: unknown): ErrorBody {
-  if (error instanceof GrimoireError) return error.toBody();
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`grimoire mcp: ${error instanceof Error && error.stack ? error.stack : message}\n`);
-  return {
-    code: 'INTERNAL',
-    message: `grimoire failed unexpectedly (${message}); re-read the issue before retrying, and tell the user if it keeps happening`,
-    retryable: false,
-    details: {},
-  };
 }
