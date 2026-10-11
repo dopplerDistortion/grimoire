@@ -132,7 +132,8 @@ interface Target {
  * contexts with a seen-here row here, and the calling context, are cut. The
  * whole cut, finding the bound contexts included, stays within the budget: a
  * context it can't reach in time gets `budget`. Contexts whose record a human
- * purged, and `grimoire-chores` contexts, are skipped.
+ * purged, and `grimoire-chores` contexts, are skipped. Only a calling context
+ * with evidence naming its transcript waits for its ending call to flush.
  */
 export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCapture[]> {
   const started = Date.now();
@@ -161,7 +162,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
       continue;
     }
     const cut = new ContextCut(input, target, deadline, claimed);
-    const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling ? cut.waitingForFlush(started) : cut.once(), deadline, null);
+    const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling && traceable(target) ? cut.waitingForFlush(started) : cut.once(), deadline, null);
     // A chores context's transcript is excluded from excerpts and fact scans (spec §14): it gets no record.
     if (cut.chores) continue;
     // A cut the deadline overtook keeps the last record it finished: the calling context's earlier cut.
@@ -177,18 +178,20 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
  * person's own writes at a terminal or in the dashboard name the handle too,
  * but a person is no agent session's context: nothing of theirs is cut. When
  * git can't read the binding trailers within the budget, the agent contexts
- * seen here stand in for them: past the deadline, each gets `budget`.
+ * seen here stand in for them: past the deadline, each gets `budget`. When no
+ * agent can have bound the attempt, the trailers aren't read at all.
  */
 async function targetsOf(input: EndCaptureInput, deadline: number): Promise<Target[]> {
   const { call } = input;
   const rows: SeenHereRow[] = input.attempt ? await seenHereRows(input.store, { handle: input.attempt.id }).catch(() => []) : [];
-  const bindings = input.attempt
-    ? await beforeDeadline(
-        readBindings(input.repoRoot, input.attempt, input.view.parents).catch(() => []),
-        deadline,
-        null,
-      )
-    : [];
+  const bindings =
+    input.attempt && agentMayHaveBound(input.attempt, rows)
+      ? await beforeDeadline(
+          readBindings(input.repoRoot, input.attempt, input.view.parents).catch(() => []),
+          deadline,
+          null,
+        )
+      : [];
   const targets: Target[] = bindings === null ? rows.filter(agentRow).map(rowTarget) : boundTargets(bindings, rows, input.worktree);
   if (!call.binds || call.actor.kind === 'human') return targets;
 
@@ -220,6 +223,23 @@ async function targetsOf(input: EndCaptureInput, deadline: number): Promise<Targ
   return [calling, ...targets];
 }
 
+/**
+ * Whether anything names the context's transcript (spec §14 Identity, Roots):
+ * for Claude Code a session, a hint, a tool-use id or the spawn-env session;
+ * for Codex its thread. Without any, there is no transcript for an ending call
+ * to reach, so the calling context waits for no flush.
+ */
+function traceable(target: Target): boolean {
+  switch (clientFamily(target.client)) {
+    case 'claude-code':
+      return target.session !== null || target.spawnEnv !== null || target.pendingHints.length > 0 || target.bindingCalls.some((call) => call.id !== undefined);
+    case 'codex':
+      return target.context !== null;
+    default:
+      return false;
+  }
+}
+
 /** The agent contexts the binding writes name, with this machine's rows. */
 function boundTargets(bindings: readonly Binding[], rows: readonly SeenHereRow[], worktree: string): Target[] {
   const agents = boundContexts(bindings, rows).filter((context) => context.bindings.some((binding) => binding.actor.kind !== 'human'));
@@ -241,6 +261,21 @@ function boundTargets(bindings: readonly Binding[], rows: readonly SeenHereRow[]
       calling: false,
     };
   });
+}
+
+/**
+ * Whether an agent may have bound `attempt`, by what the view and this
+ * machine's rows already hold: an agent opened it, a write naming its handle
+ * was an agent's (each such write leaves an activity entry naming the handle),
+ * it has a session record, or an agent's binding write left a row here. When
+ * none holds, every binding is a person's, and a person is no agent context:
+ * the ending reads no trailers, so a person's ending at a terminal, a bare
+ * shell or the dashboard waits on no git. Anything unreadable counts as an
+ * agent's.
+ */
+function agentMayHaveBound(attempt: AttemptRecord, rows: readonly SeenHereRow[]): boolean {
+  if (attempt.start.actor.kind !== 'human' || attempt.sessions.size > 0 || rows.some(agentRow)) return true;
+  return attempt.activity.some(({ detail }) => detail === null || (detail.attempt === attempt.id && detail.actor.kind !== 'human'));
 }
 
 /** A row an agent's binding write left: a person's, at a terminal or in the dashboard, names no session or context. */
@@ -323,7 +358,8 @@ class ContextCut {
    * by that call (its tool-use id, a pending hint naming it, its spawn-env
    * session holding it) has no transcript yet, or none that holds the call:
    * `not_found` and `unmatched` wait too. The budget bounds the wait: a cut
-   * the deadline overtakes leaves `latest`, the one before it.
+   * the deadline overtakes leaves `latest`, the one before it. Only for a
+   * context `traceable` names a transcript for.
    */
   async waitingForFlush(started: number): Promise<SessionRecord> {
     const until = Math.min(started + (this.input.options?.flushWaitMs ?? FLUSH_WAIT_MS), this.deadline);

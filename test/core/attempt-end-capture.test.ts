@@ -1213,3 +1213,102 @@ describe('the calling context', () => {
     expect(record!.body).toContain('tool mcp__grimoire__close');
   });
 });
+
+/** The binding-trailer reads (`git log --grep=Grimoire-Attempt: …`) the core has spawned so far. */
+const TRAILER_READ = / log .*--grep=Grimoire-Attempt: /;
+function trailerReads(): number {
+  return vi.mocked(childProcess.spawn).mock.calls.filter(([name, args]) => name === 'git' && TRAILER_READ.test((args as readonly string[]).join(' '))).length;
+}
+
+describe('an ending with nothing to capture', () => {
+  test('a person’s close, at a bare shell, of an attempt no agent bound reads no binding trailers: a git too slow to answer never holds it up', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    // An unmarked CLI with no terminal: a person, with no transcript anywhere. The slow git would hold the cut 8 s, inside its 10 s budget.
+    const gitDelayMs = 8_000;
+    const shell: CallContext = { ...grimoire.ctx, surface: 'cli', client: null, evidence: {}, tty: false, nonce: 'nonce-shell' };
+    const core = capture.makeCore({ capture: { flushWaitMs: 2_000 } });
+    const id = await created(core, shell, 'By hand');
+    const claim = await core.call('claim', { id }, shell);
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    capture.at('2026-10-11T03:27:30.000Z');
+    const done = path.join(world.root, 'slow-git-done');
+    const reads = trailerReads();
+    const slow = slowNextGit(TRAILER_READ, gitDelayMs, done);
+    try {
+      const started = Date.now();
+      const closed = await core.call('close', { id, reason: 'done', attempt: claim.result.attempt }, shell);
+      const took = Date.now() - started;
+
+      expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+      expect(trailerReads()).toBe(reads);
+      expect(took).toBeLessThan(gitDelayMs);
+      expect(await sessionRecords(world.a, id, claim.result.attempt)).toEqual([]);
+    } finally {
+      slow.restore();
+      // Had the slow git run, it would still be running in the repo: let it finish before the repo goes.
+      if (trailerReads() > reads) for (let waited = 0; !existsSync(done) && waited < gitDelayMs + 5_000; waited += 100) await sleep(100);
+    }
+  });
+
+  test('nor does an abandoned release of another person’s attempt at a terminal, or a close in the dashboard', async ({ world, grimoire, capture }) => {
+    const core = capture.makeCore();
+    const bob: CallContext = {
+      ...grimoire.ctx,
+      surface: 'cli',
+      client: null,
+      evidence: {},
+      tty: false,
+      person: { name: world.b.identity.name, email: world.b.identity.email },
+      nonce: 'nonce-bob',
+    };
+    const dashboard: CallContext = { ...grimoire.ctx, surface: 'dashboard', client: null, evidence: {}, nonce: 'nonce-dashboard' };
+    const stale = await created(core, bob, 'Stale claim');
+    const bobs = await core.call('claim', { id: stale }, bob);
+    if (!bobs.ok) throw new Error(JSON.stringify(bobs.error));
+    const mine = await created(core, dashboard, 'Clicked through');
+    const claim = await core.call('claim', { id: mine }, dashboard);
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    capture.at('2026-10-11T03:27:30.000Z');
+    const reads = trailerReads();
+
+    const released = await core.call('release', { id: stale, attempt: bobs.result.attempt, abandoned: true }, person(grimoire.ctx));
+    const closed = await core.call('close', { id: mine, reason: 'done', attempt: claim.result.attempt }, dashboard);
+
+    expect(released).toMatchObject({ ok: true, result: { ended: 'release-abandoned' } });
+    expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+    expect(trailerReads()).toBe(reads);
+    expect(await sessionRecords(world.a, stale, bobs.result.attempt)).toEqual([]);
+    expect(await sessionRecords(world.a, mine, claim.result.attempt)).toEqual([]);
+  });
+
+  test('a calling context with no evidence naming a transcript (no hint, no _meta, no spawn env, no session) waits for no flush', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    // The flush wait would hold each close this long, inside the 10 s budget: their records are not_found either way.
+    const flushWaitMs = 6_000;
+    const core = capture.makeCore({ capture: { flushWaitMs } });
+    const callers: [string, CallContext][] = [
+      ['a Claude Code connection with no hint and no _meta', plainCall(grimoire.ctx, { era: 'modern', hint: null, meta: null })],
+      ['a Codex connection with no _meta', { ...grimoire.ctx, client: { name: 'codex-mcp-client', version: '0.162.1' }, evidence: {}, mcp: { era: 'legacy', hint: null, meta: null }, nonce: 'nonce-codex' }],
+      ['a marked shell naming no session', { ...grimoire.ctx, surface: 'cli', client: { name: 'claude-code' }, evidence: { agentMarkers: ['AI_AGENT'] }, tty: false, nonce: 'nonce-marked' }],
+    ];
+    for (const [caller, ctx] of callers) {
+      const id = await created(core, grimoire.ctx, caller);
+      capture.at('2026-10-11T03:27:30.000Z');
+
+      const started = Date.now();
+      const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, ctx);
+      const took = Date.now() - started;
+
+      expect(closed, caller).toMatchObject({ ok: true, result: { ended: 'done' } });
+      expect(took, caller).toBeLessThan(flushWaitMs);
+      const attempt = (closed as { ok: true; result: { attempt: string } }).result.attempt;
+      expect((await sessionRecords(world.a, id, attempt)).map((r) => [r.fields.excerpt, r.fields.facts]), caller).toEqual([['not_found', 'not_found']]);
+    }
+  });
+});
