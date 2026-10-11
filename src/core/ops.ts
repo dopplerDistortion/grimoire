@@ -20,7 +20,7 @@ export interface CreateResult {
 
 export const create = define({
   name: 'create',
-  description: 'Create an issue. Pass an idempotency_key to make retries safe.',
+  description: 'Create a grimoire issue. Pass an idempotency_key to make retries safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',
@@ -82,7 +82,7 @@ export interface LabelsResult {
 
 export const labels = define({
   name: 'labels',
-  description: 'List the labels in use, with counts.',
+  description: 'List the labels in use on grimoire issues, with counts.',
   kind: 'read',
   policy: 'agent',
   replay: 'none',

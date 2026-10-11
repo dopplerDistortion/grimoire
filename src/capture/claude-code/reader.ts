@@ -1,6 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { grimoireTool, runsGrimoire } from '../grimoire-calls';
+import { jsonLines } from '../jsonl';
 import type { Step, Transcript } from '../steps';
 
 // Grimoire's own tolerant reader for Claude Code's JSONL transcripts (spec §14
@@ -60,16 +62,8 @@ const LOCAL_COMMAND = /^\s*<(?:command-name|command-message|local-command-stdout
 /** Thinking is reasoning, and reasoning is dropped. */
 const REASONING_BLOCKS = new Set(['thinking', 'redacted_thinking']);
 
-/** Grimoire's MCP tools, as Claude Code names them: `mcp__<server>__<tool>`. */
-const GRIMOIRE_TOOL = /^mcp__grimoire__(.+)$/;
 /** Claude Code's shell tools, whose command may run the grimoire CLI. */
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
-/**
- * A command running the CLI (spec §10): `node .grimoire/run.cjs <verb>` as
- * agents do, or `grimoire` as a word (`npm run -s grimoire -- <verb>`, `npx
- * @goksening/grimoire <verb>`), never a path inside `.grimoire/`.
- */
-const RUNS_GRIMOIRE = /\.grimoire[\\/]+run\.cjs(?![\w.-])|(?<![\w.-])grimoire(?![\w.-])/;
 
 /** The tool that launches a subagent. */
 const AGENT_TOOL = 'Agent';
@@ -218,27 +212,12 @@ async function parseFile(file: string): Promise<Parsed> {
     parsed.read++;
     readLine(line, parsed, messages);
   };
-  for await (const raw of jsonLines(file)) {
+  for await (const raw of jsonLines(createReadStream(file, { encoding: 'utf8' }))) {
     if (pending !== null) take(pending, false);
     pending = raw;
   }
   if (pending !== null) take(pending, true);
   return parsed;
-}
-
-/**
- * The file's lines, split on LF alone (a CR before it is dropped), streamed so
- * a 77 KB `prompt_snapshot` line is never kept. Not `node:readline`: it also
- * breaks lines at U+2028 and U+2029, which JSON leaves raw inside strings.
- */
-async function* jsonLines(file: string): AsyncGenerator<string> {
-  let rest = '';
-  for await (const chunk of createReadStream(file, { encoding: 'utf8' })) {
-    const parts = (rest + (chunk as string)).split('\n');
-    rest = parts.pop()!;
-    for (const part of parts) yield part.endsWith('\r') ? part.slice(0, -1) : part;
-  }
-  if (rest !== '') yield rest;
 }
 
 function readLine(line: Line, parsed: Parsed, messages: Map<string, { calls: Set<string>; texts: Set<string> }>): void {
@@ -362,10 +341,10 @@ function readAssistant(
 
 /** The grimoire operation a call makes: an MCP tool's name, `cli` for a shell command running grimoire. */
 function grimoireOp(name: string, input: unknown): string | null {
-  const mcp = GRIMOIRE_TOOL.exec(name);
-  if (mcp) return mcp[1]!;
+  const mcp = grimoireTool(name);
+  if (mcp !== null) return mcp;
   const command = (input as { command?: unknown } | null)?.command;
-  if (SHELL_TOOLS.has(name) && typeof command === 'string' && RUNS_GRIMOIRE.test(command)) return 'cli';
+  if (SHELL_TOOLS.has(name) && typeof command === 'string' && runsGrimoire(command)) return 'cli';
   return null;
 }
 

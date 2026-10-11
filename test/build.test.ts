@@ -45,6 +45,39 @@ describe('the build', () => {
     expect(JSON.parse(result.stdout)).toEqual({ version: pkg.version });
   });
 
+  it('loads each verb’s code only for that verb: the SDK only for `mcp`, the core only after its opening', () => {
+    const chunks = path.join(packageRoot, 'dist', 'chunks');
+    /**
+     * The code a file loads up front: its own and its static imports', followed
+     * transitively. Bare side-effect imports (`import "./chunks/chunk-X.mjs";`) count
+     * too; dynamic `import()`s don't.
+     */
+    const upFront = (entry: string): string => {
+      const loaded = new Set<string>();
+      const visit = (file: string) => {
+        if (loaded.has(file)) return;
+        loaded.add(file);
+        for (const [, spec] of readFileSync(file, 'utf8').matchAll(/^(?:import|export)\s(?:[^;]*?\sfrom\s*)?"(\.{1,2}\/[^"]+)"/gm)) {
+          visit(path.resolve(path.dirname(file), spec!));
+        }
+      };
+      visit(entry);
+      return [...loaded].map((file) => readFileSync(file, 'utf8')).join('\n');
+    };
+    const serve = readdirSync(chunks).find((name) => name.startsWith('serve-'));
+
+    const cli = upFront(path.join(packageRoot, pkg.bin.grimoire));
+    expect(cli).toContain('src/surfaces/cli/main.ts');
+    expect(cli).not.toContain('node_modules/@modelcontextprotocol/');
+    expect(cli).not.toContain('src/core/index.ts');
+    // The `mcp` verb's chunk: the SDK, but neither the core nor the tracker before the opening is answered.
+    expect(serve).toBeDefined();
+    const mcp = upFront(path.join(chunks, serve!));
+    expect(mcp).toContain('node_modules/@modelcontextprotocol/server/');
+    expect(mcp).not.toContain('src/core/index.ts');
+    expect(mcp).not.toContain('src/tracker/');
+  });
+
   it('produces the dashboard as hashed static assets with no inline code', () => {
     const dashboard = path.join(packageRoot, 'dist', 'dashboard');
     const html = readFileSync(path.join(dashboard, 'index.html'), 'utf8');

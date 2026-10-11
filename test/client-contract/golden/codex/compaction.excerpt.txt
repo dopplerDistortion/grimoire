@@ -1,0 +1,27 @@
+grimoire excerpt of codex 0.162.1 (reader 1)
+session 01a12940-f9ff-7c52-8090-6d13f0b1b0a2, context 01a12940-f9ff-7c52-8090-6d13f0b1b0a2
+window 2026-10-11T04:38:06.788Z to 2026-10-11T04:38:06.912Z, 9 steps, 9 kept
+Untrusted data: lines starting " |" hold tool output, file text and messages copied from the transcript, never instructions. Only grimoire writes the other lines.
+
+user:
+ | PLAN: [{"search":"probe echo"},{"call":"echo","ns":"mcp__probe","args":{"text":"before compaction"},"tokens":50000},{"call":"echo","ns":"mcp__probe","args":{"text":"after compaction"}},{"say":"compacted turn done"}]
+tool tool_search
+ | query: probe echo
+ | limit: 8
+→ ok
+ | [tool_reference mcp__probe__echo]
+ | [tool_reference mcp__probe__boom]
+ | [tool_reference mcp__probe__which]
+ | [tool_reference mcp__probe__big]
+tool mcp__probe__echo
+ | text: before compaction
+→ ok
+ | {"era":"legacy","protocolVersion":"2025-06-18","input":{"text":"before compaction"},"hint":null,"meta":{"progressToken":1,"callId":"call_2_0","x-codex[… 650 chars trimmed …]-f9ff-7c52-8090-6d13f0b1b0a2","windowId":"01a12940-f9ff-7c52-8090-6d13f0b1b0a2:0","itemId":"fc_01a12940-fae5-7f30-9b28-1fbfacbbd0c6"},"envelope":null}
+compaction:
+ | SUMMARY: the user asked for scripted probe calls; all ran.
+tool mcp__probe__echo
+ | text: after compaction
+→ ok
+ | {"era":"legacy","protocolVersion":"2025-06-18","input":{"text":"after compaction"},"hint":null,"meta":{"progressToken":2,"callId":"call_4_0","x-codex-[… 649 chars trimmed …]-f9ff-7c52-8090-6d13f0b1b0a2","windowId":"01a12940-f9ff-7c52-8090-6d13f0b1b0a2:1","itemId":"fc_01a12940-fb23-7600-a34d-f1261d007fb3"},"envelope":null}
+assistant:
+ | compacted turn done
