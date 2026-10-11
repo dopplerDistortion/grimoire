@@ -160,6 +160,10 @@ _Avoid_: Session file, rollout, conversation log
 The bounded, redacted step log of one bound context's work within an attempt, cut mechanically from its transcript, waiting with the attempt while it is open and then kept inside the trace.
 _Avoid_: Summary, snippet, transcript
 
+**Session record**:
+One bound context's part of an attempt's trace: which client, session and context it was, the window grimoire cut from its transcript, its capture statuses and facts, and its excerpt when the excerpt mode allows one; it waits with the open attempt, a later cut replaces it only by reaching further, and the attempt's end freezes it.
+_Avoid_: Capture file, session log, transcript
+
 **Debrief**:
 A worker's own short account of an attempt, posted on the issue as the attempt ends: what was tried, what failed, what worked, and what the next worker should know; agents are asked for one, humans may write one.
 _Avoid_: Retro, summary, report, work log
