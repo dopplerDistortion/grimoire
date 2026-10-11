@@ -43,3 +43,10 @@ We chose this for five reasons:
 - **Hook definitions stay identical across releases.** A hook changes only with a deliberate change to the install format.
 - **Claude Code hooks pass `--from ${CLAUDE_PROJECT_DIR}`,** so they don't follow the session's working directory.
 - **The boundary has two accepted residuals.** Claude Code's optional Bash sandbox leaves most of `.git/` writable, so there the launcher and the copies rely on Claude's own permission checks. A session launched inside a directory an agent created can meet a planted `.git`.
+
+_Amended by ADR 0011 and the Lifecycle decision (GOK-122):_
+- _An older format is migrated by any `init` a human runs at the release that needs it, joins included, not only by `init --upgrade`._
+- _The launcher only moves forward: `init` replaces it only with a newer one, or one that fails its self-check._
+- _The bootstrap, the entry verbs and the launcher↔package contract belong to a frozen cross-pin contract, because Codex runs the main checkout's entries in every linked worktree, whatever that worktree pins._
+- _`install_format` bumps happen only in major releases._
+- _`node .grimoire/run.cjs pin` prints the pin without loading a copy, so CI recipes follow it._

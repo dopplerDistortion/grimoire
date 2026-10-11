@@ -18,6 +18,22 @@ _Avoid_: Data dir, grimoire folder, store
 The exact grimoire release a checkout of a host repo runs, committed in its dotfolder so that it travels with branches; every grimoire process started from that checkout runs exactly this release, and only an upgrade sets a new one.
 _Avoid_: Installed version, current version, lock
 
+**Join**:
+A person's setup of grimoire on their own machine for one clone of a host repo and the pinned version its checkout names; it is needed before grimoire runs in that clone and again for each new pinned version, and it is the only step that downloads grimoire.
+_Avoid_: Install, setup, onboarding
+
+**Upgrade**:
+A human's move of one checkout to a new pinned version, together with any change to the shape of grimoire's data that the new version needs; other branches take it through git like any change, and other machines through a join.
+_Avoid_: Update, bump, migration
+
+**Uninstall**:
+A human's removal of grimoire from a host repo, made in one checkout and committed like any change; the tracker branch stays on the remote as an archive that a later install adopts again.
+_Avoid_: Remove, purge, delete
+
+**Leave**:
+A person's removal of grimoire from one clone on their own machine, covering its downloaded copies, its machine-local data and the generated copies in every worktree, without changing the host repo or its tracker branch; the inverse of a join.
+_Avoid_: Uninstall, unjoin, clean
+
 **Live store**:
 Grimoire's one working state for a host repo on one machine: the tracker branch plus never-committed machine-local data, both kept in the clone's git common directory so that every worktree reads and writes the same state.
 _Avoid_: Database, cache, data dir, dotfolder
