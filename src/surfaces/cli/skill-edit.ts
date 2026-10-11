@@ -247,12 +247,23 @@ export async function skillEditFlow(name: string, deps: SkillEditDeps): Promise<
 const USAGE = 'grimoire skill edit <name>';
 
 /** The CLI verb: `grimoire skill edit <name>`, or `--help`. Returns the exit code (spec §10). */
-export async function runSkillEdit(argv: readonly string[]): Promise<number> {
+export async function runSkillEdit(argv: readonly string[], options: { readonly bin: string }): Promise<number> {
   const { createCore, spawnedAutoSync } = await import('../../core');
   if (argv.length === 1 && argv[0] === '--help') {
-    // Every verb's --help (spec §10): the op's input schema and the verb's flags, as the one JSON object.
+    // Every verb's --help (spec §10): the op's input schema, as the one JSON object (the wiki verbs' shape).
     const op = createCore({ autoSync: 'off' }).ops.find((descriptor) => descriptor.name === 'skill_edit')!;
-    process.stdout.write(`${JSON.stringify({ op: op.name, usage: USAGE, description: op.description, input: op.inputSchema, flags: [] })}\n`);
+    const help = {
+      verb: 'skill edit',
+      op: op.name,
+      description: op.description,
+      kind: op.kind,
+      policy: op.policy,
+      usage: USAGE,
+      positionals: ['name'],
+      input_schema: op.inputSchema,
+      interactive: 'opens your git editor at an interactive terminal, with no agent marker set; you type the name to confirm',
+    };
+    process.stdout.write(`${JSON.stringify(help)}\n`);
     return 0;
   }
   const name = argv[0];
@@ -261,7 +272,7 @@ export async function runSkillEdit(argv: readonly string[]): Promise<number> {
     return 2;
   }
   // A CLI write leaves the sync to a detached `grimoire sync --background` (spec §4).
-  const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [process.argv[1]!, 'sync', '--background'] }) });
+  const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [options.bin, 'sync', '--background'] }) });
   try {
     const ctx = await cliContext({ cwd: process.cwd(), env: process.env, tty: process.stdin.isTTY === true && process.stdout.isTTY === true });
     const io: SkillEditIo = {

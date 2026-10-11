@@ -11,6 +11,8 @@ import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, Reop
 import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
 import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult } from './skills';
+import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
+import type { QuarantineResult } from './quarantine';
 import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
@@ -125,6 +127,11 @@ export interface OpResults {
   skill_read: SkillReadResult;
   skill_edit: SkillEditResult;
   skill_show: SkillShowResult;
+  wiki_list: WikiListResult;
+  wiki_show: WikiShowResult;
+  wiki_edit: WikiEditResult;
+  quarantine: QuarantineResult;
+  unquarantine: QuarantineResult;
   sync: SyncResult;
   sync_status: SyncStatusResult;
 }

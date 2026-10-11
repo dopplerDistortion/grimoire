@@ -1,7 +1,10 @@
 // The `grimoire` bin. esbuild bundles this file into dist/grimoire.mjs; each
 // verb's heavy code is a dynamic import, so it loads only for that verb.
-// So far: `--version`, the internal `mcp` entry and `skill edit`; the other
-// verbs arrive with their tickets (spec §10).
+// So far: `--version`, the internal `mcp` entry, `skill edit`, the `wiki`
+// verbs and the detached `sync --background` child; the other verbs arrive
+// with their tickets (spec §10). These branches are interim: the CLI
+// surface's dispatcher replaces them (see ./interim.ts).
+import { fileURLToPath } from 'node:url';
 import { VERSION } from '../../version';
 
 async function main(argv: readonly string[]): Promise<number | null> {
@@ -15,11 +18,23 @@ async function main(argv: readonly string[]): Promise<number | null> {
     await runMcp(argv.slice(1));
     return null;
   }
+  // This module is the bundle's entry, so its URL is grimoire.mjs's: a write's sync child runs it.
+  const bin = fileURLToPath(import.meta.url);
   if (argv[0] === 'skill' && argv[1] === 'edit') {
     const { runSkillEdit } = await import('./skill-edit');
-    return runSkillEdit(argv.slice(2));
+    return runSkillEdit(argv.slice(2), { bin });
   }
-  process.stderr.write(`grimoire ${VERSION}: usage: grimoire --version | grimoire skill edit <name>\n`);
+  if (argv[0] === 'wiki') {
+    const { runWiki } = await import('./interim');
+    return runWiki(argv.slice(1), { bin });
+  }
+  if (argv[0] === 'sync') {
+    const { runSync } = await import('./interim');
+    return runSync(argv.slice(1));
+  }
+  process.stderr.write(
+    `grimoire ${VERSION}: usage: grimoire --version | grimoire skill edit <name> | grimoire wiki <list | show <slug> | edit <slug>>\n`,
+  );
   return 2;
 }
 

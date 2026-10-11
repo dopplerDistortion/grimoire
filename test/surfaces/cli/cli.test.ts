@@ -49,10 +49,12 @@ describe('grimoire skill edit, from the built bin', () => {
     const lines = run.stdout.trim().split('\n');
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0]!)).toMatchObject({
+      verb: 'skill edit',
       op: 'skill_edit',
+      policy: 'human-only',
       usage: 'grimoire skill edit <name>',
-      input: { type: 'object', properties: { name: expect.any(Object), text: expect.any(Object), base: expect.any(Object) } },
-      flags: [],
+      positionals: ['name'],
+      input_schema: { type: 'object', properties: { name: expect.any(Object), text: expect.any(Object), base: expect.any(Object) } },
     });
   });
 

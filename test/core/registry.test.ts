@@ -17,6 +17,7 @@ describe('the op registry', () => {
         'labels',
         'list',
         'outcome_set',
+        'quarantine',
         'reassign',
         'release',
         'reopen',
@@ -30,7 +31,11 @@ describe('the op registry', () => {
         'skill_show',
         'sync',
         'sync_status',
+        'unquarantine',
         'update',
+        'wiki_edit',
+        'wiki_list',
+        'wiki_show',
       ]);
       // MCP lists exactly the agent tools of spec §8 (so far).
       expect(core.ops.filter((op) => op.mcp).map((op) => op.name).sort()).toEqual([
