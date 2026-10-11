@@ -28,6 +28,6 @@ export type {
 export { ATTEMPT_PATTERN } from './attempt';
 export { issueRevision, sortedUnique } from './record';
 export { keyHash, type Idempotency } from './keys';
-export { parseWriteRef, ID_PATTERN } from './ids';
+export { bareId, parseWriteRef, ID_PATTERN } from './ids';
 export { TRACKER_REF } from './layout';
 export { TRACKER_FORMAT_RANGE, V1_MARKER } from './marker';
