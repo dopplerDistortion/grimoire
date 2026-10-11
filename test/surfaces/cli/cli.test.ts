@@ -19,7 +19,7 @@ import {
   T0,
   trackerTip,
 } from '../../core/support';
-import { buildGrimoire, cli, cliAtTerminal, humanEnv, lastJsonOnScreen } from './support';
+import { buildGrimoire, cli, cliAtTerminal, fakeEditor, humanEnv, lastJsonOnScreen } from './support';
 
 let bin: string;
 let cleanup: () => Promise<void>;
@@ -171,7 +171,7 @@ describe('input, output and exit codes', () => {
   });
 
   cliTest('JSON on stdin may start with a byte order mark (Windows tools write one)', async ({ a }) => {
-    const created = await cli(bin, ['create', '--input', '-'], { cwd: a.dir, input: '﻿{"title": "From PowerShell"}' });
+    const created = await cli(bin, ['create', '--input', '-'], { cwd: a.dir, input: '\uFEFF{"title": "From PowerShell"}' });
 
     expect(created.code, created.stdout).toBe(0);
     expect((await cli(bin, ['show', created.json.id as string], { cwd: a.dir })).json).toMatchObject({ title: 'From PowerShell' });
@@ -566,5 +566,88 @@ exit 1
     // unless it died with the child (Windows ends a process's whole tree).
     await writeFile(gate, '');
     await until(async () => existsSync(done) || Date.now() - (await stat(alive)).mtimeMs > 2_000, 'the push to end');
+  });
+});
+
+describe('grimoire skill edit', () => {
+  // The editor session itself is covered in skill-edit.test.ts.
+  cliTest('without an interactive terminal it gives HUMAN_ONLY, marked or not, never naming the marker, and opens no editor', async ({ a }) => {
+    const editor = { GIT_EDITOR: 'false' };
+    const noTty = await cli(bin, ['skill', 'edit', 'release-notes'], { cwd: a.dir, env: humanEnv(editor) });
+    const marked = await cli(bin, ['skill', 'edit', 'release-notes'], { cwd: a.dir, env: humanEnv({ ...editor, CODEX_THREAD_ID: 'thread-1' }) });
+
+    for (const run of [noTty, marked]) {
+      expect(run.code, run.stderr).toBe(1);
+      expect(run.json).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });
+      expect(run.stdout + run.stderr).not.toMatch(MARKER_NAMES);
+    }
+  });
+
+  cliTest('--help prints the op’s input schema; the text comes from the editor, so the name is all it takes', async ({ a }) => {
+    const help = await cli(bin, ['skill', 'edit', '--help'], { cwd: a.dir });
+
+    expect(help.code, help.stderr).toBe(0);
+    expect(help.json).toMatchObject({
+      verb: 'skill edit',
+      op: 'skill_edit',
+      policy: 'human-only',
+      usage: 'grimoire skill edit <name>',
+      positionals: ['name'],
+      input_schema: { type: 'object', properties: { name: expect.any(Object), text: expect.any(Object), base: expect.any(Object) } },
+    });
+    expect(help.json.confirmation).toMatch(/types the name to confirm/);
+  });
+
+  cliTest('at an interactive terminal it opens the git editor, and commits once the person types the name', async ({ grimoire, a }) => {
+    const text = '---\nname: release-notes\ndescription: Use when recording a change in the release notes.\n---\n# Release notes\n\nOne line.\n';
+    const editor = await fakeEditor([{ write: text }]);
+    try {
+      const run = await cliAtTerminal(bin, ['skill', 'edit', 'release-notes'], {
+        cwd: a.dir,
+        env: humanEnv(editor.env),
+        answers: [{ when: /Type release-notes to commit/, type: 'release-notes' }],
+      });
+
+      expect(run.code, run.screen).toBe(0);
+      expect(lastJsonOnScreen(run.screen)).toMatchObject({ name: 'release-notes', created: true, changed: true });
+      expect(await coreResult(grimoire.core, 'skill_read', { name: 'release-notes' }, personAtShell(a))).toMatchObject({
+        text: expect.stringContaining('One line.'),
+      });
+    } finally {
+      await editor.cleanup();
+    }
+    await syncedInBackground(a);
+  });
+
+  cliTest('without a skill name, or with the text on the command line, it is a usage error', async ({ a }) => {
+    for (const args of [['skill', 'edit'], ['skill', 'edit', 'release-notes', '--text', 'Hi']]) {
+      const run = await cli(bin, args, { cwd: a.dir });
+      expect(run.code, args.join(' ')).toBe(2);
+      expect(run.json).toMatchObject({ usage_error: { help: 'grimoire skill edit --help' } });
+      expect(run.stderr).toMatch(/usage: grimoire skill edit <name>/);
+    }
+  });
+});
+
+describe('grimoire wiki edit', () => {
+  // The editor session itself is covered in wiki-edit.test.ts; the other wiki verbs in wiki-cli.test.ts.
+  cliTest('at an interactive terminal it opens the git editor, and commits the page once the person types the slug', async ({ a }) => {
+    const page = '---\ntitle: "Flaky port binding"\nkind: "failure"\nsummary: "Tests fail when two servers race for one port."\n---\nBind to port 0.\n';
+    const editor = await fakeEditor([{ write: page }]);
+    try {
+      const run = await cliAtTerminal(bin, ['wiki', 'edit', 'flaky-port-binding'], {
+        cwd: a.dir,
+        env: humanEnv(editor.env),
+        answers: [{ when: /Type "flaky-port-binding"/, type: 'flaky-port-binding' }],
+      });
+
+      expect(run.code, run.screen).toBe(0);
+      expect(lastJsonOnScreen(run.screen)).toMatchObject({ slug: 'flaky-port-binding', created: true, changed: true });
+      const shown = await cli(bin, ['wiki', 'show', 'flaky-port-binding'], { cwd: a.dir });
+      expect(shown.json).toMatchObject({ title: 'Flaky port binding', body: 'Bind to port 0.\n' });
+    } finally {
+      await editor.cleanup();
+    }
+    await syncedInBackground(a);
   });
 });

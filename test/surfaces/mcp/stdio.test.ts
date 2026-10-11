@@ -4,6 +4,8 @@ import { rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { gitTest, readFixture, readFixtureJson } from '#harness';
+import { createCore, type CallContext } from '../../../src/core';
+import { MachineLocalStore } from '../../../src/machine-local';
 import { SERVER_INSTRUCTIONS } from '../../../src/instructions';
 import { commitToTracker, initializeTracker, TRACKER_REF } from '../../core/support';
 import { buildGrimoire, connect, inBothEras, rawSession, type JsonRpcMessage } from './support';
@@ -16,7 +18,7 @@ beforeAll(async () => {
 });
 afterAll(() => cleanup());
 
-const AGENT_TOOLS = ['show', 'list', 'labels', 'create', 'update', 'comment', 'claim', 'release', 'close'];
+const AGENT_TOOLS = ['show', 'list', 'labels', 'skill_list', 'skill_read', 'create', 'update', 'comment', 'claim', 'release', 'close'];
 
 describe('grimoire mcp over stdio', () => {
   gitTest('a 2025-06-18 client and a 2026-07-28 client list the same tools', async ({ world }) => {
@@ -70,7 +72,7 @@ describe('grimoire mcp over stdio', () => {
     const { tools } = await client.listTools().finally(() => client.close());
     const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
-    for (const name of ['show', 'list', 'labels']) {
+    for (const name of ['show', 'list', 'labels', 'skill_list', 'skill_read']) {
       expect(byName[name]!.annotations, name).toEqual({ readOnlyHint: true });
     }
     for (const name of ['create', 'update', 'comment', 'claim']) {
@@ -159,6 +161,57 @@ describe('grimoire mcp over stdio', () => {
       expect(first!.structuredContent).toMatchObject({ truncated: true, cursor: expect.any(String) });
       const parts = results.map((result) => (result.structuredContent as { body: string }).body);
       expect(parts.join('')).toBe(body);
+    }
+  });
+
+  gitTest('skill_list and skill_read serve the current text, each read leaves a machine-local event, and delivery off empties both', async ({
+    world,
+  }) => {
+    await initializeTracker(world.a, world.a);
+    const text = '---\nname: release-notes\ndescription: Use when recording a change in the release notes.\n---\n# Release notes\n\nCreate `changes/<slug>.md`.\n';
+    const core = createCore({ autoSync: 'off' });
+    const human: CallContext = {
+      surface: 'cli',
+      repo: { root: world.a.dir, pin: null },
+      person: { ...world.a.identity },
+      client: null,
+      evidence: {},
+      tty: true,
+      nonce: 'human-1',
+    };
+    try {
+      const edited = await core.call('skill_edit', { name: 'release-notes', text, base: null }, human);
+      expect(edited.ok).toBe(true);
+
+      const on = await inBothEras(bin, { cwd: world.a.dir }, async (client) => ({
+        listed: (await client.callTool({ name: 'skill_list', arguments: {} })).structuredContent,
+        read: (await client.callTool({ name: 'skill_read', arguments: { name: 'release-notes' } })).structuredContent,
+        edit: await client.callTool({ name: 'skill_edit', arguments: { name: 'release-notes', text, base: null } }),
+      }));
+      const events = await new MachineLocalStore(path.join(world.a.dir, '.git')).records.list('skill-reads');
+      await core.call('settings_set', { key: 'skills.delivery', value: false }, human);
+      const client = await connect(bin, 'modern', { cwd: world.a.dir });
+      const off = await (async () => ({
+        listed: (await client.callTool({ name: 'skill_list', arguments: {} })).structuredContent,
+        read: await client.callTool({ name: 'skill_read', arguments: { name: 'release-notes' } }),
+      }))().finally(() => client.close());
+
+      const version = edited.ok ? edited.result.version : '';
+      for (const { listed, read, edit } of [on.legacy, on.modern]) {
+        expect(listed).toEqual({ skills: [{ name: 'release-notes', description: 'Use when recording a change in the release notes.' }] });
+        expect(read).toEqual({ name: 'release-notes', version, text });
+        expect(edit.structuredContent).toMatchObject({ error: { code: 'HUMAN_ONLY' } });
+      }
+      expect(events.map((event) => event.value)).toEqual([
+        expect.objectContaining({ skill: 'release-notes', version, actor: expect.objectContaining({ kind: 'agent', client: 'codex-mcp-client' }) }),
+        expect.objectContaining({ skill: 'release-notes', version, actor: expect.objectContaining({ kind: 'agent', client: 'claude-code' }) }),
+      ]);
+      for (const event of events) expect((event.value as { nonce: string }).nonce).toEqual(expect.any(String));
+      expect(off.listed).toEqual({ skills: [] });
+      expect(off.read.isError).toBe(true);
+      expect(off.read.structuredContent).toMatchObject({ error: { code: 'NOT_FOUND', details: { delivery: 'off' } } });
+    } finally {
+      await core.close();
     }
   });
 

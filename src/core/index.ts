@@ -13,6 +13,9 @@ import { claim, close, release } from './attempts';
 import { assign, deleteIssue, outcomeSet, reassign, reopen } from './human-ops';
 import { resolve } from './resolve';
 import { settingsGet, settingsSet } from './settings';
+import { skillEdit, skillList, skillRead, skillShow } from './skills';
+import { wikiEdit, wikiList, wikiShow } from './wiki';
+import { quarantine, unquarantine } from './quarantine';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
@@ -44,6 +47,9 @@ export type { Remedy } from './upgrade';
 export type { AssignResult, ReassignResult, ReopenResult, Reblocked, DeleteResult, OutcomeSetResult } from './human-ops';
 export type { ResolveResult } from './resolve';
 export type { SettingsResult, SettingsSetResult, ShownSetting, SettingScope } from './settings';
+export type { SkillListResult, SkillReadResult, SkillEditResult, SkillShowResult, ShownSkill, ShownChange, SkillProvenance, SkillOrigin } from './skills';
+export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, ShownSide } from './wiki';
+export type { QuarantineResult } from './quarantine';
 export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
 export { AUTO_SYNC_SETTING, autoSync, markSyncPending, syncNow, syncRequestOf } from './sync';
 export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
@@ -109,6 +115,8 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   show,
   list,
   labels,
+  skillList,
+  skillRead,
   create,
   update,
   comment,
@@ -123,6 +131,13 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   resolve,
   outcomeSet,
   settingsSet,
+  skillShow,
+  skillEdit,
+  wikiList,
+  wikiShow,
+  wikiEdit,
+  quarantine,
+  unquarantine,
   sync,
   syncStatus,
 ];

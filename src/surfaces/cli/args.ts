@@ -34,6 +34,13 @@ export function verbOf(op: Pick<OpDescriptor, 'name'>): string {
 /** Positionals an op takes when its required scalar fields aren't the right ones. */
 const POSITIONALS: Readonly<Record<string, readonly string[]>> = { settings_get: ['key'] };
 
+/**
+ * Human-only verbs whose input past their subject comes from the person's
+ * editor (spec §15 `skill edit`, §17 `wiki edit`): the subject, as the one
+ * argument, is all their command line takes.
+ */
+export const EDITOR_VERBS: Readonly<Record<string, string>> = { skill_edit: 'name', wiki_edit: 'slug' };
+
 type JsonSchema = Record<string, unknown>;
 
 function propertiesOf(op: OpDescriptor): Record<string, JsonSchema> {
@@ -61,6 +68,8 @@ function isScalarArray(schema: JsonSchema): boolean {
 export function positionalsOf(op: OpDescriptor): readonly string[] {
   const listed = POSITIONALS[op.name];
   if (listed) return listed;
+  const edited = EDITOR_VERBS[op.name];
+  if (edited) return [edited];
   const properties = propertiesOf(op);
   return requiredOf(op).filter((field) => properties[field] && isScalar(properties[field]!));
 }
@@ -257,6 +266,10 @@ export function parseCommand(argv: readonly string[], ops: readonly OpDescriptor
   if (background && (stdinInput || Object.keys(fields).length > 0)) {
     throw new UsageError('sync --background takes nothing else', verb);
   }
+  const edited = EDITOR_VERBS[op.name];
+  if (edited !== undefined && (stdinInput || fields[edited] === undefined || Object.keys(fields).length > 1)) {
+    throw new UsageError(`usage: grimoire ${verb} <${edited}> (the rest comes from your editor)`, verb);
+  }
   return { kind: 'call', op, verb, fields, stdinInput, from, background };
 }
 
@@ -280,7 +293,9 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
   const required = new Set(requiredOf(op));
   const positionals = positionalsOf(op);
   const verb = verbOf(op);
-  const flags = Object.entries(properties).map(([field, schema]) => {
+  const edited = EDITOR_VERBS[op.name];
+  const flagged = Object.entries(properties).filter(([field]) => edited === undefined || field === edited);
+  const flags = flagged.map(([field, schema]) => {
     const json = !isScalar(schema) && !isScalarArray(schema);
     return {
       flag: json ? `${flagOf(field)} <json>` : schema.type === 'boolean' ? flagOf(field) : `${flagOf(field)} <value>`,
@@ -292,7 +307,7 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
       ...(typeof schema.description === 'string' ? { description: schema.description } : {}),
     };
   });
-  const usage = [`grimoire ${verb}`, ...positionals.map((p) => `<${p}>`), '[flags]', '[--input -]'].join(' ');
+  const usage = [`grimoire ${verb}`, ...positionals.map((p) => `<${p}>`), ...(edited === undefined ? ['[flags]', '[--input -]'] : [])].join(' ');
   const confirmation = confirmationHelp(op, verb);
   return {
     verb,
@@ -305,6 +320,7 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
     flags,
     input_schema: op.inputSchema,
     ...(confirmation !== null ? { confirmation } : {}),
+    ...(edited !== undefined ? { interactive: 'opens your git editor on a temp copy outside every worktree, then shows the diff before you confirm' } : {}),
   };
 }
 

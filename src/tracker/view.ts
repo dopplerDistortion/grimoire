@@ -45,9 +45,12 @@ import {
   issueDir,
   ISSUES_DIR,
   issueFile,
+  LEDGER_DIR,
+  ledgerFile,
   outcomeFile,
   OUTCOMES_DIR,
   SETTINGS_FILE,
+  skillVersionFile,
 } from './layout';
 import { parseConflict, type ConflictRecord } from './conflict';
 import { parseMarker, type Marker } from './marker';
@@ -55,6 +58,8 @@ import { BoundedMap, type FileEdit, type ObjectSource, type TrackerObjects, type
 import { parseIssue, serializeIssue, type IssueRecord } from './record';
 import { parseForward, parseTombstone, serializeForward, serializeTombstone, type Tombstone } from './retired';
 import { parseSetting, serializeSettings, settingLine, settingLines, type StoreSetting } from './settings';
+import { WikiDraftState, WikiReader, type WikiDraft, type WikiView } from './wiki';
+import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type QuarantineView } from './quarantine';
 
 /** What every read sees: the tracker at one tip. */
 export interface TrackerView {
@@ -93,6 +98,26 @@ export interface TrackerView {
   forwardOf(id: string): string | undefined;
   /** The delete tombstone (`deleted/<id>.md`) that retired the id, or undefined. */
   deletion(id: string): Tombstone | undefined;
+  /**
+   * The skill ledger's records as stored, `knowledge/ledger/<id>.md`, by id
+   * (spec §18). Only files named by a sha256 are listed; the knowledge engine
+   * reads them.
+   */
+  ledgerFiles(): Promise<ReadonlyMap<string, Buffer>>;
+  /** A skill version's stored text, `knowledge/skill-versions/<version>.md`, or null. */
+  skillVersion(version: string): Promise<Buffer | null>;
+  /** The wiki (spec §17): pages, their set-aside sides and the human wiki edits, read on first use. */
+  readonly wiki: WikiView;
+  /** Quarantine marks and clears (spec §17, §18), read on first use. */
+  readonly quarantine: QuarantineView;
+}
+
+/** A sha256 in hex: how ledger records and skill versions are named. */
+const SHA256_NAME = /^[0-9a-f]{64}$/;
+
+function contentName(name: string, what: string): string {
+  if (!SHA256_NAME.test(name)) throw new Error(`a ${what} is named by a sha256 in hex, not ${JSON.stringify(name)}`);
+  return name;
 }
 
 /** A comment a write adds; the draft picks its id and time. */
@@ -157,6 +182,14 @@ export interface TrackerDraft extends TrackerView {
   putSetting(key: string, value: unknown, by: string): void;
   /** Writes the forwarding record that maps the bare id `id` to the live record `to`. */
   putForward(id: string, to: string, by: string): void;
+  /** Adds a write-once skill ledger record, named by its sha256. */
+  putLedgerFile(id: string, bytes: Buffer): void;
+  /** Stores a skill version's text, named by its sha256; one already stored stays as it is. */
+  putSkillVersion(version: string, bytes: Buffer): void;
+  /** The wiki as this round changes it; page writes regenerate the derived index and log. */
+  readonly wiki: WikiDraft;
+  /** Quarantine as this round changes it. */
+  readonly quarantine: QuarantineDraft;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
@@ -234,6 +267,8 @@ export class Snapshot implements TrackerView {
   private readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
   private readonly ordered: readonly IssueRecord[];
   private readonly attemptsById = new Map<string, AttemptRecord>();
+  readonly wiki: WikiReader;
+  readonly quarantine: QuarantineReader;
 
   constructor(parts: SnapshotParts) {
     this.tip = parts.tip;
@@ -255,6 +290,8 @@ export class Snapshot implements TrackerView {
     this.ordered = [...parts.records.values()].sort(byOrder);
     this.ids = new Set(parts.records.keys());
     for (const list of parts.attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
+    this.wiki = new WikiReader(parts.source, parts.rootTree);
+    this.quarantine = new QuarantineReader(() => this.ledgerFiles());
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -315,6 +352,30 @@ export class Snapshot implements TrackerView {
   conflicts(id: string): readonly ConflictRecord[] {
     return this.conflictLists.get(id) ?? [];
   }
+
+  private ledger: Promise<ReadonlyMap<string, Buffer>> | null = null;
+
+  ledgerFiles(): Promise<ReadonlyMap<string, Buffer>> {
+    if (!this.ledger) {
+      const loading = (async () => {
+        const entries = await this.source.dirAt(this.rootTree, LEDGER_DIR);
+        const files = entries.filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md') && SHA256_NAME.test(e.name.slice(0, -3)));
+        const read = await Promise.all(files.map(async (e) => [e.name.slice(0, -3), await this.source.blob(e.oid)] as const));
+        return new Map(read);
+      })();
+      // A failed read (a missing object) is tried again next time.
+      loading.catch(() => {
+        if (this.ledger === loading) this.ledger = null;
+      });
+      this.ledger = loading;
+    }
+    return this.ledger;
+  }
+
+  skillVersion(version: string): Promise<Buffer | null> {
+    if (!SHA256_NAME.test(version)) return Promise.resolve(null);
+    return this.source.fileAt(this.rootTree, skillVersionFile(version));
+  }
 }
 
 interface StoredComment extends CommentEntry {
@@ -351,8 +412,14 @@ export class Draft implements TrackerDraft {
   private readonly settingsHere = new Map<string, StoreSetting>();
   /** Forwarding records this round writes, by bare id. */
   private readonly forwardsHere = new Map<string, { to: string; by: string }>();
+  /** Ledger records this round adds, by id. */
+  private readonly ledgerHere = new Map<string, Buffer>();
+  /** Skill versions this round stores, by version id. */
+  private readonly versionsHere = new Map<string, Buffer>();
   private commentMs: number | null = null;
   private commentN = 0;
+  readonly wiki: WikiDraftState;
+  readonly quarantine: QuarantineDraftState;
 
   constructor(
     private readonly base: Snapshot,
@@ -363,7 +430,10 @@ export class Draft implements TrackerDraft {
     /** The latest comment time this store has written, in epoch ms. */
     private readonly storeCommentMs = 0,
     private readonly randomHandle: () => string = randomAttemptHandle,
-  ) {}
+  ) {
+    this.wiki = new WikiDraftState(base.wiki, now);
+    this.quarantine = new QuarantineDraftState(base.quarantine, now);
+  }
 
   get tip(): string {
     return this.base.tip;
@@ -476,6 +546,23 @@ export class Draft implements TrackerDraft {
   putForward(id: string, to: string, by: string): void {
     if (!this.issue(to)) throw notFound('keep', to);
     this.forwardsHere.set(id, { to, by });
+  }
+
+  async ledgerFiles(): Promise<ReadonlyMap<string, Buffer>> {
+    const stored = await this.base.ledgerFiles();
+    return this.ledgerHere.size === 0 ? stored : new Map([...stored, ...this.ledgerHere]);
+  }
+
+  async skillVersion(version: string): Promise<Buffer | null> {
+    return this.versionsHere.get(version) ?? this.base.skillVersion(version);
+  }
+
+  putLedgerFile(id: string, bytes: Buffer): void {
+    this.ledgerHere.set(contentName(id, 'ledger record'), bytes);
+  }
+
+  putSkillVersion(version: string, bytes: Buffer): void {
+    this.versionsHere.set(contentName(version, 'skill version'), bytes);
   }
 
   private openAttemptsOf(issue: string): AttemptRecord[] {
@@ -623,6 +710,8 @@ export class Draft implements TrackerDraft {
       edits.set(SETTINGS_FILE, serializeSettings(lines));
     }
     for (const [id, { to, by }] of this.forwardsHere) edits.set(forwardFile(id), serializeForward({ to, by, at, extra: {} }));
+    for (const [id, bytes] of this.ledgerHere) edits.set(ledgerFile(id), bytes);
+    for (const [version, bytes] of this.versionsHere) edits.set(skillVersionFile(version), bytes);
     const commentBytes = new Map<string, Buffer>();
     for (const [issue, comments] of this.added) {
       for (const { id, ...comment } of comments) {
@@ -649,6 +738,8 @@ export class Draft implements TrackerDraft {
     for (const [handle, outcome] of this.outcomes) {
       edits.set(outcomeFile(this.attempt(handle)!.issue, handle), serializeOutcome(outcome));
     }
+    for (const [file, edit] of this.wiki.fileEdits()) edits.set(file, edit);
+    for (const [file, edit] of this.quarantine.fileEdits()) edits.set(file, edit);
     return edits;
   }
 }

@@ -6,9 +6,9 @@
 // unless its subject isn't one of the usual fields, or, like `release
 // --abandoned`, only some of its calls are human-only. The gate fails closed:
 // a human-only call whose subject can't be found asks for the verb instead.
-import { createInterface } from 'node:readline';
 import type { CallContext, Core, OpDescriptor } from '../../core';
 import { parseHandle } from '../../core/attempts';
+import { terminalOn } from './wiki';
 
 /** Decides what a call's person must type, or null when the call needs no confirmation. */
 export type Confirmation = (input: Record<string, unknown>, ctx: CallContext, core: Pick<Core, 'call'>) => Promise<string | null>;
@@ -17,11 +17,13 @@ export type Confirmation = (input: Record<string, unknown>, ctx: CallContext, co
 const SUBJECT_FIELDS = [
   ['id', 'id'],
   ['name', 'name'],
+  ['slug', 'slug'],
+  ['page', 'page’s slug'],
   ['key', 'key'],
   ['attempt', 'attempt handle'],
 ] as const;
 
-/** The input field a human-only op's person types: its id, its name (skills), its key (settings) or its handle (outcomes). */
+/** The input field a human-only op's person types: its id, its name (skills), its slug (wiki pages, quarantine), its key (settings) or its handle (outcomes). */
 function subjectFieldOf(op: OpDescriptor): (typeof SUBJECT_FIELDS)[number] | null {
   const properties = (op.inputSchema.properties ?? {}) as Record<string, unknown>;
   return SUBJECT_FIELDS.find(([field]) => Object.hasOwn(properties, field)) ?? null;
@@ -104,27 +106,16 @@ export function mayConfirm(op: OpDescriptor): boolean {
 
 /**
  * Asks at the terminal for `subject` to be typed (the prompt on stderr, so
- * stdout stays one JSON object). True only for an exact match; end of input
- * or anything else is a refusal.
+ * stdout stays one JSON object). True only for an exact match; Ctrl-C, end of
+ * input or anything else is a refusal.
  */
-export function confirmTyped(
+export async function confirmTyped(
   io: { stdin: NodeJS.ReadableStream; stderr: NodeJS.WritableStream },
   verb: string,
   subject: string,
 ): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: io.stdin, output: io.stderr, terminal: false });
-    let answered = false;
-    const finish = (line: string | null) => {
-      if (answered) return;
-      answered = true;
-      rl.close();
-      // A paused terminal stream keeps no handle open, so the process can exit.
-      io.stdin.pause();
-      resolve(line !== null && line.trim() === subject);
-    };
-    io.stderr.write(`grimoire ${verb} is a human-only operation. Type ${subject} to confirm (anything else cancels): `);
-    rl.once('line', (line) => finish(line));
-    rl.once('close', () => finish(null));
-  });
+  const answer = await terminalOn(io).ask(`grimoire ${verb} is a human-only operation. Type ${subject} to confirm (anything else cancels): `);
+  // A paused terminal stream keeps no handle open, so the process can exit.
+  io.stdin.pause();
+  return answer !== null && answer.trim() === subject;
 }

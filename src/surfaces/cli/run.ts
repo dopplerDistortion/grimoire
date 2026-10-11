@@ -2,28 +2,24 @@
 // JSON shapes. The agents' fallback channel when no MCP tools are listed, and
 // the humans' terminal surface. Thin: argv and stdin in, one JSON object out,
 // the exit code, and the gating a terminal adds (the human-only gate's typed
-// confirmation, NOT_WRITABLE before any effect).
+// confirmation, NOT_WRITABLE before any effect). `skill edit` and `wiki edit`
+// run their editor sessions (./skill-edit.ts, ./wiki.ts) instead of calling
+// the core once.
 //
 // Exit codes: 0 success; 1 stdout carries an `error` object; 2 usage error.
-import { randomBytes } from 'node:crypto';
 import path from 'node:path';
-import {
-  createCore,
-  findHostRoot,
-  readCheckoutConfig,
-  readPerson,
-  runBackgroundSync,
-  spawnedAutoSync,
-  type CallContext,
-  type Core,
-} from '../../core';
+import { createCore, runBackgroundSync, spawnedAutoSync, type CallContext, type Core, type Outcome } from '../../core';
 import { humanSurface } from '../../core/context';
 import { checkSurface } from '../../core/op';
 import { GrimoireError, type ErrorBody } from '../../errors';
 import { errorBodyOf } from '../internal';
-import { globalHelp, mergeInput, parseCommand, UsageError, verbHelp, type Command } from './args';
+import { EDITOR_VERBS, globalHelp, mergeInput, parseCommand, UsageError, verbHelp, type Command } from './args';
+import { cliContext } from './context';
+import { openGitEditor } from './editor';
 import { confirmationFor, confirmTyped, mayConfirm } from './gate';
-import { clientIn, evidenceIn, inCodexShell } from './shell';
+import { inCodexShell } from './shell';
+import { skillEditFlow } from './skill-edit';
+import { terminalOn, wikiEditSession } from './wiki';
 import { checkWritable, refusedWrite, withCodexHint } from './writable';
 
 export interface CliIo {
@@ -61,7 +57,7 @@ async function inputOf(command: Command, io: CliIo): Promise<Record<string, unkn
     );
   }
   // Windows tools (PowerShell 5.1's UTF-8, files it saved) lead with a byte order mark.
-  const text = (await readStdin(io.stdin)).replace(/^﻿/, '');
+  const text = (await readStdin(io.stdin)).replace(/^\uFEFF/, '');
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -72,19 +68,50 @@ async function inputOf(command: Command, io: CliIo): Promise<Record<string, unkn
 }
 
 /** The call context of a CLI call (spec §7): the host repo from the start directory, the person, and what the shell shows. */
-async function contextOf(command: Command, io: CliIo): Promise<CallContext> {
-  const root = await findHostRoot(command.from === null ? io.cwd : path.resolve(io.cwd, command.from));
-  const config = await readCheckoutConfig(root);
-  return {
-    surface: 'cli',
-    repo: { root, pin: config?.pin ?? null, installFormat: config?.installFormat ?? null },
-    person: await readPerson(root),
-    client: clientIn(io.env),
-    evidence: evidenceIn(io.env),
+function contextOf(command: Command, io: CliIo): Promise<CallContext> {
+  return cliContext({
+    cwd: command.from === null ? io.cwd : path.resolve(io.cwd, command.from),
+    env: io.env,
     tty: io.stdin.isTTY === true && io.stdout.isTTY === true,
-    nonce: randomBytes(8).toString('hex'),
-  };
+  });
 }
+
+interface SessionDeps {
+  readonly core: Core;
+  readonly ctx: CallContext;
+  readonly io: CliIo;
+}
+
+/** A prompt the person closed (Ctrl-C, Ctrl-D), the way node:readline reports it: the skill edit session discards. */
+function closedPrompt(): Error {
+  return Object.assign(new Error('the prompt was closed'), { name: 'AbortError' });
+}
+
+/**
+ * The editor sessions of the human-only edit verbs: each opens the person's
+ * git editor, shows the diff, takes its own typed confirmation and calls the
+ * core itself.
+ */
+const SESSIONS: Readonly<Record<string, (subject: string, deps: SessionDeps) => Promise<Outcome<unknown>>>> = {
+  skill_edit: (name, { core, ctx, io }) => {
+    const terminal = terminalOn(io);
+    return skillEditFlow(name, {
+      core,
+      ctx,
+      io: {
+        edit: (file) => openGitEditor(file, ctx.repo.root, io.env),
+        ask: async (question) => {
+          const answer = await terminal.ask(question);
+          if (answer === null) throw closedPrompt();
+          return answer;
+        },
+        say: (text) => terminal.say(text),
+      },
+    });
+  },
+  wiki_edit: (slug, { core, ctx, io }) =>
+    wikiEditSession(slug, { core, ctx, terminal: terminalOn(io), edit: (file) => openGitEditor(file, ctx.repo.root, io.env) }),
+};
 
 /** Runs one op call: the gate, the writable check, then the core. Returns what stdout prints. */
 async function call(command: Command, input: Record<string, unknown>, ctx: CallContext, core: Core, io: CliIo): Promise<
@@ -93,7 +120,8 @@ async function call(command: Command, input: Record<string, unknown>, ctx: CallC
   const { op } = command;
   // HUMAN_ONLY (agent markers, no terminal) before anything is asked or probed.
   checkSurface(op, ctx);
-  if (humanSurface(ctx)) {
+  const session = SESSIONS[op.name];
+  if (humanSurface(ctx) && !session) {
     const subject = await confirmationFor(op, command.verb, input, ctx, core);
     if (subject !== null && !(await confirmTyped(io, command.verb, subject))) {
       throw new GrimoireError('INVALID', `${command.verb} was not confirmed: type ${subject} exactly to run it; nothing changed`, {
@@ -102,9 +130,10 @@ async function call(command: Command, input: Record<string, unknown>, ctx: CallC
     }
   }
   if (op.kind !== 'write') return core.call(op.name, input, ctx);
+  // Before any effect, and before the person writes a draft in their editor.
   await checkWritable(ctx.repo.root);
   try {
-    return await core.call(op.name, input, ctx);
+    return await (session ? session(String(input[EDITOR_VERBS[op.name]!]), { core, ctx, io }) : core.call(op.name, input, ctx));
   } catch (error) {
     // The probe passed, but a write below the probed directories was refused
     // all the same: the tracker's compare-and-set publishes last and

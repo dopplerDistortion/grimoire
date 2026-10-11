@@ -17,6 +17,7 @@ describe('the op registry', () => {
         'labels',
         'list',
         'outcome_set',
+        'quarantine',
         'reassign',
         'release',
         'reopen',
@@ -24,9 +25,17 @@ describe('the op registry', () => {
         'settings_get',
         'settings_set',
         'show',
+        'skill_edit',
+        'skill_list',
+        'skill_read',
+        'skill_show',
         'sync',
         'sync_status',
+        'unquarantine',
         'update',
+        'wiki_edit',
+        'wiki_list',
+        'wiki_show',
       ]);
       // MCP lists exactly the agent tools of spec §8 (so far).
       expect(core.ops.filter((op) => op.mcp).map((op) => op.name).sort()).toEqual([
@@ -38,6 +47,8 @@ describe('the op registry', () => {
         'list',
         'release',
         'show',
+        'skill_list',
+        'skill_read',
         'update',
       ]);
       // Runtime verbs: the CLI and the dashboard reach them; MCP never lists them (spec §8, §10).
@@ -50,6 +61,16 @@ describe('the op registry', () => {
         inputSchema: { type: 'object', required: ['ref'], additionalProperties: false },
       });
       expect(byName.labels).toMatchObject({ kind: 'read', annotations: { readOnlyHint: true } });
+      expect(byName.skill_list).toMatchObject({ kind: 'read', policy: 'agent', mcp: true, annotations: { readOnlyHint: true } });
+      expect(byName.skill_read).toMatchObject({
+        kind: 'read',
+        policy: 'agent',
+        mcp: true,
+        annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', required: ['name'], additionalProperties: false },
+      });
+      expect(byName.skill_edit).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
+      expect(byName.skill_show).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
       expect(byName.create).toMatchObject({
         kind: 'write',
         policy: 'agent',

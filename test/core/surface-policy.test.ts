@@ -1,6 +1,5 @@
 // The surface policy every op carries (spec §2.1, §7): which surfaces may call
-// it. The registry holds no human-read or internal op yet, so the policies are
-// checked over every surface the core sees.
+// it. The policies are checked over every surface the core sees.
 import { describe, expect, test } from 'vitest';
 import type { CallContext } from '../../src/core';
 import { checkSurface, type SurfacePolicy } from '../../src/core/op';

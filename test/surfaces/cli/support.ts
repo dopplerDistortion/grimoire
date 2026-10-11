@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect } from 'vitest';
 import { makeTempDir, removeDir, runCommand } from '#harness';
 
@@ -165,6 +166,27 @@ export async function cliAtTerminal(
   } finally {
     await removeDir(dir);
   }
+}
+
+/**
+ * The stand-in git editor (./fake-editor.mjs) with its plan: each time it
+ * opens, it saves the next step's text. `env` sets it up for a CLI run.
+ */
+export async function fakeEditor(steps: { write?: string; replace?: [string, string] }[]): Promise<{
+  env: NodeJS.ProcessEnv;
+  cleanup: () => Promise<void>;
+}> {
+  const dir = await makeTempDir('grimoire-fake-editor-');
+  const plan = path.join(dir, 'plan.json');
+  const log = path.join(dir, 'log.jsonl');
+  await writeFile(plan, JSON.stringify(steps));
+  await writeFile(log, '');
+  const quoted = (file: string) => `"${file.split(path.sep).join('/')}"`;
+  const script = fileURLToPath(new URL('./fake-editor.mjs', import.meta.url));
+  return {
+    env: { GIT_EDITOR: `${quoted(process.execPath)} ${quoted(script)}`, FAKE_EDITOR_PLAN: plan, FAKE_EDITOR_LOG: log },
+    cleanup: () => removeDir(dir),
+  };
 }
 
 /** The last JSON object a terminal screen shows (the CLI's stdout, among prompts and echoes). */
