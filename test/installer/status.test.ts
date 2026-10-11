@@ -1,16 +1,19 @@
 // Seam 1 for `status` (spec Testing Decisions; §12 status): readStatus driven
 // directly against a clone with a tracker. Seam 3 (health.test.ts) runs it
 // through the shim and asserts it writes nothing.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
+import { makeTempDir, removeDir } from '#harness';
 import { putMachineSetting } from '../../src/core/settings';
+import { codexHookHash } from '../../src/installer';
 import { noteClientRuntime } from '../../src/installer/client-runtime';
 import { writeJoinRecord } from '../../src/installer/records';
-import { readStatus } from '../../src/installer/status';
+import { readStatus, STATUS_FACTS } from '../../src/installer/status';
 import { MachineLocalStore } from '../../src/machine-local';
 import { VERSION } from '../../src/version';
 import { coreTest as test, T0 } from '../core/support';
+import { installed } from '../upkeep/support';
 
 async function ok<T>(outcome: Promise<{ ok: true; result: T } | { ok: false; error: unknown }>): Promise<T> {
   const settled = await outcome;
@@ -74,5 +77,37 @@ describe('status', () => {
     expect(report.sync).toMatchObject({ summary: 'never synced on this machine', failure: null });
     expect(report.stale_claims).toMatchObject({ error: { code: 'NOT_SYNCED' } });
     expect(report.excerpt_mode).toMatchObject({ store: null, joined: null, changed: false, error: { code: 'NOT_SYNCED' } });
+  });
+
+  test('whether Codex runs grimoire’s hook: needs approval, approved, and unknown when the user’s Codex config can’t be read', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    await writeJoinRecord(store, VERSION, { excerpt_mode: 'facts', codex_hook_hash: codexHookHash(), joined_at: T0.getTime() });
+    const home = await makeTempDir('grimoire-codex-home-');
+    try {
+      const env = { ...process.env, CODEX_HOME: home };
+      const facts = STATUS_FACTS.filter((fact) => fact.key === 'codex_hook');
+      const key = `${path.join(await realpath(root), '.codex', 'config.toml')}:session_start:0:0`;
+      const userConfig = path.join(home, 'config.toml');
+
+      const fresh = await readStatus({ root, env, facts });
+      await writeFile(userConfig, `[hooks.state.'${key}']\ntrusted_hash = "${codexHookHash()}"\n`);
+      const approved = await readStatus({ root, env, facts });
+      // A folder where the config should be: grimoire can't read the trust, so it falls back to what it announced.
+      await rm(userConfig);
+      await mkdir(userConfig);
+      const announced = await readStatus({ root, env, facts });
+      await writeJoinRecord(store, VERSION, { excerpt_mode: 'facts', codex_hook_hash: 'sha256:an-older-hook', joined_at: T0.getTime() });
+      const changed = await readStatus({ root, env, facts });
+
+      expect(fresh.report.codex_hook).toMatchObject({ trust: 'needs-approval', key, position: 0, last: true, declared_hash: codexHookHash(), expected_hash: codexHookHash() });
+      expect(fresh.lines).toContain('Codex hook: Codex skips grimoire’s SessionStart hook until you approve it in `/hooks` (once per clone of this repo)');
+      expect(approved.report.codex_hook).toMatchObject({ trust: 'approved', key });
+      expect(announced.report.codex_hook).toMatchObject({ trust: 'unknown', announced_hash: codexHookHash(), summary: expect.stringContaining('announced for approval on this machine') });
+      expect(changed.report.codex_hook).toMatchObject({ trust: 'unknown', summary: expect.stringContaining('changed since it was last announced') });
+    } finally {
+      await removeDir(home);
+    }
   });
 });

@@ -3,7 +3,7 @@
 // the way `init` writes them, with this clone joined to the version under
 // test. Each test injects defects the way a person, another tool or a crash
 // leaves them, and asserts what the report says and what --fix repairs.
-import { appendFile, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { gitTest, makeTempDir, removeDir, type Checkout } from '#harness';
@@ -144,7 +144,7 @@ describe('install checks', SLOW, () => {
   gitTest('the Codex hook: approved, modified since approval, and needs approval at a new position', async ({ world }) => {
     const { root, env, cleanup } = await setUp(world.a);
     try {
-      const file = path.join(await import('node:fs/promises').then((fs) => fs.realpath(root)), '.codex', 'config.toml');
+      const file = path.join(await realpath(root), '.codex', 'config.toml');
       const key = `${file}:session_start:0:0`;
       await writeFile(path.join(env.CODEX_HOME!, 'config.toml'), `model = "x"\n\n[hooks.state]\n\n[hooks.state.'${key}']\ntrusted_hash = "${codexHookHash()}"\n`);
       const approved = await runDoctor({ root, env });
@@ -158,6 +158,35 @@ describe('install checks', SLOW, () => {
       expect(kinds(approved, 'install')).toEqual([]);
       expect(found(modified, 'codex-hook-modified')).toHaveLength(1);
       expect(found(moved, 'codex-hook-unapproved')).toEqual([expect.objectContaining({ details: expect.objectContaining({ position: 1, key: `${file}:session_start:1:0` }) })]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  gitTest('the Codex hook: a group after grimoire’s, a user config grimoire can’t read, and a linked worktree, whose hooks are the main checkout’s', async ({ world }) => {
+    const { root, env, cleanup } = await setUp(world.a);
+    try {
+      const checks = DOCTOR_CHECKS.filter((check) => check.name === 'install.codex-hook');
+      const mainFile = path.join(await realpath(root), '.codex', 'config.toml');
+      const codex = await read(root, '.codex/config.toml');
+      await writeFile(path.join(root, '.codex/config.toml'), `${codex}\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "echo after"\n`);
+      const notLast = await runDoctor({ root, env, checks });
+      await writeFile(path.join(root, '.codex/config.toml'), codex);
+      await mkdir(path.join(env.CODEX_HOME!, 'config.toml'));
+      const unreadable = await runDoctor({ root, env, checks });
+      await rm(path.join(env.CODEX_HOME!, 'config.toml'), { recursive: true });
+      const feature = await world.a.addWorktree('feature');
+      await installed(feature.dir);
+      const linked = await runDoctor({ root: feature.dir, env, checks });
+      await writeFile(path.join(root, '.codex/config.toml'), 'model = "mine"\n');
+      const mainBare = await runDoctor({ root: feature.dir, env, checks });
+
+      expect(found(notLast, 'codex-hook-position')).toEqual([expect.objectContaining({ severity: 'info', subject: mainFile })]);
+      expect(found(notLast, 'codex-hook-unapproved')).toEqual([expect.objectContaining({ details: expect.objectContaining({ position: 0 }) })]);
+      expect(found(unreadable, 'codex-hook-unknown')).toEqual([expect.objectContaining({ severity: 'info', message: expect.stringContaining('changed since it was last announced') })]);
+      // Codex lists a linked worktree's hook under the main checkout's file (spike E, hooks-list-linked-worktree.json).
+      expect(found(linked, 'codex-hook-unapproved')).toEqual([expect.objectContaining({ subject: `${mainFile}:session_start:0:0` })]);
+      expect(found(mainBare, 'codex-main-checkout')).toEqual([expect.objectContaining({ subject: mainFile, remedy: expect.stringContaining('run grimoire init in') })]);
     } finally {
       await cleanup();
     }

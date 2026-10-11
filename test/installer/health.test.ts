@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect } from 'vitest';
+import { afterAll, beforeAll, describe, expect, onTestFinished } from 'vitest';
 import { gitTest, makeTempDir, removeDir, runCommand, type GitWorld } from '#harness';
 import { MachineLocalStore } from '../../src/machine-local';
 import { commitToTracker, issuePath } from '../core/support';
@@ -178,7 +178,10 @@ describe('status', () => {
       ['#!/bin/sh', 'echo "GH013: Repository rule violations found for refs/heads/grimoire/tracker." >&2', 'exit 1', ''].join('\n'),
       { mode: 0o755 },
     );
-    const agent = humanEnv(CLAUDE_SHELL);
+    // A Codex home of its own: the hook's trust is read from it, never from this machine's user.
+    const codexHome = await makeTempDir('grimoire-codex-home-');
+    onTestFinished(() => removeDir(codexHome));
+    const agent = humanEnv({ ...CLAUDE_SHELL, CODEX_HOME: codexHome });
     expect((await shim(root, ['create', 'Waiting to go out'], agent)).code).toBe(0);
     const synced = await shim(root, ['sync'], agent);
     expect(synced.json).toMatchObject({ state: 'pending', reason: 'failed', failure: { class: 'rejected' } });
@@ -201,8 +204,15 @@ describe('status', () => {
       refreshed_pointer_files: { paths: ['.claude/rules/grimoire.md'] },
       stale_claims: { stale_after: '24h', claims: [] },
       excerpt_mode: { store: 'facts', joined: 'facts', changed: false },
-      codex_hook: { trust: expect.any(String), expected_hash: expect.stringMatching(/^sha256:/) },
+      codex_hook: {
+        trust: 'needs-approval',
+        position: 0,
+        last: true,
+        key: expect.stringMatching(/[\\/]\.codex[\\/]config\.toml:session_start:0:0$/),
+        expected_hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      },
     });
+    expect(status.json.codex_hook.declared_hash).toBe(status.json.codex_hook.expected_hash);
     expect(status.stderr).toContain('the remote rejected the push in a claude-code CLI call');
     expect(status.stderr).toContain('grimoire refreshed 1 pointer file: commit it');
   }, LONG);

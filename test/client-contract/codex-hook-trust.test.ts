@@ -58,7 +58,8 @@ describe('Codex hook trust for the shipped bootstrap (Codex 0.162.1 fixtures)', 
     expect(trustedHashes(readFixture(`${TRUST}/user-config-hooks-state.toml`)).get(spike!.key)).toBe(spike!.currentHash);
   });
 
-  it('reads trust written inline under [hooks.state] too, and ignores other tables', () => {
+  // Codex writes `[hooks.state.'<key>']` tables (both captures above); an inline entry is a person's hand edit, read the same.
+  it('tolerates trust a person wrote inline under [hooks.state], and ignores other tables', () => {
     const text = [
       '[hooks.state]',
       `'C:\\repo\\.codex\\config.toml:session_start:1:0' = { trusted_hash = "sha256:aa" }`,
@@ -76,30 +77,106 @@ describe('Codex hook trust for the shipped bootstrap (Codex 0.162.1 fixtures)', 
   });
 });
 
-const codexInstalled = spawnSync('codex --version', { shell: true, encoding: 'utf8', windowsHide: true, timeout: 30_000 }).status === 0;
+describe('a linked worktree runs the main checkout’s hooks', () => {
+  it('grimoire names the trust key under the main checkout’s file, as Codex lists it for a worktree', async () => {
+    // Spike E: listed from the worktree (`cwd`), the hook's key and sourcePath are the main checkout's file.
+    const [listing] = readFixtureJson<HooksList>(`${TRUST}/hooks-list-linked-worktree.json`).result.data as unknown as { cwd: string; hooks: ListedHook[] }[];
+    const listed = listing!.hooks[0]!;
+    expect(listed.key).toBe(`${listed.sourcePath}:session_start:0:0`);
+    expect(listed.sourcePath.startsWith(`${listing!.cwd}\\`)).toBe(false);
 
-/** A `codex app-server` over stdio, as the TUI's `/hooks` screen talks to it. */
+    const dir = await makeTempDir('grimoire-codex-worktree-');
+    try {
+      const main = path.join(await realpath(dir), 'main');
+      await mkdir(path.join(main, '.codex'), { recursive: true });
+      await git(main, ['init', '--quiet']);
+      await writeFile(path.join(main, '.codex', 'config.toml'), blockText());
+      await git(main, ['add', '.']);
+      await git(main, ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '--quiet', '-m', 'hooks']);
+      const worktree = path.join(path.dirname(main), 'feature');
+      await git(main, ['worktree', 'add', '--quiet', '-b', 'feature', worktree]);
+
+      const state = await codexHookState(worktree, (await findGitDirs(worktree))!, { CODEX_HOME: path.join(dir, 'codex-home') }, null);
+
+      expect(state).toMatchObject({ declaring_file: path.join(main, '.codex', 'config.toml'), position: 0, trust: 'needs-approval' });
+      expect(state.key).toBe(`${state.declaring_file}:session_start:0:0`);
+    } finally {
+      await removeDir(dir);
+    }
+  });
+});
+
+/** The Codex release the fixtures and the trust recipe were taken from: another one may hash or list hooks differently. */
+const PINNED_CODEX = /^codex-cli 0\.162\./m;
+const codexVersion = spawnSync('codex --version', { shell: true, encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+const codexInstalled = codexVersion.status === 0 && PINNED_CODEX.test(codexVersion.stdout ?? '');
+
+/** How long one app-server request may take before the test gives up on it. */
+const REQUEST_MS = 30_000;
+
+/**
+ * A `codex app-server` over stdio, as the TUI's `/hooks` screen talks to it.
+ * A request that gets no answer, or a server that exits, fails the test
+ * instead of hanging it; `close` ends the whole process tree.
+ */
 async function appServer(codexHome: string, cwd: string) {
-  const child = spawn('codex app-server', { cwd, env: { ...process.env, CODEX_HOME: codexHome }, shell: true, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-  const pending = new Map<number, (message: { result?: unknown; error?: unknown }) => void>();
+  const windows = process.platform === 'win32';
+  // Windows installs codex as a .cmd shim, which needs a shell; elsewhere the binary runs directly.
+  const child = windows
+    ? spawn('codex app-server', { cwd, env: { ...process.env, CODEX_HOME: codexHome }, shell: true, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    : spawn('codex', ['app-server'], { cwd, env: { ...process.env, CODEX_HOME: codexHome }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const pending = new Map<number, { resolve: (message: { result?: unknown; error?: unknown }) => void; reject: (error: Error) => void }>();
+  let gone: Error | null = null;
+  const fail = (error: Error) => {
+    gone ??= error;
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+  };
+  child.on('error', (error) => fail(error));
+  child.on('exit', (code, signal) => fail(new Error(`codex app-server exited (${code ?? signal})`)));
   readline.createInterface({ input: child.stdout }).on('line', (line) => {
     try {
       const message = JSON.parse(line) as { id?: number; result?: unknown; error?: unknown };
-      if (message.id !== undefined) pending.get(message.id)?.(message);
+      if (message.id !== undefined) pending.get(message.id)?.resolve(message);
     } catch {
       // Not a response.
     }
   });
-  let next = 0;
-  const request = async (method: string, params: unknown) => {
-    const id = next++;
-    const answer = new Promise<{ result?: unknown; error?: unknown }>((resolve) => pending.set(id, resolve));
-    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-    const message = await answer;
-    if (message.error) throw new Error(`${method}: ${JSON.stringify(message.error)}`);
-    return message.result;
+  const close = () => {
+    child.stdin.end();
+    if (child.exitCode !== null || child.pid === undefined) return;
+    if (windows) spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 30_000 });
+    else child.kill();
   };
-  await request('initialize', { clientInfo: { name: 'grimoire_test', title: null, version: '0.0.0' } });
+  let next = 0;
+  const request = (method: string, params: unknown) =>
+    new Promise<unknown>((resolve, reject) => {
+      if (gone) return reject(gone);
+      const id = next++;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`${method}: codex app-server gave no answer in ${REQUEST_MS / 1000} s`));
+      }, REQUEST_MS);
+      pending.set(id, {
+        resolve: (message) => {
+          clearTimeout(timer);
+          pending.delete(id);
+          if (message.error) reject(new Error(`${method}: ${JSON.stringify(message.error)}`));
+          else resolve(message.result);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+    });
+  try {
+    await request('initialize', { clientInfo: { name: 'grimoire_test', title: null, version: '0.0.0' } });
+  } catch (error) {
+    close();
+    throw error;
+  }
   child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`);
   return {
     list: async () => hooksOf({ result: (await request('hooks/list', { cwds: [cwd] })) as HooksList['result'] }),
@@ -110,10 +187,7 @@ async function appServer(codexHome: string, cwd: string) {
         expectedVersion: null,
         reloadUserConfig: true,
       }),
-    close: () => {
-      child.stdin.end();
-      child.kill();
-    },
+    close,
   };
 }
 

@@ -58,7 +58,12 @@ export function mainCheckout(root: string, dirs: GitDirs): string {
 /** A TOML key as written: bare, 'literal' or "basic". */
 const KEY = String.raw`(?:'([^']*)'|"((?:[^"\\]|\\.)*)")`;
 
-/** `hooks.state.<key>.trusted_hash` of a user's Codex config, by key. Lenient: it reads the two shapes Codex writes. */
+/**
+ * `hooks.state.<key>.trusted_hash` of a user's Codex config, by key. Codex
+ * writes one `[hooks.state.'<key>']` table per hook (spike E, GOK-150
+ * captures); an inline `'<key>' = { trusted_hash = … }` under `[hooks.state]`,
+ * as a person might write it, is read too.
+ */
 export function trustedHashes(text: string): Map<string, string> {
   const found = new Map<string, string>();
   const unquote = (literal: string | undefined, basic: string | undefined) => literal ?? (JSON.parse(`"${basic ?? ''}"`) as string);
