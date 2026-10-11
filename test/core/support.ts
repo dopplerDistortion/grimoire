@@ -148,7 +148,8 @@ export const coreTest = gitTest.extend('grimoire', async ({ world }, { onCleanup
     for (const core of cores) await core.close();
   });
   const makeCore = (options: CoreOptions = {}): Core => {
-    const core = createCore({ clock: () => T0, ...options });
+    // Background syncs would push to the world's remote behind a test's back: tests opt in.
+    const core = createCore({ clock: () => T0, autoSync: 'off', ...options });
     cores.push(core);
     return core;
   };
@@ -157,14 +158,15 @@ export const coreTest = gitTest.extend('grimoire', async ({ world }, { onCleanup
 });
 
 /**
- * Bundles `call-process.ts` into a temp dir, for tests that run core calls in
- * separate processes. Returns the script's path and a cleanup.
+ * Bundles `call-process.ts` (or another script beside it) into a temp dir, for
+ * tests that run core calls in separate processes. Returns the script's path
+ * and a cleanup.
  */
-export async function bundleCallProcess(): Promise<{ script: string; cleanup: () => Promise<void> }> {
+export async function bundleCallProcess(entry = 'call-process.ts'): Promise<{ script: string; cleanup: () => Promise<void> }> {
   const dir = await makeTempDir('grimoire-caller-');
-  const script = path.join(dir, 'call-process.mjs');
+  const script = path.join(dir, entry.replace(/\.ts$/, '.mjs'));
   await esbuild.build({
-    entryPoints: [fileURLToPath(new URL('./call-process.ts', import.meta.url))],
+    entryPoints: [fileURLToPath(new URL(`./${entry}`, import.meta.url))],
     outfile: script,
     bundle: true,
     platform: 'node',

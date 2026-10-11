@@ -12,6 +12,7 @@ import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
+import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -126,4 +127,6 @@ export interface OpResults {
   wiki_edit: WikiEditResult;
   quarantine: QuarantineResult;
   unquarantine: QuarantineResult;
+  sync: SyncResult;
+  sync_status: SyncStatusResult;
 }

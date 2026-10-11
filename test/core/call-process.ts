@@ -5,7 +5,7 @@
 import { createCore } from '../../src/core';
 
 const [root, name, calls] = process.argv.slice(2);
-const core = createCore();
+const core = createCore({ autoSync: 'off' });
 const ctx = {
   surface: 'mcp' as const,
   repo: { root: root!, pin: null },

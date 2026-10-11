@@ -25,6 +25,8 @@ describe('the op registry', () => {
         'settings_get',
         'settings_set',
         'show',
+        'sync',
+        'sync_status',
         'unquarantine',
         'update',
         'wiki_edit',
@@ -43,6 +45,9 @@ describe('the op registry', () => {
         'show',
         'update',
       ]);
+      // Runtime verbs: the CLI and the dashboard reach them; MCP never lists them (spec §8, §10).
+      expect(byName.sync).toMatchObject({ kind: 'write', policy: 'agent', mcp: false, inputSchema: { type: 'object', additionalProperties: false } });
+      expect(byName.sync_status).toMatchObject({ kind: 'read', policy: 'agent', mcp: false, annotations: { readOnlyHint: true } });
       expect(byName.show).toMatchObject({
         kind: 'read',
         policy: 'agent',

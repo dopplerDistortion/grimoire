@@ -3,6 +3,8 @@
 import { shardOf } from './ids';
 
 export const TRACKER_REF = 'refs/grimoire/tracker';
+/** The tracker's branch on a remote: what fetch and push name in their explicit refspecs (spec §3, Refs). */
+export const TRACKER_BRANCH = 'refs/heads/grimoire/tracker';
 /** The remote-tracking ref of `remote`'s `grimoire/tracker` branch. */
 export function remoteTrackerRef(remote: string): string {
   return `refs/remotes/${remote}/grimoire/tracker`;
@@ -51,6 +53,12 @@ export const SESSIONS_DIR = 'sessions';
 export function attemptDir(issue: string, attempt: string): string {
   const [a, b] = shardOf(issue);
   return `${ATTEMPTS_DIR}/${a}/${b}/${issue}/${attempt}`;
+}
+
+/** Whether `file` is an attempt's `end.md`, the seal an attempt-ending write puts on it. */
+export function isAttemptEnd(file: string): boolean {
+  const parts = file.split('/');
+  return parts.length === 6 && parts[0] === ATTEMPTS_DIR && parts[5] === 'end.md';
 }
 
 /** `attempts/<a>/<b>/<issue-id>/<attempt-id>/activity/<entry>.md` */
