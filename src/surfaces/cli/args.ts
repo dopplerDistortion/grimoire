@@ -32,7 +32,12 @@ export function verbOf(op: Pick<OpDescriptor, 'name'>): string {
 }
 
 /** Positionals an op takes when its required scalar fields aren't the right ones. */
-const POSITIONALS: Readonly<Record<string, readonly string[]>> = { settings_get: ['key'] };
+const POSITIONALS: Readonly<Record<string, readonly string[]>> = {
+  settings_get: ['key'],
+  // A page by its slug; a trace goes by `--trace <handle>`.
+  quarantine: ['page', 'reason'],
+  unquarantine: ['page'],
+};
 
 /**
  * Human-only verbs whose input past their subject comes from the person's

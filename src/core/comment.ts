@@ -37,6 +37,7 @@ export const comment = define({
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',
+  issueWrite: true,
   input: s.object({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     body: s.string({ nonBlank: true, description: 'the comment, stored byte for byte' }),

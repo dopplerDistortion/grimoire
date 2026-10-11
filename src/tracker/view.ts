@@ -64,6 +64,7 @@ import { parseForward, parseTombstone, serializeForward, serializeTombstone, typ
 import { parseSetting, serializeSettings, settingLine, settingLines, type StoreSetting } from './settings';
 import { WikiDraftState, WikiReader, type WikiDraft, type WikiView } from './wiki';
 import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type QuarantineView } from './quarantine';
+import { ChoreRunDraftState, ChoreRunReader, type ChoreRunDraft, type ChoreRunView } from './chore-runs';
 
 /** What every read sees: the tracker at one tip. */
 export interface TrackerView {
@@ -96,6 +97,14 @@ export interface TrackerView {
   attempts(issue: string): readonly AttemptRecord[];
   /** The attempt with this handle, on any issue, or undefined. */
   attempt(handle: string): AttemptRecord | undefined;
+  /** Every attempt the tracker holds, open and ended, on live and deleted issues alike. */
+  allAttempts(): readonly AttemptRecord[];
+  /**
+   * One file of the attempt `handle`'s directory (its trace), by its path in
+   * there (`issue-at-start.md`, `activity/<entry>.md`), as stored; null when
+   * there is no such attempt or file.
+   */
+  traceFile(handle: string, file: string): Promise<Buffer | null>;
   /** The issue's fold conflict records, oldest first: what folds set aside until a human resolves it. */
   conflicts(id: string): readonly ConflictRecord[];
   /** The store settings (`settings.yml`) by key, unknown keys included; lines that aren't a setting are left out. */
@@ -120,6 +129,8 @@ export interface TrackerView {
   readonly wiki: WikiView;
   /** Quarantine marks and clears (spec §17, §18), read on first use. */
   readonly quarantine: QuarantineView;
+  /** The records of the chore runs that ended (spec §16), read on first use. */
+  readonly choreRuns: ChoreRunView;
 }
 
 /** A sha256 in hex: how ledger records and skill versions are named. */
@@ -206,6 +217,8 @@ export interface TrackerDraft extends TrackerView {
   readonly wiki: WikiDraft;
   /** Quarantine as this round changes it. */
   readonly quarantine: QuarantineDraft;
+  /** Chore-run records as this round adds them. */
+  readonly choreRuns: ChoreRunDraft;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
@@ -285,6 +298,7 @@ export class Snapshot implements TrackerView {
   private readonly attemptsById = new Map<string, AttemptRecord>();
   readonly wiki: WikiReader;
   readonly quarantine: QuarantineReader;
+  readonly choreRuns: ChoreRunReader;
 
   constructor(parts: SnapshotParts) {
     this.tip = parts.tip;
@@ -308,6 +322,7 @@ export class Snapshot implements TrackerView {
     for (const list of parts.attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
     this.wiki = new WikiReader(parts.source, parts.rootTree);
     this.quarantine = new QuarantineReader(() => this.ledgerFiles());
+    this.choreRuns = new ChoreRunReader(parts.source, parts.rootTree);
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -363,6 +378,15 @@ export class Snapshot implements TrackerView {
 
   attempt(handle: string): AttemptRecord | undefined {
     return this.attemptsById.get(handle);
+  }
+
+  allAttempts(): readonly AttemptRecord[] {
+    return [...this.attemptsById.values()];
+  }
+
+  async traceFile(handle: string, file: string): Promise<Buffer | null> {
+    const record = this.attemptsById.get(handle);
+    return record ? this.source.fileAt(this.rootTree, `${attemptDir(record.issue, handle)}/${file}`) : null;
   }
 
   conflicts(id: string): readonly ConflictRecord[] {
@@ -449,6 +473,7 @@ export class Draft implements TrackerDraft {
   private commentN = 0;
   readonly wiki: WikiDraftState;
   readonly quarantine: QuarantineDraftState;
+  readonly choreRuns: ChoreRunDraftState;
 
   constructor(
     private readonly base: Snapshot,
@@ -462,6 +487,7 @@ export class Draft implements TrackerDraft {
   ) {
     this.wiki = new WikiDraftState(base.wiki, now);
     this.quarantine = new QuarantineDraftState(base.quarantine, now);
+    this.choreRuns = new ChoreRunDraftState(base.choreRuns);
   }
 
   get tip(): string {
@@ -558,6 +584,14 @@ export class Draft implements TrackerDraft {
     if (opened) return this.attempts(opened.issue).find((a) => a.id === handle);
     const record = this.base.attempt(handle);
     return record ? this.withEdits(record) : undefined;
+  }
+
+  allAttempts(): readonly AttemptRecord[] {
+    return [...this.base.allAttempts().map((record) => this.withEdits(record)), ...[...this.opened.keys()].map((handle) => this.attempt(handle)!)];
+  }
+
+  traceFile(handle: string, file: string): Promise<Buffer | null> {
+    return this.base.traceFile(handle, file);
   }
 
   conflicts(id: string): readonly ConflictRecord[] {
@@ -795,6 +829,7 @@ export class Draft implements TrackerDraft {
     }
     for (const [file, edit] of this.wiki.fileEdits()) edits.set(file, edit);
     for (const [file, edit] of this.quarantine.fileEdits()) edits.set(file, edit);
+    for (const [file, edit] of this.choreRuns.fileEdits()) edits.set(file, edit);
     return edits;
   }
 }

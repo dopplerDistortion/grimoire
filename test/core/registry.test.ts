@@ -9,6 +9,9 @@ describe('the op registry', () => {
 
       expect(Object.keys(byName).sort()).toEqual([
         'assign',
+        'chore_abandon',
+        'chore_read',
+        'chore_start',
         'claim',
         'close',
         'comment',
@@ -39,6 +42,9 @@ describe('the op registry', () => {
       ]);
       // MCP lists exactly the agent tools of spec §8 (so far).
       expect(core.ops.filter((op) => op.mcp).map((op) => op.name).sort()).toEqual([
+        'chore_abandon',
+        'chore_read',
+        'chore_start',
         'claim',
         'close',
         'comment',

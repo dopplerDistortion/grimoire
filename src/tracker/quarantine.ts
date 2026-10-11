@@ -22,7 +22,7 @@ export interface QuarantineRecord {
   readonly id: string;
   /** The ledger record kind. */
   readonly kind: QuarantineAction;
-  /** What it marks or clears: `{page: <slug>}` (a trace's target comes with trace quarantine). */
+  /** What it marks or clears: `{page: <slug>}` or `{trace: <attempt handle>}`. */
   readonly target: Readonly<Record<string, string>>;
   /** A clear's lifted marks, sorted (empty for a mark). */
   readonly clears: readonly string[];

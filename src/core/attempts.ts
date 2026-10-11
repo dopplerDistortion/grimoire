@@ -102,6 +102,7 @@ export const claim = define({
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',
+  issueWrite: true,
   input: s.object({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     idempotency_key: s.optional(s.string(oneLine)),
@@ -470,6 +471,7 @@ export const close = define({
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',
+  issueWrite: true,
   input: s.object({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     reason: s.literal(['done', 'canceled']),
@@ -501,6 +503,7 @@ export const release = define({
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',
+  issueWrite: true,
   input: s.object({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     attempt: handleInput,

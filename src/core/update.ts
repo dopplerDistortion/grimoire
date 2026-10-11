@@ -75,6 +75,7 @@ export const update = define({
   kind: 'write',
   policy: 'agent',
   replay: 'none',
+  issueWrite: true,
   input: s.object({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     title: s.optional(s.string(oneLine)),
