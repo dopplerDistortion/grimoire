@@ -11,10 +11,15 @@
 // lock shows at no interface except as time, which the 40-writer acceptance
 // test (concurrency.test.ts) measures end to end. They watch process starts
 // through a pass-through spy on node:child_process, and only over the critical
-// section: from when the lock is let go to a write waiting for it until the
-// write returns. Later tests use the same spy to find the long-lived gits,
-// and to put a git that stops answering in place of one: a hung git must be
-// killed, and must never hold a write (or the fairness lock) forever.
+// section: from when a write waiting for the lock takes it until the write
+// returns. Later tests use the same spy to find the long-lived gits, and to
+// put a git that stops answering in place of one: a hung git must be killed,
+// and must never hold a write (or the fairness lock) forever.
+//
+// Those tests run against the clock, and a loaded machine starts and kills
+// processes many times slower than an idle one. So every stall, budget and
+// wait is scaled by how slow the machine is right now (`paced`), and readiness
+// is an event (a write asking for the fairness lock), never a quiet spell.
 import * as childProcess from 'node:child_process';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -24,12 +29,47 @@ import type { Checkout } from '#harness';
 import { ObjectReader } from '../../src/git/batch';
 import { packedRefsStamp, RefUpdater } from '../../src/git/refs';
 import { MachineLocalStore } from '../../src/machine-local';
-import { openTracker, type WriteSpec } from '../../src/tracker';
-import { commitToTracker, coreTest as test, fetchTracker, pushTracker, trackerTip, TRACKER_REF } from './support';
+import { isPidAlive, processStartTimes } from '../../src/machine-local/process-info';
+import { DEFAULT_BUDGET_MS, openTracker, type WriteSpec } from '../../src/tracker';
+import { FairnessLock } from '../../src/tracker/locks';
+import { commitToTracker, coreTest, fetchTracker, pushTracker, trackerTip, TRACKER_REF } from './support';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return { ...actual, spawn: vi.fn(actual.spawn), execFile: vi.fn(actual.execFile) };
+});
+
+/**
+ * How many times slower than an idle machine this one is right now at
+ * starting a git and hearing back from it (1 at least): the slowest of three
+ * real gits in `checkout`, against a third of a second, or
+ * GRIMOIRE_TEST_SLOWNESS when that is more. A stall must stay well above how
+ * long a real git takes, or a slow git is taken for a stuck one; and a kill,
+ * a process start or a lock's release takes longer on a loaded machine too.
+ */
+async function slownessOf(checkout: Checkout): Promise<number> {
+  let slowest = 0;
+  for (let i = 0; i < 3; i++) {
+    const started = performance.now();
+    await checkout.gitResult(['rev-parse', '--git-common-dir']);
+    slowest = Math.max(slowest, performance.now() - started);
+  }
+  return Math.max(1, slowest / 333, Number(process.env.GRIMOIRE_TEST_SLOWNESS) || 1);
+}
+
+/** The slowness the last test here ran at. */
+let lastSlowness = 1;
+
+/**
+ * `coreTest`, and `paced(ms)`: `ms` scaled by how slow the machine is when
+ * the test starts (see `slownessOf`), or by three quarters of what the last
+ * test ran at when that is more: load comes in bursts, and three gits can
+ * fall in a lull.
+ */
+const test = coreTest.extend('paced', async ({ world }) => {
+  const slowness = Math.max(await slownessOf(world.a), lastSlowness * 0.75);
+  lastSlowness = slowness;
+  return (ms: number) => Math.round(ms * slowness);
 });
 
 const starters = () => [vi.mocked(childProcess.spawn), vi.mocked(childProcess.execFile)];
@@ -45,12 +85,31 @@ function forgetStarts(): void {
   for (const fn of starters()) fn.mockClear();
 }
 
+const takeFairnessLock = FairnessLock.prototype.acquire;
+
+/**
+ * Watches the next write's turn at the fairness lock: `asked` resolves once
+ * the write asks for the lock (it is ready, and waits for it), and `onTaken`
+ * runs the moment the write has it.
+ */
+function nextTurnAtTheLock(onTaken: () => void = () => {}): { asked: Promise<void> } {
+  let ask!: () => void;
+  const asked = new Promise<void>((resolve) => (ask = resolve));
+  vi.spyOn(FairnessLock.prototype, 'acquire').mockImplementationOnce(async function (this: FairnessLock, ...args) {
+    ask();
+    const lock = await takeFairnessLock.apply(this, args);
+    onTaken();
+    return lock;
+  });
+  return { asked };
+}
+
 /**
  * Runs `write` while the fairness lock is held elsewhere: lets it get ready
- * (until no process has started for 300 ms), runs `meanwhile` (what the
- * lock's holder does while the write waits), then lets go of the lock.
- * Returns what the write returned, and the processes started from the release
- * on, which is inside the write's critical section.
+ * (until it asks for the lock), runs `meanwhile` (what the lock's holder does
+ * while the write waits), then lets go of the lock. Returns what the write
+ * returned, and the processes started from when it took the lock on: inside
+ * its critical section.
  */
 async function insideTheLock<T>(
   checkout: Checkout,
@@ -60,28 +119,27 @@ async function insideTheLock<T>(
   const machine = new MachineLocalStore(path.join(checkout.dir, '.git'));
   const held = await machine.locks.acquire('tracker-write');
   if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+  const { asked } = nextTurnAtTheLock(forgetStarts);
   const pending = write();
-  for (let seen = -1; seen !== started().length; ) {
-    seen = started().length;
-    await setTimeout(300);
-  }
+  await asked;
   await meanwhile?.();
-  forgetStarts();
   await held.lock.release();
   return { value: await pending, started: started() };
 }
 
-describe('the write path', () => {
+/** A write budget no test here spends: the writes that hold or wait for the fairness lock aren't timed. */
+const UNHURRIED = { writeBudgetMs: 150_000 };
+
+describe('the write path', { timeout: 180_000 }, () => {
   test('a warm core starts no process while it holds the fairness lock: refs are resolved and moved through long-lived git', async ({
     world,
     grimoire,
   }) => {
-    expect(await grimoire.core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
+    const core = grimoire.makeCore(UNHURRIED);
+    expect(await core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
 
     for (let i = 0; i < 2; i++) {
-      const write = await insideTheLock(world.a, () =>
-        grimoire.core.call('create', { title: `Write ${i}` }, grimoire.ctx),
-      );
+      const write = await insideTheLock(world.a, () => core.call('create', { title: `Write ${i}` }, grimoire.ctx));
 
       expect(write.value).toMatchObject({ ok: true });
       expect(write.started).toEqual([]);
@@ -100,13 +158,14 @@ describe('the write path', () => {
     await pushTracker(world.a);
     await fetchTracker(world.a);
     await commitToTracker(world.a, { 'notes/another-writer.txt': 'x\n' }, 'another writer');
-    expect(await grimoire.core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
+    const core = grimoire.makeCore(UNHURRIED);
+    expect(await core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
 
-    const own = await insideTheLock(world.a, () => grimoire.core.call('create', { title: 'Mine' }, grimoire.ctx));
+    const own = await insideTheLock(world.a, () => core.call('create', { title: 'Mine' }, grimoire.ctx));
     // Commits other writers make while this one waits for the lock are walked too.
     const after = await insideTheLock(
       world.a,
-      () => grimoire.core.call('create', { title: 'After others' }, grimoire.ctx),
+      () => core.call('create', { title: 'After others' }, grimoire.ctx),
       async () => {
         for (let i = 0; i < 3; i++) {
           await commitToTracker(world.a, { 'notes/another-writer.txt': `${i}\n` }, 'another writer');
@@ -132,12 +191,13 @@ describe('the write path', () => {
     await world.b.git(['push', '--quiet', 'origin', 'main']);
     await world.a.git(['fetch', '--quiet', '--depth', '1', 'origin', 'main']);
     expect(await world.a.git(['rev-parse', '--is-shallow-repository'])).toBe('true');
-    expect(await grimoire.core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
+    const core = grimoire.makeCore(UNHURRIED);
+    expect(await core.call('create', { title: 'Warm-up' }, grimoire.ctx)).toMatchObject({ ok: true });
 
-    const own = await insideTheLock(world.a, () => grimoire.core.call('create', { title: 'Mine' }, grimoire.ctx));
+    const own = await insideTheLock(world.a, () => core.call('create', { title: 'Mine' }, grimoire.ctx));
     const after = await insideTheLock(
       world.a,
-      () => grimoire.core.call('create', { title: 'After others' }, grimoire.ctx),
+      () => core.call('create', { title: 'After others' }, grimoire.ctx),
       async () => {
         for (let i = 0; i < 3; i++) {
           await commitToTracker(world.a, { 'notes/another-writer.txt': `${i}\n` }, 'another writer');
@@ -156,7 +216,7 @@ describe('the write path', () => {
     world,
     grimoire,
   }) => {
-    const core = grimoire.makeCore();
+    const core = grimoire.makeCore(UNHURRIED);
 
     const write = await insideTheLock(world.a, () => core.call('create', { title: 'Cold' }, grimoire.ctx));
 
@@ -167,12 +227,13 @@ describe('the write path', () => {
   test('a write builds on a tip another writer moved, even when packed-refs was rewritten within the same second', async ({
     world,
     grimoire,
+    paced,
   }) => {
     // A long-lived git caches packed-refs and trusts its stat, which can miss a
     // same-size rewrite inside one timestamp tick: the write would build on a
     // stale tip and lose every compare-and-set until BUSY. Each round leaves the
     // tick only a few git commands to pass in, so most rounds stay inside it.
-    const core = grimoire.makeCore({ writeBudgetMs: 3_000 });
+    const core = grimoire.makeCore({ writeBudgetMs: paced(3_000) });
     expect(await core.call('create', { title: 'First' }, grimoire.ctx)).toMatchObject({ ok: true });
     for (let round = 0; round < 3; round++) {
       await world.a.git(['pack-refs', '--all']);
@@ -227,7 +288,7 @@ function updaterOver(checkout: Checkout): { updater: RefUpdater; afterNextLook(s
   return { updater, afterNextLook: (step) => void (interleave = step) };
 }
 
-describe('the ref updater', () => {
+describe('the ref updater', { timeout: 180_000 }, () => {
   // The compare-and-set that publishes a write. Its git is long-lived, and a
   // long-lived git trusts its cached packed-refs while the file's stat looks
   // unchanged to it: on Windows, while the file keeps its size within one
@@ -338,10 +399,11 @@ function keyWrite(key: string): WriteSpec {
   };
 }
 
-describe('the store after close', () => {
+describe('the store after close', { timeout: 180_000 }, () => {
   test('a write in flight when the store closed, and a read after it, leave no git running', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
     const from = vi.mocked(childProcess.spawn).mock.calls.length;
@@ -363,11 +425,11 @@ describe('the store after close', () => {
 
     expect((await write).commit).toBe(await trackerTip(world.a));
     await store.read();
-    await vi.waitFor(() => expect(runningGits(from)).toEqual([]), { timeout: 5_000 });
+    await vi.waitFor(() => expect(runningGits(from)).toEqual([]), { timeout: paced(5_000) });
   });
 });
 
-describe('the store after its long-lived gits died', () => {
+describe('the store after its long-lived gits died', { timeout: 180_000 }, () => {
   test.for([
     ['the ref updater', /update-ref --stdin/],
     ['the object reader', /cat-file --batch/],
@@ -412,14 +474,14 @@ const gitArgs = process.argv.slice(at + 1);
 
 /**
  * A git that never answers: it starts a child of its own, as git for
- * Windows' launcher does, appends both pids to the file it is given, and
- * both sleep.
+ * Windows' launcher does, appends both to the file it is given (see
+ * `ranIn`), and both sleep.
  */
 const WEDGED_GIT = `${ARGS}
 const { spawn } = require('node:child_process');
 const { appendFileSync } = require('node:fs');
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore', windowsHide: true });
-appendFileSync(own[0], process.pid + '\\n' + child.pid + '\\n');
+appendFileSync(own[0], process.pid + ' ' + Date.now() + '\\n' + child.pid + ' ' + Date.now() + '\\n');
 setInterval(() => {}, 1 << 30);
 `;
 
@@ -467,7 +529,7 @@ git.stdout.on('data', (chunk) => {
 const KEEPER = `
 const { spawn } = require('node:child_process');
 const keeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: ['ignore', 'inherit', 'ignore'], detached: true, windowsHide: true });
-require('node:fs').appendFileSync(process.argv[1], keeper.pid + '\\n');
+require('node:fs').appendFileSync(process.argv[1], keeper.pid + ' ' + Date.now() + '\\n');
 keeper.unref();
 `;
 const UNKILLABLE_AFTER_COMMIT = `${SILENT_AFTER_COMMIT}
@@ -477,6 +539,18 @@ spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER)}, own[0]], { stdio: ['ig
 /** WEDGED_GIT, and its exit is never seen: a keeper holds its stdout open (all pids go to the file given). */
 const WEDGED_SLOW_TO_EXIT = `${WEDGED_GIT}
 spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER)}, own[0]], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
+`;
+
+/**
+ * SILENT_AFTER_COMMIT, and once told to commit, a keeper holds the relay's
+ * stdout open for 2.5 s (its pid goes to the file given): killed however
+ * soon, its exit is seen only then, as a kill on a loaded machine can be.
+ */
+const SLOW_TO_EXIT_ONCE_TOLD_TO_COMMIT = `${SILENT_AFTER_COMMIT}
+lines(process.stdin, (line) => {
+  if (line.trim() !== 'commit') return;
+  spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER.replace('setInterval(() => {}, 1 << 30)', 'setTimeout(() => {}, 2500)'))}, own[0]], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
+});
 `;
 
 /**
@@ -535,29 +609,77 @@ function replaceGits(...replacements: Replacement[]): { restore(): void } {
   return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn) };
 }
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
+/** A process a stand-in started (or was): its pid, and a time it was known to run. */
+interface Ran {
+  readonly pid: number;
+  readonly at: number;
+}
+
+/** The processes the stand-ins wrote to `file`, as `<pid> <time it ran>` lines, in order. */
+async function ranIn(file: string): Promise<Ran[]> {
+  const lines = (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean);
+  return lines.map((line) => {
+    const [pid = NaN, at = NaN] = line.split(' ').map(Number);
+    return { pid, at };
+  });
+}
+
+/**
+ * Those of `processes` that still run. A pid outlives its process: on a
+ * busy Windows machine another process takes it within moments. So a live
+ * pid counts only while the process holding it started no later than when
+ * the stand-in's own was known to run (the OS is asked: a process start).
+ */
+async function stillRunning(processes: readonly Ran[]): Promise<Ran[]> {
+  const live = processes.filter(({ pid }) => isPidAlive(pid));
+  if (live.length === 0) return [];
+  const started = await processStartTimes(live.map(({ pid }) => pid));
+  // No start time from the OS: gone by now, or it can't be told; then the pid decides.
+  return live.filter(({ pid, at }) => (started.has(pid) ? started.get(pid)! <= at : isPidAlive(pid)));
+}
+
+/**
+ * Waits up to `timeoutMs` until none of `processes` still runs. Their pids
+ * are looked at often, and whose process holds a pid is asked of the OS only
+ * once it has looked alive for a second, and before giving up.
+ */
+async function expectGone(processes: readonly Ran[], timeoutMs: number): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  let left = [...processes];
+  let askedAt = Date.now();
+  for (;;) {
+    left = left.filter(({ pid }) => isPidAlive(pid));
+    if (left.length > 0 && (Date.now() - askedAt >= 1_000 || Date.now() >= until)) {
+      left = await stillRunning(left);
+      askedAt = Date.now();
+    }
+    if (left.length === 0 || Date.now() >= until) break;
+    await setTimeout(100);
+  }
+  expect(left.map(({ pid }) => pid)).toEqual([]);
+}
+
+/** Kills every process in `file` that still runs (never a later one that took its pid). */
+async function killPidsIn(file: string): Promise<void> {
+  for (const { pid } of await stillRunning(await ranIn(file))) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Gone since it was asked about.
+    }
   }
 }
 
-/** The pids the stand-ins wrote to `file`. */
-async function pidsIn(file: string): Promise<number[]> {
-  return (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(Number);
-}
-
-/** Kills every process whose pid is in `file` and still runs. */
-async function killPidsIn(file: string): Promise<void> {
-  for (const pid of (await pidsIn(file)).filter(alive)) process.kill(pid);
-}
-
-describe('a local git that stops answering', () => {
-  // Every git the store runs here gets STALL_MS: generous for a real one on a busy machine.
+describe('a local git that stops answering', { timeout: 180_000 }, () => {
+  // All at the machine's pace (`paced`): every git the store runs here gets STALL_MS, generous for a real
+  // one, and a write gets BUDGET_MS. Its BUSY may come LATE_MS after the budget (what comes before it, a
+  // process start, a kill or the fairness lock's release, takes time too), but never a stall time late.
+  // Killed processes are gone within GONE_MS. A write that must land after its git got stuck gets the
+  // product's own budget: what that costs (a stall time, a kill, a new git) is no part of what it proves.
   const BUDGET_MS = 3_000;
   const STALL_MS = 1_000;
+  const LATE_MS = 500;
+  const GONE_MS = 5_000;
 
   test.for([
     ['the object reader', /cat-file --batch/],
@@ -565,24 +687,25 @@ describe('a local git that stops answering', () => {
     ['a one-shot git', /config -z --get-regexp/],
   ] as const)(
     '%s: it is killed with all it started, the write gives BUSY within its budget, and the write later lands exactly once',
-    async ([, command], { world, grimoire }) => {
+    async ([, command], { world, grimoire, paced }) => {
       void grimoire; // initializes the tracker
+      const budgetMs = paced(BUDGET_MS);
       const before = (await trackerTip(world.a))!;
       const pidFile = path.join(world.root, 'wedged-pids');
       const wedged = replaceGits({ command, script: WEDGED_GIT, args: [pidFile] });
-      const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+      const store = await openTracker(world.a.dir, { budgetMs, gitStallMs: paced(STALL_MS) });
       try {
         const started = Date.now();
         const failure: unknown = await store.transact(keyWrite('wedged'), () => ({ result: null })).catch((error: unknown) => error);
         const took = Date.now() - started;
 
         expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
-        expect(took).toBeLessThan(BUDGET_MS + 500);
+        expect(took).toBeLessThan(budgetMs + paced(LATE_MS));
         expect(await trackerTip(world.a)).toBe(before);
         // Each wedged git and the child it started (on POSIX only the git itself is killed: its tree is its own).
-        const killed = (await pidsIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
+        const killed = (await ranIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
         expect(killed.length).toBeGreaterThan(0);
-        await vi.waitFor(() => expect(killed.filter(alive)).toEqual([]), { timeout: 5_000 });
+        await expectGone(killed, paced(GONE_MS));
 
         wedged.restore();
         expect(await store.transact(keyWrite('wedged'), () => ({ result: null }))).toMatchObject({ replayed: false });
@@ -600,35 +723,33 @@ describe('a local git that stops answering', () => {
     ['less than a second', 400],
   ] as const)(
     'a git that stops answering late in the budget, once the write got the fairness lock with %s left: BUSY still comes within the budget',
-    async ([, left], { world, grimoire }) => {
+    async ([, left], { world, grimoire, paced }) => {
       void grimoire; // initializes the tracker
-      const stallMs = 2_000;
+      const budgetMs = paced(BUDGET_MS);
       const pidFile = path.join(world.root, 'wedged-pids');
-      const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: stallMs });
+      const store = await openTracker(world.a.dir, { budgetMs, gitStallMs: paced(2_000) });
       const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
       const held = await machine.locks.acquire('tracker-write');
       if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
       let wedged = { restore() {} };
       try {
+        const { asked } = nextTurnAtTheLock();
         const startedAt = Date.now();
         const write = store.transact(keyWrite('late'), () => ({ result: null })).catch((error: unknown) => error);
-        // Once the write is ready and waits for the lock (no process has started for 300 ms), the clone's
-        // config changes, so its round reads it again, with a git that hangs. Only letting go of the lock
-        // is left for the last moment, so a slow machine doesn't push the round past the budget.
-        for (let seen = -1; seen !== started().length; ) {
-          seen = started().length;
-          await setTimeout(300);
-        }
+        // Once the write is ready and waits for the lock, the clone's config changes, so its round reads
+        // it again, with a git that hangs. Only letting go of the lock is left for the last moment, so a
+        // slow machine doesn't push the round past the budget.
+        await asked;
         wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
         await world.a.git(['config', 'grimoire.unrelated', 'changed']);
-        await setTimeout(Math.max(0, startedAt + BUDGET_MS - left - Date.now()));
+        await setTimeout(Math.max(0, startedAt + budgetMs - paced(left) - Date.now()));
         await held.lock.release();
 
         const failure = await write;
         const took = Date.now() - startedAt;
 
         expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
-        expect(took).toBeLessThan(BUDGET_MS + 500);
+        expect(took).toBeLessThan(budgetMs + paced(LATE_MS));
       } finally {
         wedged.restore();
         await store.close();
@@ -637,30 +758,28 @@ describe('a local git that stops answering', () => {
     },
   );
 
-  test('a git whose kill is slow to start, as on a loaded machine: BUSY still comes within the budget, and the git is killed', async ({
+  test('a git that stops answering for the whole budget before the write could take its turn: BUSY names it, and no git starts past the deadline', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
+    const budgetMs = paced(BUDGET_MS);
     const pidFile = path.join(world.root, 'wedged-pids');
-    const wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
-    // Starting a process blocks the thread that starts it; on a loaded Windows machine, for hundreds of ms.
-    const spawnGit = vi.mocked(childProcess.spawn).getMockImplementation()!;
-    vi.mocked(childProcess.spawn).mockImplementation(((name: string, ...rest: unknown[]) => {
-      if (name === 'taskkill') for (const until = Date.now() + 800; Date.now() < until; );
-      return (spawnGit as (...args: unknown[]) => childProcess.ChildProcess)(name, ...rest);
-    }) as unknown as typeof childProcess.spawn);
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    // The object reader hangs and would get longer than the budget: the write's first read, before it queues for the
+    // fairness lock, uses the budget up. Its round would get no time for any git, and would only start new ones.
+    const wedged = replaceGits({ command: /cat-file --batch/, script: WEDGED_GIT, args: [pidFile] });
+    const store = await openTracker(world.a.dir, { budgetMs, gitStallMs: 2 * budgetMs });
     try {
-      const started = Date.now();
-      const failure: unknown = await store.transact(keyWrite('slow kill'), () => ({ result: null })).catch((error: unknown) => error);
-      const took = Date.now() - started;
+      forgetStarts();
+      const startedAt = Date.now();
+      const failure: unknown = await store.transact(keyWrite('used up'), () => ({ result: null })).catch((error: unknown) => error);
+      const took = Date.now() - startedAt;
 
       expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
-      expect(took).toBeLessThan(BUDGET_MS + 500);
-      const killed = (await pidsIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
-      expect(killed.length).toBeGreaterThan(0);
-      await vi.waitFor(() => expect(killed.filter(alive)).toEqual([]), { timeout: 5_000 });
+      expect((failure as Error).message).not.toMatch(/ for 0\.0 s/);
+      expect(took).toBeLessThan(budgetMs + paced(LATE_MS));
+      expect(started().filter((line) => / cat-file --batch$/.test(line))).toHaveLength(1);
     } finally {
       wedged.restore();
       await store.close();
@@ -668,19 +787,58 @@ describe('a local git that stops answering', () => {
     }
   });
 
-  test('a ref updater that stops answering and is slow to exit once killed: BUSY still comes within the budget', async ({ world, grimoire }) => {
+  test('a git whose kill is slow to start, as on a loaded machine: BUSY still comes within the budget, and the git is killed', async ({
+    world,
+    grimoire,
+    paced,
+  }) => {
     void grimoire; // initializes the tracker
+    const budgetMs = paced(BUDGET_MS);
+    const pidFile = path.join(world.root, 'wedged-pids');
+    const wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
+    // Starting a process blocks the thread that starts it; on a loaded Windows machine, for hundreds of ms.
+    const blockedMs = paced(800);
+    const spawnGit = vi.mocked(childProcess.spawn).getMockImplementation()!;
+    vi.mocked(childProcess.spawn).mockImplementation(((name: string, ...rest: unknown[]) => {
+      if (name === 'taskkill') for (const until = Date.now() + blockedMs; Date.now() < until; );
+      return (spawnGit as (...args: unknown[]) => childProcess.ChildProcess)(name, ...rest);
+    }) as unknown as typeof childProcess.spawn);
+    const store = await openTracker(world.a.dir, { budgetMs, gitStallMs: paced(STALL_MS) });
+    try {
+      const started = Date.now();
+      const failure: unknown = await store.transact(keyWrite('slow kill'), () => ({ result: null })).catch((error: unknown) => error);
+      const took = Date.now() - started;
+
+      expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
+      expect(took).toBeLessThan(budgetMs + paced(LATE_MS));
+      const killed = (await ranIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
+      expect(killed.length).toBeGreaterThan(0);
+      await expectGone(killed, paced(GONE_MS));
+    } finally {
+      wedged.restore();
+      await store.close();
+      await killPidsIn(pidFile);
+    }
+  });
+
+  test('a ref updater that stops answering and is slow to exit once killed: BUSY still comes within the budget', async ({
+    world,
+    grimoire,
+    paced,
+  }) => {
+    void grimoire; // initializes the tracker
+    const budgetMs = paced(BUDGET_MS);
     const before = (await trackerTip(world.a))!;
     const pidFile = path.join(world.root, 'wedged-pids');
     const wedged = replaceGits({ command: /update-ref --stdin/, script: WEDGED_SLOW_TO_EXIT, args: [pidFile] });
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { budgetMs, gitStallMs: paced(STALL_MS) });
     try {
       const started = Date.now();
       const failure: unknown = await store.transact(keyWrite('slow exit'), () => ({ result: null })).catch((error: unknown) => error);
       const took = Date.now() - started;
 
       expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
-      expect(took).toBeLessThan(BUDGET_MS + 500);
+      expect(took).toBeLessThan(budgetMs + paced(LATE_MS));
       expect(await trackerTip(world.a)).toBe(before);
     } finally {
       wedged.restore();
@@ -689,11 +847,15 @@ describe('a local git that stops answering', () => {
     }
   });
 
-  test('a ref updater that stops answering once told to commit: the write lands exactly once, and says so', async ({ world, grimoire }) => {
+  test('a ref updater that stops answering once told to commit: the write lands exactly once, and says so', async ({
+    world,
+    grimoire,
+    paced,
+  }) => {
     void grimoire; // initializes the tracker
     const before = (await trackerTip(world.a))!;
     const silent = replaceGits({ command: /update-ref --stdin/, script: SILENT_AFTER_COMMIT });
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { budgetMs: paced(DEFAULT_BUDGET_MS), gitStallMs: paced(STALL_MS) });
     try {
       const write = await store.transact(keyWrite('silent'), () => ({ result: null }));
 
@@ -705,12 +867,40 @@ describe('a local git that stops answering', () => {
     }
   });
 
+  test('a ref updater told to commit whose kill takes seconds to be seen: whether the ref moved is still found out', async ({
+    world,
+    grimoire,
+    paced,
+  }) => {
+    void grimoire; // initializes the tracker
+    const start = (await trackerTip(world.a))!;
+    const next = await world.a.git(['commit-tree', `${start}^{tree}`, '-p', start, '-m', 'next']);
+    const pidFile = path.join(world.root, 'keeper-pids');
+    const silent = replaceGits({ command: /update-ref --stdin/, script: SLOW_TO_EXIT_ONCE_TOLD_TO_COMMIT, args: [pidFile], times: 1 });
+    // Its answer to commit gets a second, as near a write's deadline (STALL_FLOOR_MS); the git that then finds out
+    // whether the ref moved gets the machine's pace.
+    let settles = 0;
+    const updater = new RefUpdater({ root: world.a.dir, commonDir: path.join(world.a.dir, '.git') }, 'grimoire: test', {
+      stallMs: paced(STALL_MS),
+      settleMs: () => (settles++ === 0 ? 1_000 : paced(STALL_MS)),
+    });
+    try {
+      expect(await updater.update(TRACKER_REF, next, start)).toEqual({ moved: true });
+      expect(await trackerTip(world.a)).toBe(next);
+    } finally {
+      silent.restore();
+      await updater.close();
+      await killPidsIn(pidFile);
+    }
+  });
+
   test('a tracker created by a git that stops answering once it moved the ref: it is created exactly once, and says so', async ({
     world,
+    paced,
   }) => {
     // Clone b has no tracker yet. A one-shot git that wrote the ref and then hangs, or an updater that hangs once told to commit.
     const silent = replaceGits({ command: /update-ref/, script: SILENT_AFTER_COMMIT });
-    const store = await openTracker(world.b.dir, { gitStallMs: STALL_MS });
+    const store = await openTracker(world.b.dir, { gitStallMs: paced(STALL_MS) });
     try {
       const created = await store.initialize({ author: { name: 'B', email: 'b@example.com' }, actor: { kind: 'human', client: 'cli', nonce: 'init' } });
 
@@ -725,12 +915,13 @@ describe('a local git that stops answering', () => {
   test('a push that landed while the git recording it in the remote-tracking ref stops answering: the sync says pushed, not BUSY', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
     const local = (await trackerTip(world.a))!;
     const tracking = 'refs/remotes/origin/grimoire/tracker';
     const silent = replaceGits({ command: /update-ref (refs\/remotes\/|--stdin --create-reflog -m grimoire: sync)/, script: SILENT_AFTER_COMMIT });
-    const store = await openTracker(world.a.dir, { gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { gitStallMs: paced(STALL_MS) });
     try {
       const outcome = await store.sync({ author: { name: 'A', email: 'a@example.com' }, actor: { kind: 'human', nonce: 'n' }, timeoutMs: 30_000 });
 
@@ -748,11 +939,11 @@ describe('a local git that stops answering', () => {
     ['before it could say it prepared', 'withhold'],
   ] as const)(
     'a ref updater killed holding the ref’s lock %s: the lock goes with it, and the write lands exactly once',
-    async ([, mode], { world, grimoire }) => {
+    async ([, mode], { world, grimoire, paced }) => {
       void grimoire; // initializes the tracker
       const before = (await trackerTip(world.a))!;
       const dies = replaceGits({ command: /update-ref --stdin/, script: DIES_HOLDING_THE_LOCK, args: [mode], times: 1 });
-      const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+      const store = await openTracker(world.a.dir, { budgetMs: paced(DEFAULT_BUDGET_MS), gitStallMs: paced(STALL_MS) });
       try {
         const write = await store.transact(keyWrite('dies'), () => ({ result: null }));
 
@@ -769,12 +960,13 @@ describe('a local git that stops answering', () => {
   test('a ref updater killed holding the ref’s lock whose exit takes seconds: the lock still goes once it exits, and a later write lands', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
     const before = (await trackerTip(world.a))!;
     const pidFile = path.join(world.root, 'keeper-pids');
     const dies = replaceGits({ command: /update-ref --stdin/, script: DIES_HOLDING_THE_LOCK_SLOW_TO_EXIT, args: ['withhold', pidFile], times: 1 });
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { budgetMs: paced(BUDGET_MS), gitStallMs: paced(STALL_MS) });
     try {
       // BUSY while its exit is awaited, or landed if it came in time; then the same write lands, or replays.
       await store.transact(keyWrite('slow death'), () => ({ result: null })).catch((error: unknown) => {
@@ -792,36 +984,38 @@ describe('a local git that stops answering', () => {
     }
   });
 
-  test('a git that stops answering with under a second of the budget left after it: the write still lands on a new git', async ({
+  test('a git that stops answering with less than a stall time of the budget left after it: the write still lands on a new git', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
+    // The stuck git gets a stall time, after which three quarters of one is left; the time before is the write's to get ready in.
+    const [stallMs, leftMs] = [paced(3_000), paced(2_250)];
+    const budgetMs = paced(5_000) + stallMs + leftMs;
     const before = (await trackerTip(world.a))!;
     const pidFile = path.join(world.root, 'wedged-pids');
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { budgetMs, gitStallMs: stallMs });
     const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
     const held = await machine.locks.acquire('tracker-write');
     if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
     let wedged = { restore() {} };
     try {
+      const { asked } = nextTurnAtTheLock();
       const startedAt = Date.now();
       const write = store.transact(keyWrite('late retry'), () => ({ result: null }));
-      // Once the write waits for the lock (no process has started for 300 ms), the clone's config
-      // changes, so its round reads it again, with a git that hangs; the next one answers.
-      for (let seen = -1; seen !== started().length; ) {
-        seen = started().length;
-        await setTimeout(300);
-      }
+      // Once the write waits for the lock, the clone's config changes, so its round reads it again,
+      // with a git that hangs; the next one answers.
+      await asked;
       wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile], times: 1 });
       await world.a.git(['config', 'grimoire.unrelated', 'changed']);
-      // The round starts once the lock is let go; its git is killed a stall time later, with under a second left.
-      await setTimeout(Math.max(0, startedAt + BUDGET_MS - STALL_MS - 1_000 - Date.now()));
+      // The round starts once the lock is let go; its git is killed a stall time later, with less than a stall time left.
+      await setTimeout(Math.max(0, startedAt + budgetMs - stallMs - leftMs - Date.now()));
       await held.lock.release();
 
       expect((await write).commit).toBe(await trackerTip(world.a));
       expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
-      expect(await pidsIn(pidFile)).not.toEqual([]);
+      expect(await ranIn(pidFile)).not.toEqual([]);
     } finally {
       wedged.restore();
       await held.lock.release();
@@ -833,12 +1027,13 @@ describe('a local git that stops answering', () => {
   test('a ref updater told to commit that outlives being killed: the write fails without promising the ref did not move', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
     const before = (await trackerTip(world.a))!;
     const pidFile = path.join(world.root, 'keeper-pids');
     const unkillable = replaceGits({ command: /update-ref --stdin/, script: UNKILLABLE_AFTER_COMMIT, args: [pidFile], times: 1 });
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { budgetMs: paced(BUDGET_MS), gitStallMs: paced(STALL_MS) });
     try {
       const failure: unknown = await store.transact(keyWrite('unkillable'), () => ({ result: null })).catch((error: unknown) => error);
 
@@ -859,6 +1054,7 @@ describe('a local git that stops answering', () => {
   test('when the git that would tell whether the ref moved stops answering too: the write fails without promising either way', async ({
     world,
     grimoire,
+    paced,
   }) => {
     void grimoire; // initializes the tracker
     const pidFile = path.join(world.root, 'wedged-pids');
@@ -866,7 +1062,7 @@ describe('a local git that stops answering', () => {
       { command: /update-ref --stdin/, script: SILENT_AFTER_COMMIT },
       { command: /for-each-ref --contains/, script: WEDGED_GIT, args: [pidFile] },
     );
-    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { budgetMs: paced(BUDGET_MS), gitStallMs: paced(STALL_MS) });
     try {
       const failure: unknown = await store.transact(keyWrite('untold'), () => ({ result: null })).catch((error: unknown) => error);
 
@@ -880,14 +1076,14 @@ describe('a local git that stops answering', () => {
     }
   });
 
-  test('an object reader that stops answering mid-walk ends the read: no other git decides in its place', async ({ world, grimoire }) => {
+  test('an object reader that stops answering mid-walk ends the read: no other git decides in its place', async ({ world, grimoire, paced }) => {
     // config.yml names the tracker root, so a read walks back from the tip to it, reading commits.
     await mkdir(path.join(world.a.dir, '.grimoire'), { recursive: true });
     const root = await world.a.git(['rev-list', '--max-parents=0', TRACKER_REF]);
     await writeFile(path.join(world.a.dir, '.grimoire', 'config.yml'), `install_format: 1\ntracker_root: "${root}"\n`);
     for (const title of ['One', 'Two']) expect(await grimoire.core.call('create', { title }, grimoire.ctx)).toMatchObject({ ok: true });
     const stops = replaceGits({ command: /cat-file --batch/, script: ANSWERS_ONLY_REFS, times: 1 });
-    const store = await openTracker(world.a.dir, { gitStallMs: STALL_MS });
+    const store = await openTracker(world.a.dir, { gitStallMs: paced(STALL_MS) });
     try {
       forgetStarts();
       const failure: unknown = await store.read().catch((error: unknown) => error);
@@ -902,12 +1098,12 @@ describe('a local git that stops answering', () => {
     }
   });
 
-  test('a git that stops answering while the store finds its repository: BUSY, not NO_REPO', async ({ world, grimoire }) => {
+  test('a git that stops answering while the store finds its repository: BUSY, not NO_REPO', async ({ world, grimoire, paced }) => {
     void grimoire; // initializes the tracker
     const pidFile = path.join(world.root, 'wedged-pids');
     const wedged = replaceGits({ command: /rev-parse --path-format/, script: WEDGED_GIT, args: [pidFile] });
     try {
-      const failure: unknown = await openTracker(world.a.dir, { gitStallMs: STALL_MS }).catch((error: unknown) => error);
+      const failure: unknown = await openTracker(world.a.dir, { gitStallMs: paced(STALL_MS) }).catch((error: unknown) => error);
 
       expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
     } finally {
@@ -919,25 +1115,27 @@ describe('a local git that stops answering', () => {
   test.for([
     ['an object reader', /cat-file --batch/],
     ['a ref updater', /update-ref --stdin/],
-  ] as const)('closing %s whose idle git is stuck kills it within the stall time', async ([what, command], { world, grimoire }) => {
+  ] as const)('closing %s whose idle git is stuck kills it within the stall time', async ([what, command], { world, grimoire, paced }) => {
     void grimoire; // initializes the tracker
+    const stallMs = paced(STALL_MS);
     const pidFile = path.join(world.root, 'wedged-pids');
     const wedged = replaceGits({ command, script: WEDGED_GIT, args: [pidFile] });
     const location = { root: world.a.dir, commonDir: path.join(world.a.dir, '.git') };
     const git =
       what === 'an object reader'
-        ? new ObjectReader(location.root, STALL_MS)
-        : new RefUpdater(location, 'grimoire: test', { stallMs: STALL_MS });
+        ? new ObjectReader(location.root, stallMs)
+        : new RefUpdater(location, 'grimoire: test', { stallMs });
     try {
       await git.warm();
-      await vi.waitFor(async () => expect(await pidsIn(pidFile)).toHaveLength(2), { timeout: 5_000 });
+      await vi.waitFor(async () => expect(await ranIn(pidFile)).toHaveLength(2), { timeout: paced(GONE_MS) });
       const started = Date.now();
 
       await git.close();
 
-      expect(Date.now() - started).toBeLessThan(STALL_MS + 1_000);
-      const killed = (await pidsIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
-      await vi.waitFor(() => expect(killed.filter(alive)).toEqual([]), { timeout: 5_000 });
+      // Killed at the stall time; what is left is how long the kill takes to be seen.
+      expect(Date.now() - started).toBeLessThan(stallMs + paced(1_000));
+      const killed = (await ranIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
+      await expectGone(killed, paced(GONE_MS));
     } finally {
       wedged.restore();
       await killPidsIn(pidFile);

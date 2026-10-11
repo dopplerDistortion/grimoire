@@ -238,6 +238,8 @@ class GitTrackerStore implements TrackerStore {
   private readonly stallMs: number;
   /** The deadline of the write running now (writes in a store run one at a time), or null. */
   private writeDeadline: number | null = null;
+  /** The last git that stopped answering in the write running now, before its rounds (in its prefetch), or null. */
+  private writeStall: GitStalledError | null = null;
   /** Moves the tracker ref for writes, through one long-lived git. */
   private readonly updater: RefUpdater;
   private remoteConfig: { stamp: string; value: RemoteConfig } | null = null;
@@ -318,6 +320,7 @@ class GitTrackerStore implements TrackerStore {
         }
       } finally {
         this.writeDeadline = null;
+        this.writeStall = null;
       }
     });
     if (!turn) throw busy('other writes in this process held the tracker for the whole write budget');
@@ -337,8 +340,10 @@ class GitTrackerStore implements TrackerStore {
       const tips = await this.resolveTips();
       await this.isShallow(tips);
       await this.snapshotOf(tips);
-    } catch {
-      // The round resolves and loads again, and reports what went wrong.
+    } catch (error) {
+      // The round resolves and loads again, and reports what went wrong; but once a stuck git has used up
+      // the budget, no round starts, and the BUSY names that git.
+      if (error instanceof GitStalledError) this.writeStall = error;
     }
     await warming;
   }
@@ -370,7 +375,13 @@ class GitTrackerStore implements TrackerStore {
     deadline: number,
     options: { foldOnly?: boolean },
   ): Promise<WriteResult<R>> {
+    // The last git that stopped answering in this write, if one did.
+    let stalled = this.writeStall;
     for (;;) {
+      // Once a git got stuck and the budget is spent, a new round gets no time for any git: it could only
+      // start new ones in place of the killed one (on a loaded machine, each start holds up the BUSY) and
+      // kill them at once. BUSY now, naming the stuck git.
+      if (stalled && Date.now() >= deadline) throw stalled;
       try {
         const written = await this.round(spec, body, options);
         if (written) return written;
@@ -379,6 +390,7 @@ class GitTrackerStore implements TrackerStore {
         // The stuck git was killed before the ref could move: try again on a new one while the budget lasts
         // (its gits get only what is left of it).
         if (!(error instanceof GitStalledError) || Date.now() >= deadline) throw error;
+        stalled = error;
       }
       await sleep(5 + Math.random() * 20);
     }
