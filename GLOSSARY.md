@@ -15,7 +15,7 @@ The `.grimoire/` directory at the root of a host repo's checkout, holding grimoi
 _Avoid_: Data dir, grimoire folder, store
 
 **Pinned version**:
-The exact grimoire release a host repo is installed at, committed in its dotfolder; every grimoire process in that repo runs exactly this release, and only an upgrade changes it.
+The exact grimoire release a checkout of a host repo runs, committed in its dotfolder so that it travels with branches; every grimoire process started from that checkout runs exactly this release, and only an upgrade sets a new one.
 _Avoid_: Installed version, current version, lock
 
 **Live store**:
@@ -31,7 +31,7 @@ A small file grimoire writes outside the dotfolder solely so an agent client can
 _Avoid_: Shim, integration file, config
 
 **Upkeep**:
-Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files, done by whichever grimoire process happens to be running and never by an LLM.
+Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files, done on the side by grimoire's own long-running processes rather than by any one command, and never by an LLM.
 _Avoid_: Housekeeping, maintenance, background job, daemon
 
 **Agent client**:
