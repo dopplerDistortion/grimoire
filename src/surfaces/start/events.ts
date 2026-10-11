@@ -138,9 +138,16 @@ export class LiveEvents {
     response.once('close', detach);
     void this.serial(async () => {
       if (this.closed || response.destroyed) return;
-      // While idle nothing kept the state fresh; with streams open, the checks keep it at most a check old.
-      if (this.state === null || this.streams.size === 0) this.state = await this.read();
-      const current = this.state;
+      let current: LiveState;
+      try {
+        // While idle nothing kept the state fresh; with streams open, the checks keep it at most a check old.
+        if (this.state === null || this.streams.size === 0) this.state = await this.read();
+        current = this.state;
+      } catch {
+        // Nothing to tell yet: end the stream, and the browser reconnects after `retry`.
+        return void response.end();
+      }
+      if (response.destroyed) return;
       this.streams.add(stream);
       this.wake();
       const resumed = lastEventId === null ? null : parseId(lastEventId);

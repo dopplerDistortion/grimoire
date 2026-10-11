@@ -215,8 +215,13 @@ export interface SseEvent {
 /** A raw SSE client: every event as it arrives. */
 export class SseClient {
   readonly events: SseEvent[] = [];
+  /** Resolves when the server ends the stream. */
+  readonly ended: Promise<void>;
+  private end: () => void = () => {};
   private readonly waiters = new Set<() => void>();
-  private constructor(private readonly req: http.ClientRequest) {}
+  private constructor(private readonly req: http.ClientRequest) {
+    this.ended = new Promise((resolve) => (this.end = resolve));
+  }
 
   static connect(port: number, cookie: string, lastEventId?: string): Promise<SseClient> {
     return new Promise((resolve, reject) => {
@@ -252,6 +257,7 @@ export class SseClient {
           }
         });
         res.on('error', () => {});
+        res.on('end', () => client.end());
         resolve(client);
       });
       req.on('error', reject);
