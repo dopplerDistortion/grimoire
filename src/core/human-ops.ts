@@ -5,7 +5,7 @@
 import { GrimoireError, invalid } from '../errors';
 import { parseWriteRef, type AttemptRecord, type IssueRecord, type TrackerDraft, type TrackerView } from '../tracker';
 import { checkClaimable, parseHandle, recordedActor, sealOpenAttempt } from './attempts';
-import { afterSeal, cutForEnding, sealCaptures, type EndingCapture } from './capture';
+import { afterSeal, cutDeadline, cutForEnding, sealCaptures, type EndingCapture } from './capture';
 import { fieldConflict, issueConflict, namesIssue, openAttemptsOf, relatedIssue, stateConflict } from './derive';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
@@ -163,11 +163,13 @@ export const reopen = define({
     const by = recordedActor(author.email, actor);
     const ref = parseWriteRef(input.id, 'id');
     // An attempt left open on the closed issue (after a fold) is superseded: it is cut first, like any ending (spec §14).
+    // One ending, one budget: the attempts it supersedes share it.
     const view = await tracker.read();
     const checked = reopenable(view, ref);
     const captures = new Map<string, EndingCapture>();
+    const deadline = cutDeadline(env);
     for (const open of openAttemptsOf(view, checked.id)) {
-      captures.set(open.record.id, await cutForEnding(env, view, { issue: checked.id, attempt: open.record, op: 'reopen', binds: false }));
+      captures.set(open.record.id, await cutForEnding(env, view, { issue: checked.id, attempt: open.record, op: 'reopen', binds: false, deadline }));
     }
     const sealed: { handle: string; keys: string[] }[] = [];
     const write = await tracker.transact({ op: 'reopen', author, actor }, async (draft) => {

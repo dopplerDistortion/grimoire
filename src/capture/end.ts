@@ -93,6 +93,8 @@ export interface EndCaptureInput {
   readonly skillReads: readonly SkillReadEvent[];
   readonly scanner: SecretScanner;
   readonly options?: CaptureOptions;
+  /** When the budget runs out (epoch ms), when one ending cuts several attempts: they share one budget. Default: now plus the budget. */
+  readonly deadline?: number;
 }
 
 /** One bound context's fresh capture, for the ending commit to seal. */
@@ -132,7 +134,7 @@ interface Target {
  */
 export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCapture[]> {
   const started = Date.now();
-  const deadline = started + (input.options?.budgetMs ?? CUT_BUDGET_MS);
+  const deadline = input.deadline ?? started + (input.options?.budgetMs ?? CUT_BUDGET_MS);
   const handle = input.attempt?.id ?? null;
   // Which contexts are bound, and which hold a pending record or a purge, is read in full: the budget bounds the cuts.
   const targets = await targetsOf(input);

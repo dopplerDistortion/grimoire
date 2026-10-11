@@ -4,7 +4,7 @@
 // its one compare-and-set round, before `end.md`. A replay never gets here, so
 // it never cuts again. Capture never fails the ending: a capture problem is a
 // record's status.
-import { captureAtEnd, sealSessionRecords, type CaptureMode, type ContextCapture, type SkillReadEvent } from '../capture/end';
+import { captureAtEnd, CUT_BUDGET_MS, sealSessionRecords, type CaptureMode, type ContextCapture, type SkillReadEvent } from '../capture/end';
 import { observedEvidence } from '../capture/evidence';
 import {
   cutSucceeded,
@@ -47,6 +47,13 @@ export interface Ending {
   readonly op: string;
   /** Whether the ending call binds: its own context is then cut first. */
   readonly binds: boolean;
+  /** The ending's deadline (`cutDeadline`), when it cuts several attempts: one budget covers them all. */
+  readonly deadline?: number;
+}
+
+/** When an ending's cut budget, starting now, runs out (epoch ms): one per ending, however many attempts it ends. */
+export function cutDeadline(env: Pick<OpEnv, 'capture'>): number {
+  return Date.now() + (env.capture?.budgetMs ?? CUT_BUDGET_MS);
 }
 
 /** What an ending carries into its commit: the captures, and the mode they were cut under. */
@@ -63,6 +70,7 @@ const NOTHING: EndingCapture = { captures: [], mode: 'none' };
  * validated. Never throws.
  */
 export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending): Promise<EndingCapture> {
+  const deadline = ending.deadline ?? cutDeadline(env);
   cancelSweeps();
   try {
     const { commonDir, root } = env.tracker.location;
@@ -94,6 +102,7 @@ export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending
       skillReads,
       scanner: env.scanner,
       ...(env.capture ? { options: env.capture } : {}),
+      deadline,
     });
     return { captures, mode };
   } catch {
