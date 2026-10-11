@@ -205,8 +205,9 @@ export async function runSkillEdit(argv: readonly string[]): Promise<number> {
     process.stderr.write('usage: grimoire skill edit <name>\n');
     return 2;
   }
-  const { createCore } = await import('../../core');
-  const core = createCore();
+  const { createCore, spawnedAutoSync } = await import('../../core');
+  // A CLI write leaves the sync to a detached `grimoire sync --background` (spec §4).
+  const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [process.argv[1]!, 'sync', '--background'] }) });
   try {
     const root = await findHostRoot(process.cwd());
     const config = await readCheckoutConfig(root);

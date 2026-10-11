@@ -11,6 +11,7 @@ import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, Reop
 import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
 import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult } from './skills';
+import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -124,4 +125,6 @@ export interface OpResults {
   skill_read: SkillReadResult;
   skill_edit: SkillEditResult;
   skill_show: SkillShowResult;
+  sync: SyncResult;
+  sync_status: SyncStatusResult;
 }

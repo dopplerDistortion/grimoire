@@ -349,7 +349,7 @@ export const skillEdit = define({
     base: s.nullable(s.string(oneLine), 'the version the edit started from; null for a new skill'),
     replace: s.optional(s.boolean('commit over a version that moved since `base` (the human confirmed "Replace with my draft")')),
   }),
-  async run(input, { ctx, tracker, actor, scanner }): Promise<SkillEditResult> {
+  async run(input, { ctx, tracker, actor, scanner, requestSync }): Promise<SkillEditResult> {
     const problem = skillNameProblem(input.name);
     if (problem) throw invalid({ name: problem });
     const author = writer(ctx);
@@ -391,6 +391,8 @@ export const skillEdit = define({
       await writeSkillChange(draft, scanner, { kind: 'edit', skill: input.name, text, saw }, { actor, by: author.email, surface: ctx.surface, clone });
       return { result: { name: input.name, version, from: current, created: current === null, changed: true } };
     });
+    // A human knowledge edit reaches other clones by the automatic sync (spec §4).
+    if (write.commit) requestSync(write.commit);
     return write.result;
   },
 });

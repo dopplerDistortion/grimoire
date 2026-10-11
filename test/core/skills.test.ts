@@ -245,6 +245,16 @@ describe('skill versions and human edits', () => {
     expect(fits).toMatchObject({ ok: true, result: { created: true } });
   });
 
+  test('a human’s skill edit is pushed by the automatic sync, after the call answers', async ({ world, grimoire }) => {
+    const core = grimoire.makeCore({ autoSync: 'in-process' });
+    const edited = await core.call('skill_edit', { name: 'release-notes', text: NOTES_V1, base: null }, terminal(grimoire.ctx));
+    await core.close();
+
+    expect(edited.ok).toBe(true);
+    const remote = await world.a.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker']);
+    expect(remote.split('\t')[0]).toBe(await trackerTip(world.a));
+  });
+
   test('an edit that changes nothing commits nothing', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     const v1 = await edit(core, ctx, { name: 'release-notes', text: NOTES_V1, base: null });

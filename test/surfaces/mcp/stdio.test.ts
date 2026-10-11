@@ -7,7 +7,7 @@ import { gitTest, readFixture, readFixtureJson } from '#harness';
 import { createCore, type CallContext } from '../../../src/core';
 import { MachineLocalStore } from '../../../src/machine-local';
 import { SERVER_INSTRUCTIONS } from '../../../src/instructions';
-import { initializeTracker, TRACKER_REF } from '../../core/support';
+import { commitToTracker, initializeTracker, TRACKER_REF } from '../../core/support';
 import { buildGrimoire, connect, inBothEras, rawSession, type JsonRpcMessage } from './support';
 
 let bin: string;
@@ -89,6 +89,10 @@ describe('grimoire mcp over stdio', () => {
 
   gitTest('create, show, claim and close work in both eras, as compact JSON twice over', async ({ world }) => {
     await initializeTracker(world.a, world.a);
+    // A close syncs in the server after it answers, and the client kills the server 2 s after closing stdin: no sync here.
+    await commitToTracker(world.a, {
+      'settings.yml': 'auto-sync: {"at":"2026-10-11T03:00:00.000Z","by":"alice@example.com","value":false}\n',
+    });
     const debrief = { asked: 'fix it', tried: 'a patch', failed: 'none', worked: 'the patch', next: 'none' };
 
     const results = await inBothEras(bin, { cwd: world.a.dir }, async (client, era) => {
@@ -160,7 +164,7 @@ describe('grimoire mcp over stdio', () => {
   }) => {
     await initializeTracker(world.a, world.a);
     const text = '---\nname: release-notes\ndescription: Use when recording a change in the release notes.\n---\n# Release notes\n\nCreate `changes/<slug>.md`.\n';
-    const core = createCore();
+    const core = createCore({ autoSync: 'off' });
     const human: CallContext = {
       surface: 'cli',
       repo: { root: world.a.dir, pin: null },
