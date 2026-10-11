@@ -1,0 +1,67 @@
+// `hook session-start` (spec §12 SessionStart hook output; spike C B1; spike E
+// finding 1). One verb serves both clients, which read its stdout differently:
+//
+// - Claude Code: plain stdout becomes context; `{"hookSpecificOutput":
+//   {"hookEventName":"SessionStart","reloadSkills":true}}` makes it list skill
+//   stubs written during the hook on the first turn.
+// - Codex: plain stdout becomes a developer message. JSON must match its
+//   strict schema (deny_unknown_fields), so a `reloadSkills` key makes Codex
+//   fail the hook and drop the line: Codex only ever gets the plain line.
+//
+// The client is told apart by the payload alone: Codex's SessionStart payload
+// always has `permission_mode`, Claude Code's never does. Environment markers
+// can't decide it (a Codex started from Claude Code's shell inherits them).
+
+/** Which client ran the hook. */
+export type HookClient = 'claude-code' | 'codex';
+
+/** The client a SessionStart payload comes from; null when it isn't one. */
+export function sessionStartClient(payload: unknown): HookClient | null {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;
+  const fields = payload as Record<string, unknown>;
+  if (fields.hook_event_name !== 'SessionStart') return null;
+  return 'permission_mode' in fields ? 'codex' : 'claude-code';
+}
+
+/** What the hook has to say: at most one line (§12's priorities pick it), and whether skill stubs were written. */
+export interface SessionStartMessage {
+  readonly line?: string | null;
+  readonly reloadSkills?: boolean;
+}
+
+/** The hook's stdout for a client: '' when there is nothing to say. */
+export function sessionStartOutput(client: HookClient | null, message: SessionStartMessage): string {
+  const line = message.line ?? null;
+  if (client === 'claude-code' && message.reloadSkills) {
+    const output = { hookEventName: 'SessionStart', reloadSkills: true, ...(line === null ? {} : { additionalContext: line }) };
+    return `${JSON.stringify({ hookSpecificOutput: output })}\n`;
+  }
+  return line === null ? '' : `${line}\n`;
+}
+
+export interface SessionStartContext {
+  /** Where the client started the hook: `--from`, else the hook's cwd. */
+  readonly startDir: string;
+}
+
+/**
+ * What this session start has to say. Nothing yet: the knowledge delivery
+ * fast path (copies and stubs, reloadSkills) and the session line's
+ * priorities (pin mismatch, due chores, proposals, stray edits) plug in here.
+ * The not-joined notice never reaches this code: the bootstrap and the
+ * launcher print it when there is no launcher, copy or join record.
+ */
+async function compose(_payload: unknown, _ctx: SessionStartContext): Promise<SessionStartMessage> {
+  return {};
+}
+
+/** The verb's body: the payload in, what to print out. */
+export async function sessionStart(payloadText: string, ctx: SessionStartContext): Promise<string> {
+  let payload: unknown = null;
+  try {
+    payload = JSON.parse(payloadText);
+  } catch {
+    // An unreadable payload still gets the plain line, which both clients accept.
+  }
+  return sessionStartOutput(sessionStartClient(payload), await compose(payload, ctx));
+}

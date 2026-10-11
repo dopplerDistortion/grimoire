@@ -32,3 +32,4 @@ export {
 } from './marker';
 export { Caches, type CacheOptions } from './caches';
 export { cloneId, cloneTag, defaultDashboardPort, START_LOCK, type StartLockData } from './clone';
+export { readTextIfExists, retryTransient, writeFileAtomic } from './fs-atomic';
