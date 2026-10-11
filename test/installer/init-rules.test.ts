@@ -385,6 +385,12 @@ describe('the next steps', () => {
     expect(again.report.next_steps.join('\n')).toContain('Codex: trust this project');
     expect(again.report.next_steps.join('\n')).not.toContain('/hooks');
   });
+
+  gitTest('say that `git stash --all` is unsupported while generated skill copies exist, and `git stash -u` is fine (spec §15)', async ({ world }) => {
+    const { report } = await initIn(world.a.dir);
+
+    expect(report.next_steps).toContainEqual(expect.stringMatching(/git stash -u.*never `git stash --all`/));
+  });
 });
 
 describe('the plan shown before consent', () => {

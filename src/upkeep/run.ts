@@ -25,7 +25,7 @@ import { readCheckoutConfig, readPerson } from '../core/host';
 import { registeredWorktrees } from '../installer/worktrees';
 import { findGitDirs, MachineLocalStore, type Json, type Lease } from '../machine-local';
 import { VERSION } from '../version';
-import { operationInProgress, upgradeInProgress, upgradeSkipNotice, worktreeKey } from './checkout';
+import { operationInProgress, UPKEEP_STAMPS, upgradeInProgress, upgradeSkipNotice, worktreeKey, worktreeLeaseName } from './checkout';
 import { UPKEEP_PARTS } from './parts';
 
 /** A clone-wide part runs for the whole clone; a worktree part runs per registered worktree on this pin. */
@@ -44,6 +44,8 @@ export interface PartInput {
   readonly version: string;
   /** The call context for work done on the tracker (a sync's actor and request). */
   readonly context: () => Promise<CallContext>;
+  /** What `make` gives, made once per pass under `key` and shared by every part and worktree of it (the served set). */
+  once<T>(key: string, make: () => Promise<T>): Promise<T>;
 }
 
 /** What a part reports. */
@@ -108,6 +110,8 @@ export interface UpkeepOptions {
   readonly debug?: (line: string) => void;
   /** Once aborted, the parts not yet started are skipped (`stopped`). */
   readonly signal?: AbortSignal;
+  /** How long the per-worktree part waits for a worktree's lease held elsewhere (default 0: it skips). A decision's refresh waits. */
+  readonly leaseWaitMs?: number;
 }
 
 /** The per-worktree part runs at most this often per worktree, unless forced. */
@@ -116,8 +120,7 @@ export const WORKTREE_INTERVAL_MS = 5 * 60_000;
 export const CLONE_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_TTL_MS = 10 * 60_000;
 
-/** Coordination kind of the stamps that throttle upkeep: version-free `{at}`. */
-export const UPKEEP_STAMPS = 'upkeep-runs';
+export { UPKEEP_STAMPS };
 
 interface Stamp {
   /** When the part last ran (epoch ms). */
@@ -126,10 +129,7 @@ interface Stamp {
   readonly version?: string;
 }
 
-/** The (live store, worktree) lease name: shared by upkeep's per-worktree part, `init`, `doctor --fix` and `init --upgrade`. */
-export async function worktreeLeaseName(worktree: string): Promise<string> {
-  return `worktree:${await worktreeKey(worktree)}`;
-}
+export { worktreeLeaseName };
 
 /** A clone-wide part's lease name. */
 export function partLeaseName(part: string): string {
@@ -167,6 +167,12 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
   const parts = options.parts ?? UPKEEP_PARTS;
   const nonce = options.nonce ?? randomBytes(8).toString('hex');
   let context: Promise<CallContext> | null = null;
+  const made = new Map<string, Promise<unknown>>();
+  const once = <T>(key: string, make: () => Promise<T>): Promise<T> => {
+    let value = made.get(key) as Promise<T> | undefined;
+    if (!value) made.set(key, (value = make()));
+    return value;
+  };
   const input = (worktree: string | null, own: boolean): PartInput => ({
     store,
     root: dirs.worktree,
@@ -174,6 +180,7 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
     own,
     version,
     context: () => (context ??= contextOf(dirs.worktree, options.surface ?? 'mcp', nonce, options.client)),
+    once,
   });
   const stopped = () => options.signal?.aborted === true;
   /** Runs one part; false when it skipped (then nothing throttles it). */
@@ -264,7 +271,7 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
       each('throttled');
       continue;
     }
-    const lease = await acquire(store, key, DEFAULT_TTL_MS);
+    const lease = await acquire(store, key, DEFAULT_TTL_MS, options.leaseWaitMs ?? 0);
     if (!lease) {
       each('held');
       continue;
@@ -311,9 +318,14 @@ async function worktreeGate(store: MachineLocalStore, worktree: string, version:
   return null;
 }
 
-async function acquire(store: MachineLocalStore, name: string, ttlMs: number): Promise<Lease | null> {
-  const result = await store.leases.acquire(name, { ttlMs }).catch(() => null);
-  return result?.status === 'acquired' ? result.lease : null;
+async function acquire(store: MachineLocalStore, name: string, ttlMs: number, waitMs = 0): Promise<Lease | null> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const result = await store.leases.acquire(name, { ttlMs }).catch(() => null);
+    if (result?.status === 'acquired') return result.lease;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 50));
+  }
 }
 
 /**

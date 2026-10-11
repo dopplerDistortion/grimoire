@@ -22,6 +22,12 @@ export interface OpEnv {
    * call answers and never fails or delays it.
    */
   readonly requestSync: (commit: string) => void;
+  /**
+   * Says the write changed what agents are served (spec §15 Refresh scope: a
+   * decision, a skill edit, the delivery switch): after the call answers,
+   * this process refreshes the generated output of every worktree on its pin.
+   */
+  readonly servedChanged: () => void;
 }
 
 export interface OpDefinition<I, R> {

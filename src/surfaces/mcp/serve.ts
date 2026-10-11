@@ -54,7 +54,12 @@ export async function runMcp(argv: readonly string[]): Promise<void> {
     setTimeout(startUpkeep, UPKEEP_AFTER_OPENING_MS).unref();
   };
   setTimeout(startUpkeep, UPKEEP_FALLBACK_MS).unref();
-  const loadCore = () => (core ??= import('../../core').then(({ createCore }) => createCore()));
+  // A served-set change this process sees (a fold its sync made) triggers its upkeep, forced (spec §15 Refresh scope).
+  const refreshSkills = () => {
+    startUpkeep();
+    void upkeep?.then((loop) => loop?.trigger({ force: true }));
+  };
+  const loadCore = () => (core ??= import('../../core').then(({ createCore }) => createCore({ refreshSkills })));
   // A failure never ends the process (spec §8): a stray rejection is logged, not fatal.
   process.on('unhandledRejection', (reason) => {
     process.stderr.write(`grimoire mcp: unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}\n`);

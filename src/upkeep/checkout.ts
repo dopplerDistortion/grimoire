@@ -13,6 +13,14 @@ export async function worktreeKey(worktree: string): Promise<string> {
   return process.platform === 'win32' ? real.toLowerCase() : real;
 }
 
+/** Coordination kind of the stamps that throttle upkeep: version-free `{at}`, keyed by part name or `worktree:<worktreeKey>`. */
+export const UPKEEP_STAMPS = 'upkeep-runs';
+
+/** The (live store, worktree) lease name: shared by upkeep's per-worktree part, `init`, `doctor --fix` and `init --upgrade`. */
+export async function worktreeLeaseName(worktree: string): Promise<string> {
+  return `worktree:${await worktreeKey(worktree)}`;
+}
+
 /** A git operation that leaves a worktree half-done. */
 export type GitOperation = 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'bisect';
 

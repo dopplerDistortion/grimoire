@@ -3,6 +3,7 @@
 // machine-local sync status. The tracker store does the git work; this module
 // decides when, and keeps the record of how it went.
 import { GrimoireError } from '../errors';
+import { readServedFingerprint } from '../generated/served';
 import { runGit } from '../git/run';
 import { MachineLocalStore } from '../machine-local';
 import {
@@ -337,8 +338,12 @@ export const sync = define({
   mcp: false,
   replay: 'none',
   input: s.object({}),
-  async run(_input, { ctx, tracker, actor }): Promise<SyncResult> {
-    return syncResult(await syncNow(tracker, syncRequestOf(ctx, actor)));
+  async run(_input, { ctx, tracker, actor, scanner, servedChanged }): Promise<SyncResult> {
+    const before = await readServedFingerprint(tracker, scanner);
+    const outcome = await syncNow(tracker, syncRequestOf(ctx, actor));
+    // A fold that changed what agents are served: this process refreshes its worktrees (spec §15).
+    if (outcome.fetched && (await readServedFingerprint(tracker, scanner)) !== before) servedChanged();
+    return syncResult(outcome);
   },
 });
 

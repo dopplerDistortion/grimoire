@@ -7,6 +7,17 @@ skills.
 
 Package: `@goksening/grimoire` (bin `grimoire`). It is not released yet.
 
+## Installing
+
+`npx @goksening/grimoire init` in a repo installs grimoire, or joins it on a new
+machine, and prints its next steps.
+
+Evolved skills reach agents as generated files nobody commits: a copy of each
+skill in `.grimoire/skills/<name>/`, and a stub for each client in
+`.claude/skills/grimoire-<name>/` and `.agents/skills/grimoire-<name>/`. Every
+one of these folders ignores itself. **`git stash --all` is unsupported while
+copies exist**, because it stashes ignored files too; `git stash -u` is fine.
+
 ## Contributing
 
 ### Requirements
@@ -90,6 +101,14 @@ copy, launcher and join record, the pointer files and the manifest
 (`src/installer/{pointers,writer,manifest}.ts`), and `.grimoire/config.yml`
 last. `--yes` takes the safe defaults; `--json` alone prints the plan and
 writes nothing.
+
+Generated output (`src/generated/`) writes the evolved-skill copies and stubs in
+every worktree on the process's pin, byte for byte from the served set
+(`readServedSet`): upkeep's `skill-reconcile` part per worktree, its
+`generated-removal` part for worktrees that pin no release, the refresh a
+served-set change asks for (`createCore({ refreshSkills })`: in-process by
+default, a forced upkeep pass in long-lived processes), and the SessionStart
+hook's fast path, which only writes what is missing.
 
 The dashboard (Preact) lives in
 `src/surfaces/dashboard/`, and `npm run dev:dashboard` serves it.
