@@ -19,7 +19,6 @@ import type { EvidenceSource } from './evidence';
 import { pathRewriter, type PathSpellings } from './paths';
 import { clientFamily, contextOf, seenHereRows, sessionKey, type SeenHereRow } from './seen-here';
 import {
-  cutSucceeded,
   parseSessionRecord,
   replaces,
   serializeSessionRecord,
@@ -576,7 +575,8 @@ function earliestAt(calls: readonly BindingCall[]): string | undefined {
  * the compare-and-set round, while the attempt is still open: per context, the
  * further-reaching of the fresh cut and the pending record; with neither, the
  * fresh placeholder naming why. A fresh cut replaces a pending record only if
- * it succeeded and reaches strictly further. A purged record is never written,
+ * it succeeded and reaches strictly further; a pending record kept over this
+ * machine's cut is noted `source: pending`. A purged record is never written,
  * and in a mode that commits no text none is written. Returns the session keys
  * written.
  */
@@ -600,7 +600,8 @@ export async function sealSessionRecords(
     if (pending === null) put(capture.key, capture.record);
     else if (!capture.cut) continue;
     else if (replaces(capture.record, pending)) put(capture.key, capture.record);
-    else if (!cutSucceeded(capture.record) && !pending.excerpt_notes.includes('source: pending')) {
+    // The pending record reaches further than this cut, or this cut failed: the seal keeps it, noted.
+    else if (!pending.excerpt_notes.includes('source: pending')) {
       put(capture.key, { ...pending, excerpt_notes: [...pending.excerpt_notes, 'source: pending'] });
     }
   }

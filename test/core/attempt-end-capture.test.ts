@@ -525,14 +525,24 @@ describe('a stored record', () => {
     expect(record.body).toBe('user:\n | an earlier excerpt\n');
   });
 
-  test('a good cut reaching strictly further replaces it; one reaching no further leaves it as it was', async ({ world, grimoire, capture }) => {
+  test('a good cut reaching strictly further replaces it; one reaching no further leaves its text, noted source: pending', async ({ world, grimoire, capture }) => {
     const further = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:16.000Z', ref: 'b' });
     // The cut's last step is the main line's final assistant text, at 03:27:22.041 or before.
-    const level = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:59.000Z', ref: 'z' });
+    const behind = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:59.000Z', ref: 'z' });
 
     expect(further.record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['tail_unflushed'] });
     expect(further.record.body).toContain('tool Agent');
-    expect(level.record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: [], reach: { at: '2026-10-11T03:27:59.000Z', ref: 'z' } });
+    expect(behind.record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['source: pending'], reach: { at: '2026-10-11T03:27:59.000Z', ref: 'z' } });
+    expect(behind.record.body).toBe('user:\n | an earlier excerpt\n');
+  });
+
+  test('a good cut reaching exactly as far doesn’t replace it either: only strictly further does', async ({ world, grimoire, capture }) => {
+    // How far a cut of the main line reaches, from a seal over a record it passed.
+    const reach = (await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:16.000Z', ref: 'b' })).record.fields.reach as { at: string; ref: string };
+
+    const level = await sealedOver(capture, grimoire.ctx, world.a, reach);
+
+    expect(level.record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['source: pending'], reach });
     expect(level.record.body).toBe('user:\n | an earlier excerpt\n');
   });
 });
