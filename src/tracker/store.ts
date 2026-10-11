@@ -113,7 +113,7 @@ export interface TrackerStore {
 export const DEFAULT_BUDGET_MS = 10_000;
 /** A ref lock older than this is stale: BUSY with `details.stale_lock` (spec §4). */
 export const STALE_REF_LOCK_MS = 30_000;
-/** How many commits `descends` walks before it leaves the question to `git merge-base`. */
+/** How many commits `reaches` walks before it leaves the question to a git process. */
 const ANCESTRY_WALK = 128;
 
 interface Tips {
