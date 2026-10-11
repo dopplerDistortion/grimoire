@@ -54,6 +54,13 @@ Each module is a deep module, tested through its public interface (spec §2):
 | Upkeep | `src/upkeep/` |
 | Surfaces | `src/surfaces/{mcp,cli,hooks,start,dashboard}/` |
 
+Two shared pieces sit below the modules: `src/git/` (git processes run with a
+clean `GIT_*` environment and no hooks, one long-lived `cat-file --batch`
+reader per repo, and in-process object writes) and `src/errors.ts` (the error
+envelope, spec §9). Core operations are called as
+`createCore().call(name, input, callContext)`; the tracker store is
+`openTracker(root)`.
+
 A folder is created by the first ticket that puts code in it. The bin entry is
 `src/surfaces/cli/main.ts`. The dashboard (Preact) lives in
 `src/surfaces/dashboard/`, and `npm run dev:dashboard` serves it.
