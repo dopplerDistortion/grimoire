@@ -105,7 +105,7 @@ Grimoire's own deterministic merge of a clone's tracker branch with the fetched 
 _Avoid_: Sync, rebase, git merge
 
 **Fold conflict**:
-What a fold sets aside when two clones changed the same field of an issue, deleted an issue the other edited, or both claimed it: the issue keeps one value and shows the other beside it, and can't be claimed until a human resolves it.
+What a fold sets aside when two clones changed the same field of an issue, deleted an issue the other edited, or both claimed it: the issue keeps one value and shows the other beside it, and can't be claimed until a human resolves it. On a pattern page, two clones' overlapping edits leave the later page standing and the other side set aside beside it, with its own sources, until a later write reconciles them.
 _Avoid_: Merge conflict, collision
 
 ### Surfaces

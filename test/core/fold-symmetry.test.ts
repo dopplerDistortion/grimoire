@@ -266,6 +266,31 @@ async function mintTogether(clones: readonly Clone[], counter: Counter): Promise
 }
 
 /**
+ * Human wiki edits of one shared page: in round 0 both clones create it (a
+ * create on both sides, with no base); later both rewrite the same line, so
+ * hunks overlap, append at one place, sometimes change the summary, and
+ * sometimes reconcile every side the folds set aside.
+ */
+async function collideOnPage(clone: Clone, rand: () => number, round: number): Promise<void> {
+  const human: CallContext = { ...clone.ctx, surface: 'cli', client: null, evidence: {}, tty: true };
+  const slug = 'shared-page';
+  const shown = await clone.core.call('wiki_show', { slug }, human);
+  if (!shown.ok) {
+    const body = `# Shared\n\nline one\n\nline two\n`;
+    await clone.core.call('wiki_edit', { slug, base: null, title: `${clone.name} page`, kind: 'failure', summary: `${clone.name} r${round}`, body }, human);
+    return;
+  }
+  const page = shown.result;
+  const body = `${page.body.replace(/^line one.*$/m, `line one ${clone.name} r${round}`)}- ${clone.name} r${round}\n`;
+  const resolves = rand() < 0.5 ? page.sides.map((side) => side.id) : [];
+  await clone.core.call(
+    'wiki_edit',
+    { slug, base: page.base, body, resolves, ...(rand() < 0.3 ? { summary: `${clone.name} r${round}` } : {}) },
+    human,
+  );
+}
+
+/**
  * Edits both clones make to shared issues in the same round: on one issue a
  * retitle and an insert at the same anchor, on the next a rewrite of the same
  * line. So every round folds a scalar collision (often at one `updated_at`),
@@ -284,6 +309,7 @@ async function collide(clones: readonly Clone[], rand: () => number, round: numb
       id: inserted,
       body_patch: [{ op: 'insert_before', anchor: '\n## Done\n', text: `\n- [ ] ${clone.name} r${round}` }],
     });
+    await collideOnPage(clone, rand, round);
     if (rewritten === inserted) continue;
     const shown = await call('show', { ref: rewritten, comments: 'none' });
     const body = shown.ok ? ((shown.result as { body?: string }).body ?? '') : '';
@@ -365,6 +391,8 @@ describe('fold order-independence', () => {
       const tree = (await world.a.git(['ls-tree', '-r', '--name-only', tip])).split('\n');
       const deleted = new Set(tree.filter((file) => file.startsWith('deleted/')).map((file) => file.slice(8, -3)));
       expect(counter.comments.length).toBeGreaterThan(0);
+      // The shared page went through every fold, with its derived index and log.
+      expect(tree).toEqual(expect.arrayContaining(['knowledge/wiki/pages/shared-page.md', 'knowledge/wiki/index.md', 'knowledge/wiki/log.md']));
       for (const comment of counter.comments) {
         if (!deleted.has(comment.split('/')[1]!)) expect(tree.some((file) => file.endsWith(comment)), comment).toBe(true);
       }

@@ -43,7 +43,7 @@ function foldSet<T>(base: readonly T[], a: readonly T[], b: readonly T[], key: (
 }
 
 /** Unknown keys: a one-sided change wins; a modification beats a delete; otherwise the lower hash. */
-function foldExtra(
+export function foldExtra(
   base: Readonly<Record<string, string>>,
   a: Readonly<Record<string, string>>,
   b: Readonly<Record<string, string>>,

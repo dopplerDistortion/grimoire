@@ -33,3 +33,17 @@ export type { StoreSetting } from './settings';
 export type { Tombstone } from './retired';
 export { TRACKER_REF } from './layout';
 export { TRACKER_FORMAT_RANGE, V1_MARKER } from './marker';
+export {
+  pageVersion,
+  renderWikiIndex,
+  wikiPageFile,
+  type NewWikiEdit,
+  type PageKind,
+  type WikiConflict,
+  type WikiDraft,
+  type WikiEdit,
+  type WikiPage,
+  type WikiPageEntry,
+  type WikiView,
+} from './wiki';
+export type { NewQuarantineRecord, QuarantineDraft, QuarantineRecord, QuarantineView } from './quarantine';

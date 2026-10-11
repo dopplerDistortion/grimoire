@@ -55,6 +55,8 @@ import { BoundedMap, type FileEdit, type ObjectSource, type TrackerObjects, type
 import { parseIssue, serializeIssue, type IssueRecord } from './record';
 import { parseForward, parseTombstone, serializeForward, serializeTombstone, type Tombstone } from './retired';
 import { parseSetting, serializeSettings, settingLine, settingLines, type StoreSetting } from './settings';
+import { WikiDraftState, WikiReader, type WikiDraft, type WikiView } from './wiki';
+import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type QuarantineView } from './quarantine';
 
 /** What every read sees: the tracker at one tip. */
 export interface TrackerView {
@@ -93,6 +95,10 @@ export interface TrackerView {
   forwardOf(id: string): string | undefined;
   /** The delete tombstone (`deleted/<id>.md`) that retired the id, or undefined. */
   deletion(id: string): Tombstone | undefined;
+  /** The wiki (spec §17): pages, their set-aside sides and the human wiki edits, read on first use. */
+  readonly wiki: WikiView;
+  /** Quarantine marks and clears (spec §17, §18), read on first use. */
+  readonly quarantine: QuarantineView;
 }
 
 /** A comment a write adds; the draft picks its id and time. */
@@ -157,6 +163,10 @@ export interface TrackerDraft extends TrackerView {
   putSetting(key: string, value: unknown, by: string): void;
   /** Writes the forwarding record that maps the bare id `id` to the live record `to`. */
   putForward(id: string, to: string, by: string): void;
+  /** The wiki as this round changes it; page writes regenerate the derived index and log. */
+  readonly wiki: WikiDraft;
+  /** Quarantine as this round changes it. */
+  readonly quarantine: QuarantineDraft;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
@@ -234,6 +244,8 @@ export class Snapshot implements TrackerView {
   private readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
   private readonly ordered: readonly IssueRecord[];
   private readonly attemptsById = new Map<string, AttemptRecord>();
+  readonly wiki: WikiReader;
+  readonly quarantine: QuarantineReader;
 
   constructor(parts: SnapshotParts) {
     this.tip = parts.tip;
@@ -255,6 +267,8 @@ export class Snapshot implements TrackerView {
     this.ordered = [...parts.records.values()].sort(byOrder);
     this.ids = new Set(parts.records.keys());
     for (const list of parts.attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
+    this.wiki = new WikiReader(parts.source, parts.rootTree);
+    this.quarantine = new QuarantineReader(parts.source, parts.rootTree);
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -353,6 +367,8 @@ export class Draft implements TrackerDraft {
   private readonly forwardsHere = new Map<string, { to: string; by: string }>();
   private commentMs: number | null = null;
   private commentN = 0;
+  readonly wiki: WikiDraftState;
+  readonly quarantine: QuarantineDraftState;
 
   constructor(
     private readonly base: Snapshot,
@@ -363,7 +379,10 @@ export class Draft implements TrackerDraft {
     /** The latest comment time this store has written, in epoch ms. */
     private readonly storeCommentMs = 0,
     private readonly randomHandle: () => string = randomAttemptHandle,
-  ) {}
+  ) {
+    this.wiki = new WikiDraftState(base.wiki, now);
+    this.quarantine = new QuarantineDraftState(base.quarantine, now);
+  }
 
   get tip(): string {
     return this.base.tip;
@@ -649,6 +668,8 @@ export class Draft implements TrackerDraft {
     for (const [handle, outcome] of this.outcomes) {
       edits.set(outcomeFile(this.attempt(handle)!.issue, handle), serializeOutcome(outcome));
     }
+    for (const [file, edit] of this.wiki.fileEdits()) edits.set(file, edit);
+    for (const [file, edit] of this.quarantine.fileEdits()) edits.set(file, edit);
     return edits;
   }
 }
