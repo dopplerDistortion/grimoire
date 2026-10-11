@@ -128,6 +128,7 @@ $ node -e "<print>" mcp
   - a verb first ends option parsing;
   - `--` ends it explicitly, which Node documents.
 - **Where user arguments start:** under `-e` there is no script path, so they start at `process.argv[1]`, not `[2]`.
+- **Spike C (GOK-128) found the same failure** and the same `--` fix independently, under Claude Code (`docs/research/spikes/claude-skills-chores.md`, side finding 1).
 
 **Decision for the frozen cross-pin contract (GOK-144, GOK-146):**
 
@@ -292,7 +293,7 @@ These are in `test/fixtures/claude-code/`. Provenance and sanitizing are in its 
 - **`hook-payloads/`:**
   - `pre-tool-use.json` (main thread);
   - `pre-tool-use-subagent.json` (`agent_id`, `agent_type`);
-  - `session-start-{startup,clear,compact,resume,fork}.json`.
+  - `session-start-{startup-plain,clear,compact,resume,fork}.json`. Spike C's `session-start-startup.json` sits beside them.
 - **`hook-outputs/`:**
   - `pre-tool-use-updated-input.json`, the honoured shape;
   - `pre-tool-use-updated-input-ids-only.json`, the amended shape.

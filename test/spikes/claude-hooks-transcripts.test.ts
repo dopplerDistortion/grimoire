@@ -77,10 +77,16 @@ describe('Claude Code hook payloads (spike A)', () => {
     expect(p.transcript_path.endsWith(`${p.session_id}.jsonl`)).toBe(true);
   });
 
-  it.each(['startup', 'clear', 'compact', 'resume', 'fork'])(
-    'SessionStart reports source %s and names its own transcript',
-    (source) => {
-      const p = readFixtureJson<SessionStartPayload>(`${HOOKS}/session-start-${source}.json`);
+  it.each([
+    ['startup', 'session-start-startup-plain.json'],
+    ['clear', 'session-start-clear.json'],
+    ['compact', 'session-start-compact.json'],
+    ['resume', 'session-start-resume.json'],
+    ['fork', 'session-start-fork.json'],
+  ])(
+    'SessionStart reports source %s and names its own transcript (%s)',
+    (source, file) => {
+      const p = readFixtureJson<SessionStartPayload>(`${HOOKS}/${file}`);
 
       expect(p.hook_event_name).toBe('SessionStart');
       expect(p.source).toBe(source);
