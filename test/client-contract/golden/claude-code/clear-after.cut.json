@@ -1,0 +1,94 @@
+{
+  "client": {
+    "name": "claude-code",
+    "version": "2.1.296"
+  },
+  "reader": {
+    "version": 1
+  },
+  "session": "bd89d1c0-6593-4567-9ccc-8433da1492d2",
+  "context": "main",
+  "lines": {
+    "read": 39,
+    "unknown": 0,
+    "malformed": 0
+  },
+  "status": "cut",
+  "notes": [],
+  "window": {
+    "start": {
+      "at": "2026-10-11T03:26:37.792Z",
+      "ref": "aa15f667-2323-434d-b988-a564ce8b4551"
+    },
+    "end": {
+      "at": "2026-10-11T03:26:40.762Z",
+      "ref": "b8cf9a7a-4d38-4d59-a70a-1f7bc185eade"
+    }
+  },
+  "reach": {
+    "at": "2026-10-11T03:26:40.762Z",
+    "ref": "b8cf9a7a-4d38-4d59-a70a-1f7bc185eade"
+  },
+  "counts": {
+    "stepsInWindow": 6,
+    "stepsKept": 6,
+    "characters": 817
+  },
+  "steps": [
+    {
+      "kind": "prompt",
+      "text": "Call the mcp__grimoire__show tool with ref gr-2 and reply in one short line.",
+      "at": "2026-10-11T03:26:37.792Z",
+      "ref": "aa15f667-2323-434d-b988-a564ce8b4551"
+    },
+    {
+      "kind": "tool_call",
+      "id": "toolu_01VVo1F4uUHNFQKJZ3Bbzu9Q",
+      "name": "ToolSearch",
+      "grimoire": null,
+      "input": {
+        "query": "select:mcp__grimoire__show",
+        "max_results": 1
+      },
+      "at": "2026-10-11T03:26:38.928Z",
+      "ref": "f7183461-7f18-46ca-804b-95ea4469359d"
+    },
+    {
+      "kind": "tool_result",
+      "id": "toolu_01VVo1F4uUHNFQKJZ3Bbzu9Q",
+      "error": false,
+      "text": "[tool_reference mcp__grimoire__show]",
+      "at": "2026-10-11T03:26:38.932Z",
+      "ref": "bc9077d6-d30a-44bf-a96f-ef8dc8a2a6aa"
+    },
+    {
+      "kind": "tool_call",
+      "id": "toolu_01Rm1NfzhqChzCBey6cP3rVy",
+      "name": "mcp__grimoire__show",
+      "grimoire": "show",
+      "input": {
+        "ref": "gr-2"
+      },
+      "at": "2026-10-11T03:26:39.834Z",
+      "ref": "39f8f1a8-4e88-4425-adbf-873f89261a3c"
+    },
+    {
+      "kind": "tool_result",
+      "id": "toolu_01Rm1NfzhqChzCBey6cP3rVy",
+      "error": false,
+      "text": "{\"tool\":\"show\",\"received_keys\":[\"ref\",\"_grimoire_hint\"],\"hint_received\":true,\"ref\":\"gr-2\"}",
+      "at": "2026-10-11T03:26:39.891Z",
+      "ref": "1b360f32-79b2-4406-a8d3-6b70aec88557"
+    },
+    {
+      "kind": "assistant",
+      "text": "The `show` tool returned for ref `gr-2`: it received the keys `ref` and `_grimoire_hint`, with no issue content.",
+      "at": "2026-10-11T03:26:40.762Z",
+      "ref": "b8cf9a7a-4d38-4d59-a70a-1f7bc185eade"
+    }
+  ],
+  "callIds": [
+    "toolu_01VVo1F4uUHNFQKJZ3Bbzu9Q",
+    "toolu_01Rm1NfzhqChzCBey6cP3rVy"
+  ]
+}
