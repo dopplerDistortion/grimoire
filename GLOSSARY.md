@@ -11,7 +11,7 @@ A repository that grimoire has been installed into; each host repo has exactly o
 _Avoid_: Target project, consumer project, workspace
 
 **Dotfolder**:
-The `.grimoire/` directory at the root of a host repo's checkout, holding grimoire's install configuration, its manifest, and the files agents and humans read straight from the checkout, such as evolved skills; issue state lives in the live store instead.
+The `.grimoire/` directory at the root of a host repo's checkout, holding grimoire's install configuration, its manifest, and the generated copies of evolved skills that agents read straight from the checkout; issue state and the knowledge layer live in the live store instead.
 _Avoid_: Data dir, grimoire folder, store
 
 **Pinned version**:
@@ -23,7 +23,7 @@ Grimoire's one working state for a host repo on one machine: the tracker branch 
 _Avoid_: Database, cache, data dir, dotfolder
 
 **Tracker branch**:
-The git branch on which grimoire alone commits a host repo's issues, attempts, traces, outcomes and knowledge records; it is never checked out or merged into code, and clones exchange it by ordinary git fetch and push.
+The git branch on which grimoire alone commits a host repo's issues, attempts, traces, outcomes and its whole knowledge layer, wiki and evolved-skill texts included; it is never checked out or merged into code, and clones exchange it by ordinary git fetch and push.
 _Avoid_: Sync branch, data branch, issues branch, ledger
 
 **Pointer file**:
@@ -31,7 +31,7 @@ A small file grimoire writes outside the dotfolder solely so an agent client can
 _Avoid_: Shim, integration file, config
 
 **Upkeep**:
-Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files, done on the side by grimoire's own long-running processes rather than by any one command, and never by an LLM.
+Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files and skill copies, done on the side by grimoire's own long-running processes rather than by any one command, and never by an LLM.
 _Avoid_: Housekeeping, maintenance, background job, daemon
 
 **Agent client**:
@@ -39,7 +39,7 @@ A program that runs an AI agent's sessions on a developer's machine and through 
 _Avoid_: Harness, IDE, host, agent (for the program itself)
 
 **Skill stub**:
-A pointer file that makes one evolved skill visible to one agent client's own skill discovery, carrying the skill's name and description but not its text.
+A pointer file that makes one evolved skill visible to one agent client's own skill discovery, carrying the skill's name and description but not its text; grimoire generates it in each checkout, and nobody commits it.
 _Avoid_: Skill mirror, skill copy, skill shim
 
 ### Tracking
@@ -129,7 +129,7 @@ The pass, fail, or none verdict on an attempt, held apart from its trace so it c
 _Avoid_: Result, status, reward
 
 **Wiki**:
-The persistent, ever-growing body of markdown knowledge the knowledge layer compiles from past work; never rolled back.
+The persistent, ever-growing body of markdown knowledge the knowledge layer compiles from past work, kept on the tracker branch rather than in any checkout; never rolled back, meaning that nothing done to a code branch can change it and grimoire changes it only by adding to its history.
 _Avoid_: Knowledge base, notes, memory
 
 **Pattern page**:
@@ -161,12 +161,16 @@ A procedure document an agent client loads in the host repo, whoever wrote it.
 _Avoid_: Prompt, rule, instruction
 
 **Evolved skill**:
-A skill the knowledge layer owns and evolves from the wiki, kept in the dotfolder.
+A skill the knowledge layer owns and evolves from the wiki, whose text lives on the tracker branch and reaches each checkout as a generated copy in the dotfolder that nobody commits.
 _Avoid_: Generated skill, grimoire skill, learned skill
 
 **Eject**:
-A human's move of an evolved skill out of the dotfolder into an agent client's own skill folder, after which it is an ordinary skill the knowledge layer never touches.
+A human's move of an evolved skill out of grimoire into the agent clients' own skill folders, as ordinary files for the human to commit, after which it is an ordinary skill the knowledge layer never touches.
 _Avoid_: Export, release, detach
+
+**Stray edit**:
+A change someone made to a checkout's generated copy of an evolved skill; grimoire sets it aside and puts the served text back, and it is served nowhere unless a human records it as a new skill version.
+_Avoid_: Local edit, drift, observed change
 
 **Skill proposal**:
 One suggested change to exactly one evolved skill, creating it or patching it, drafted by the Skill Proposer together with its evidence; it never changes once written, and it changes nothing until a human accepts it.

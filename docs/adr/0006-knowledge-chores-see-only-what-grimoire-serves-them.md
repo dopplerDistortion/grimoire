@@ -38,3 +38,5 @@ A knowledge chore reads the wiki and untrusted trace text, so two things must ho
 - A chore run's lease expires after an hour without a chore call. This differs from claims (ADR 0004): chores are cheap to repeat, and duplicate runs merge by union.
 
 _Amended by ADR 0008: a marked session or process flags every attempt it opens or later binds to, not only the ones it opens. Every binding write checks the marks._
+
+_Amended by ADR 0010: chore outputs land on the tracker branch. A cloud scheduler run (compile-only) therefore must push `grimoire/tracker`, and there is no run branch to merge. Cloud recipes are documented for Claude Code on the web and Routines only. A wiki page left conflicted by a fold makes the Wiki Maintainer due, and is served with both sides to reconcile._
