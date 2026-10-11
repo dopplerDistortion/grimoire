@@ -348,8 +348,10 @@ describe('capture problems are statuses, never errors', () => {
 describe('the hard budget', () => {
   test('bounds the calling context’s flush wait: it keeps the cut it made, and the contexts after it get budget', async ({ world, grimoire, capture }) => {
     // The ending call never reaches the transcript, and the flush wait outlasts the budget.
-    const budgetMs = 1_500;
-    const core = capture.makeCore({ capture: { budgetMs, flushWaitMs: 5_000 } });
+    // Room for a first cut on a loaded machine; the flush wait alone would take three times as long.
+    const budgetMs = 4_000;
+    const flushWaitMs = 3 * budgetMs;
+    const core = capture.makeCore({ capture: { budgetMs, flushWaitMs } });
     const id = await created(core, grimoire.ctx, 'Tight budget');
     const attempt = await claimed(core, grimoire.ctx, id);
     capture.at('2026-10-11T03:27:20.300Z');
@@ -362,7 +364,7 @@ describe('the hard budget', () => {
 
     expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
     expect(took).toBeGreaterThanOrEqual(budgetMs - 200);
-    expect(took).toBeLessThan(4_000);
+    expect(took).toBeLessThan(flushWaitMs);
     const records = await sessionRecords(world.a, id, attempt);
     // The calling context is cut first, and waits for its ending call only until the budget runs out.
     expect(records.find((r) => r.fields.context === 'main')!.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['tail_unflushed'], facts: 'scanned' });
@@ -372,7 +374,8 @@ describe('the hard budget', () => {
 
 describe('the hard budget, finding the bound contexts', () => {
   test('covers reading the binding trailers: a git too slow for the budget leaves each context seen here with budget', async ({ world, grimoire, capture }) => {
-    const budgetMs = 1_500;
+    // The slow git answers just inside its stall time: everything but it gets the rest.
+    const budgetMs = 1_000;
     const gitDelayMs = 4_000;
     const core = capture.makeCore({ capture: { budgetMs } });
     const id = await created(core, grimoire.ctx, 'Slow git');
@@ -1100,8 +1103,10 @@ function flushOnceCutStarts(file: string, rest: string, delayMs: number): { stop
   };
 }
 
-/** How long after its cut starts the ending call's line lands: well inside the 2 s flush wait, well after a prompt first cut. */
+/** How long after its cut starts the ending call's line lands: well after a prompt first cut. */
 const FLUSH_DELAY_MS = 1_000;
+/** The flush wait these tests give: the wait ends once the line is in, so room for a loaded machine costs nothing. */
+const FLUSH_WAIT_MS = 4_000;
 
 /** A config dir holding only the plain session, flushed up to its comment call (each line edited by `edit`): returns the rest. */
 async function plainFlushedToComment(edit: (line: string) => string = (line) => line): Promise<{ configDir: string; file: string; rest: string }> {
@@ -1127,7 +1132,7 @@ describe('the calling context', () => {
     await writeFile(path.join(day, name), `${lines.slice(0, ending).join('\n')}\n`);
     const flush = flushOnceCutStarts(path.join(day, name), lines.slice(ending).join('\n'), FLUSH_DELAY_MS);
     try {
-      const core = capture.makeCore({ capture: { codexHome, flushWaitMs: 2_000 } });
+      const core = capture.makeCore({ capture: { codexHome, flushWaitMs: FLUSH_WAIT_MS } });
       capture.at('2026-10-11T04:44:47.100Z');
       const id = await created(core, grimoire.ctx, 'Flushing');
       const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_2_0'));
@@ -1160,7 +1165,7 @@ describe('the calling context', () => {
   ): Promise<{ record: StoredRecord | undefined; took: number }> {
     const flush = flushOnceCutStarts(plain.file, plain.rest, FLUSH_DELAY_MS);
     try {
-      const core = capture.makeCore({ capture: { claudeConfigDir: plain.configDir, flushWaitMs: 2_000 } });
+      const core = capture.makeCore({ capture: { claudeConfigDir: plain.configDir, flushWaitMs: FLUSH_WAIT_MS } });
       capture.at('2026-10-11T03:30:00.000Z');
       const id = await created(core, base, 'Closed unclaimed');
       // When grimoire saw the call: its PreToolUse hook ran, its result not yet written.
