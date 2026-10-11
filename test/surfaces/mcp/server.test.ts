@@ -282,6 +282,7 @@ describe('gating', () => {
         description: `A ${policy} op.`,
         kind: 'write' as const,
         policy,
+        mcp: false,
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
         annotations: { destructiveHint: false, openWorldHint: false },
       })),
@@ -298,11 +299,13 @@ describe('gating', () => {
       const humanRead = await served.client.callTool({ name: 'human-read-op', arguments: {} });
       const internal = await served.client.callTool({ name: 'internal-op', arguments: {} });
       const unknown = await served.client.callTool({ name: 'no-such-tool', arguments: {} });
+      // An agent op the registry keeps off MCP (the CLI and dashboard offer it).
+      const offMcp = await served.client.callTool({ name: 'settings_get', arguments: {} });
 
       expect(tools.map((tool) => tool.name)).toEqual(['show', 'list', 'labels', 'create', 'update', 'comment', 'claim', 'release', 'close']);
       expect(humanOnly.structuredContent).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });
       expect(humanRead.structuredContent).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });
-      for (const result of [internal, unknown]) {
+      for (const result of [internal, unknown, offMcp]) {
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toMatchObject({ error: { code: 'INVALID', details: { fields: { name: expect.any(String) } } } });
       }

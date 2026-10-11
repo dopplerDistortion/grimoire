@@ -2,7 +2,7 @@
 // and reports the requested changes that were already in place.
 import { GrimoireError, invalid } from '../errors';
 import { issueRevision, parseWriteRef, sortedUnique, type IssueLink, type IssueRecord } from '../tracker';
-import { fieldConflict, findCycle, stateConflict } from './derive';
+import { fieldConflict, findCycle, namedIn, stateConflict } from './derive';
 import { linkTarget } from './links';
 import { heldAttempt, parseHandle, recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
@@ -90,7 +90,7 @@ export const update = define({
   }),
   async run(input, { ctx, tracker, actor }): Promise<UpdateResult> {
     const author = writer(ctx);
-    const id = parseWriteRef(input.id, 'id');
+    const ref = parseWriteRef(input.id, 'id');
     const attempt = input.attempt === undefined ? undefined : parseHandle(input.attempt);
     const labelsAdd = input.labels_add ?? [];
     const labelsRemove = input.labels_remove ?? [];
@@ -113,7 +113,7 @@ export const update = define({
     if (Object.keys(problems).length > 0) throw invalid(problems);
 
     const write = await tracker.transact({ op: 'update', author, actor }, (draft) => {
-      draft.resolveWrite(id, 'id');
+      const id = draft.resolveWrite(ref, 'id');
       if (attempt !== undefined) heldAttempt(draft, id, attempt, author.email);
       const current = draft.issue(id)!;
       const currentRevision = issueRevision(current);
@@ -157,14 +157,14 @@ export const update = define({
       );
       let nextParent = current.parent;
       if (parent !== undefined) {
-        if (parent !== null) draft.resolveWrite(parent, 'parent');
-        if (parent === current.parent) noops.push({ field: 'parent', reason: 'unchanged' });
-        else nextParent = parent;
+        const target = parent === null ? null : draft.resolveWrite(parent, 'parent');
+        if (target === current.parent) noops.push({ field: 'parent', reason: 'unchanged' });
+        else nextParent = target;
       }
-      blockersAdd.forEach((blocker, i) => draft.resolveWrite(blocker, `blocked_by_add[${i}]`));
+      const blockers = blockersAdd.map((blocker, i) => draft.resolveWrite(blocker, `blocked_by_add[${i}]`));
       const blockedBy = applyDeltas(
         current.blocked_by,
-        blockersAdd,
+        blockers,
         blockersRemove,
         { add: 'blocked_by_add', remove: 'blocked_by_remove' },
         noops,
@@ -182,6 +182,7 @@ export const update = define({
         ? findCycle(
             draft.issues().map((issue) => (issue.id === id ? next : issue)),
             id,
+            namedIn(draft),
           )
         : null;
       if (cycle) {

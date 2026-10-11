@@ -22,7 +22,7 @@ export interface Person {
 
 /** Facts about one write that its commit records (spec §3, Commits). */
 export interface WriteSpec {
-  /** `Grimoire-Op`: create, update, comment, … */
+  /** `Grimoire-Op`: create, update, comment, …; a multi-word op is hyphenated (outcome-set, skill-edit). */
   readonly op: string;
   /** Author and committer. */
   readonly author: Person;
@@ -516,7 +516,7 @@ class GitTrackerStore implements TrackerStore {
     let bases = this.bases.get(key);
     if (!bases) {
       const run = await runGit(this.location.root, ['merge-base', '--all', ...commits]);
-      // Exit 1 with no output: unrelated histories, so the fold has no base.
+      // Exit 1 with no output: unrelated histories, so the fold has no base (unless a shallow boundary hid it).
       if (run.code !== 0 && run.code !== 1) {
         // The commits or their history are missing here (a partial or shallow clone).
         throw new GrimoireError('NOT_SYNCED', `the tracker history is incomplete in this clone: ${run.stderr.trim()}`, {
@@ -524,9 +524,26 @@ class GitTrackerStore implements TrackerStore {
         });
       }
       bases = run.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '');
+      if (bases.length === 0 && (await this.shallowHistory(commits))) {
+        // A shallow boundary hides the base: folding over nothing would duplicate and resurrect.
+        throw new GrimoireError('NOT_SYNCED', 'the tracker history is shallow in this clone, so the fold has no merge base', {
+          remedy: 'run `grimoire sync` to deepen the tracker history',
+        });
+      }
       this.bases.set(key, bases);
     }
     return bases;
+  }
+
+  /** Whether the history of `commits` stops at a shallow boundary rather than at its own roots. */
+  private async shallowHistory(commits: readonly string[]): Promise<boolean> {
+    const listed = await readFile(path.join(this.location.commonDir, 'shallow'), 'utf8').catch(() => '');
+    const shallow = new Set(listed.split(/\r?\n/).filter((line) => line !== ''));
+    if (shallow.size === 0) return false;
+    // A shallow commit shows as a root: its parents are cut off.
+    const run = await runGit(this.location.root, ['rev-list', '--max-parents=0', ...commits]);
+    if (run.code !== 0) return true;
+    return run.stdout.toString('utf8').split(/\r?\n/).some((root) => shallow.has(root));
   }
 
   /** Ids taken on either tip (live, deleted or forwarded), for minting. */

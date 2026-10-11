@@ -4,7 +4,7 @@ import { GrimoireError, invalid } from '../errors';
 import { parseWriteRef, type IssueRecord, type TrackerView } from '../tracker';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import type { CallContext } from './context';
-import { derivations, type Derivations, type IssueConflict } from './derive';
+import { derivations, namesIssue, type Derivations, type IssueConflict } from './derive';
 import { listedOpenAttempt, type ListedOpenAttempt } from './attempts';
 import { define, oneLine } from './op';
 import { staleCutoff } from './stale';
@@ -148,7 +148,7 @@ export const list = define({
       if (input.label && !input.label.every((l) => issue.labels.includes(l))) return false;
       if (input.without_label && input.without_label.some((l) => issue.labels.includes(l))) return false;
       if (input.unlabeled !== undefined && (issue.labels.length === 0) !== input.unlabeled) return false;
-      if (parent !== undefined && issue.parent !== parent) return false;
+      if (parent !== undefined && (issue.parent === null || !namesIssue(view, issue.parent, parent))) return false;
       if (assignee !== undefined && !(assignee === null ? d.assignees.length === 0 : d.assignees.includes(assignee))) {
         return false;
       }

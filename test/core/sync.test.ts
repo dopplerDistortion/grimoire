@@ -115,6 +115,23 @@ describe('automatic sync', () => {
     expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
   });
 
+  test('every write that ends an attempt syncs, the human-only ones too: a reassign from the dashboard is pushed', async ({
+    world,
+    grimoire,
+  }) => {
+    const core = syncingCore(grimoire);
+    const { id } = await ok(core.call('create', { title: 'Hand it over' }, grimoire.ctx));
+    await ok(core.call('claim', { id }, grimoire.ctx));
+    await core.close();
+    expect(await remoteTracker(world.a)).toBeNull();
+
+    const dashboard: CallContext = { ...grimoire.ctx, surface: 'dashboard', client: null, evidence: {} };
+    const human = syncingCore(grimoire);
+    await ok(human.call('reassign', { id, assignee: 'bob@example.com' }, dashboard));
+    await human.close();
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+  });
+
   test('a push a pre-receive hook rejects is recorded as rejected with the remote’s message; the marker stays until a later sync pushes', async ({
     world,
     grimoire,

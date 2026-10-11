@@ -5,7 +5,7 @@ import { invalid } from '../errors';
 import { issueRevision, type AttemptRecord, type IssueComment, type IssueLink, type TrackerView } from '../tracker';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import { listedOpenAttempt, type ListedOpenAttempt } from './attempts';
-import { derivations, type IssueConflict, type RelationState } from './derive';
+import { derivations, relatedIssue, type IssueConflict, type RelationState } from './derive';
 import { dashboardPort, localLink } from './local-link';
 import { define, oneLine } from './op';
 import { staleCutoff } from './stale';
@@ -158,7 +158,7 @@ function shownComment(comment: IssueComment): ShownComment {
 }
 
 function related(view: TrackerView, id: string, state: RelationState): RelatedIssue {
-  return { id, title: view.issue(id)?.title ?? null, status: state };
+  return { id, title: relatedIssue(view, id)?.title ?? null, status: state };
 }
 
 /** The bytes a string adds to a JSON document (its quoted, escaped form). */

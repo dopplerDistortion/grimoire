@@ -18,12 +18,12 @@ import type { Actor, CallContext } from './context';
 import { define, writer } from './op';
 import { s } from './schema';
 
-/** The store setting that governs every automatic sync (spec §4). Unset means on; the human-only settings change it. */
+/** The store setting that governs every automatic sync (spec §4). Unset means on; `settings_set` (human-only) changes it. */
 export const AUTO_SYNC_SETTING = 'auto-sync';
 
 /** Whether a store's settings let automatic syncs run. */
-export function autoSyncOn(view: Pick<TrackerView, 'setting'>): boolean {
-  const value = view.setting(AUTO_SYNC_SETTING);
+export function autoSyncOn(view: Pick<TrackerView, 'settings'>): boolean {
+  const value = view.settings().get(AUTO_SYNC_SETTING)?.value;
   return value !== false && value !== 'off' && value !== 'false';
 }
 
@@ -327,8 +327,9 @@ export const sync = define({
   description:
     'Fetch, fold and push grimoire/tracker now, whatever the auto-sync setting says. A failure (auth, network or rejected) comes back in the result and the sync status.',
   kind: 'write',
-  // A runtime verb (the CLI's `sync`, the dashboard's Sync now), never an MCP tool.
-  policy: 'internal',
+  // The CLI's `sync` (people, and agents without MCP tools) and the dashboard's Sync now; never an MCP tool.
+  policy: 'agent',
+  mcp: false,
   replay: 'none',
   input: s.object({}),
   async run(_input, { ctx, tracker, actor }): Promise<SyncResult> {
@@ -390,7 +391,9 @@ export const syncStatus = define({
   name: 'sync_status',
   description: 'How syncing grimoire/tracker goes on this machine: what waits, the last sync, and the last failure with the remote’s message.',
   kind: 'read',
-  policy: 'internal',
+  // For `status` and the dashboard; never an MCP tool.
+  policy: 'agent',
+  mcp: false,
   replay: 'none',
   input: s.object({}),
   async run(_input, { tracker }): Promise<SyncStatusResult> {

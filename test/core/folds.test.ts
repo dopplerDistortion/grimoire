@@ -3,8 +3,10 @@
 // two-parent commit the next write makes of it.
 import { readdir, rename } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
+import { openTracker } from '../../src/tracker';
 import {
   agentContext,
   commitToTracker,
@@ -66,6 +68,46 @@ describe('the merged view', () => {
     expect(await world.a.git(['ls-tree', '-r', '--name-only', tip])).toContain(`${fromBob}/issue.md`);
   });
 
+  test('store.fold() commits the fold on its own, with both tips as parents, and only when the tips diverged', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const store = await openTracker(world.a.dir);
+    const fold = () => store.fold({ author: { ...world.a.identity }, actor: { kind: 'human', client: 'cli' } });
+    const remoteTip = () => world.a.git(['rev-parse', 'refs/remotes/origin/grimoire/tracker']);
+    try {
+      const equal = await expectRefUnmoved(world.a, fold);
+      await createIssue(core, alice, { title: 'Local work' });
+      const localAhead = await expectRefUnmoved(world.a, fold);
+      await pushTracker(world.a);
+      await fetchTracker(world.b);
+      await createIssue(core, bob, { title: 'Bob’s work' });
+      await bobPublishes(world);
+      // a's tracker is now behind the remote-tracking one: nothing to fold, and fold() leaves it behind.
+      const remoteAhead = await expectRefUnmoved(world.a, fold);
+      const behind = (await trackerTip(world.a))!;
+      await world.a.git(['update-ref', TRACKER_REF, await remoteTip()]);
+      await createIssue(core, alice, { title: 'More local work' });
+      await createIssue(core, bob, { title: 'More of Bob’s work' });
+      await bobPublishes(world);
+      const [localTip, remote] = [(await trackerTip(world.a))!, await remoteTip()];
+      const diverged = await fold();
+
+      for (const nothing of [equal, localAhead, remoteAhead]) expect(nothing).toEqual({ commit: null });
+      expect(behind).not.toBe(await remoteTip());
+      expect(diverged.commit).toBe(await trackerTip(world.a));
+      expect(await world.a.git(['rev-list', '--parents', '-n', '1', diverged.commit!])).toBe(`${diverged.commit} ${localTip} ${remote}`);
+      const message = await world.a.git(['log', '-1', '--format=%B', diverged.commit!]);
+      expect(message).toMatch(/^grimoire: fold\n/);
+      expect(message).toMatch(/^Grimoire-Op: fold$/m);
+      expect(await fold()).toEqual({ commit: null });
+    } finally {
+      await store.close();
+    }
+  });
+
   test('folds of folds (criss-cross merge bases) fold over a recursive virtual base', async ({ world, grimoire }) => {
     const { core } = grimoire;
     const bobCore = grimoire.makeCore({ clock: () => T1 });
@@ -92,6 +134,38 @@ describe('the merged view', () => {
       ok: true,
       result: { title: 'Bob’s title', labels: [], comment_count: 2, conflict: null },
     });
+  });
+
+  test('a shallow tracker history hides the merge base: reads and writes give NOT_SYNCED instead of folding over nothing', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const id = await sharedIssue(world, core, alice, { title: 'Shared', body: 'line\n' });
+    await core.call('update', { id, title: 'Alice’s title' }, alice);
+    await core.call('update', { id, labels_add: ['bob'] }, bob);
+    await pushTracker(world.b);
+    // a fetches Bob's tip alone: its parent, the merge base, stays out of the history a sees.
+    await world.a.git([
+      'fetch',
+      '--quiet',
+      '--depth',
+      '1',
+      pathToFileURL(world.remote).href,
+      '+refs/heads/grimoire/tracker:refs/remotes/origin/grimoire/tracker',
+    ]);
+    expect(await world.a.git(['rev-parse', '--is-shallow-repository'])).toBe('true');
+
+    const read = await core.call('show', { ref: id }, alice);
+    const write = await expectRefUnmoved(world.a, () => core.call('comment', { id, body: 'fold' }, alice));
+
+    for (const outcome of [read, write]) {
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_SYNCED', message: expect.stringContaining('shallow'), details: { remedy: expect.stringContaining('grimoire sync') } },
+      });
+    }
   });
 
   test('reads of a fold create no git objects and never touch the network', async ({ world, grimoire }) => {
@@ -253,6 +327,38 @@ describe('body folds', () => {
         },
       },
     });
+  });
+
+  test('one overlapping hunk sets only that hunk aside: the clean hunks of both sides, anchored inserts included, still merge', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core } = grimoire;
+    const bobCore = grimoire.makeCore({ clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    const id = await sharedIssue(world, core, alice, { title: 'Map', body: MAP });
+    const alices = [
+      { op: 'insert_before', anchor: '\n## Done\n', text: '- [ ] from alice\n' },
+      { op: 'replace', anchor: '- [ ] first', text: '- [ ] first (alice)' },
+    ];
+    await core.call('update', { id, body_patch: alices }, alice);
+    await bobCore.call('update', { id, body_patch: [{ op: 'replace', anchor: '- [x] zero', text: '- [x] zero (bob)' }] }, bob);
+    await bobCore.call('update', { id, body_patch: [{ op: 'replace', anchor: '- [ ] first', text: '- [x] first' }] }, bob);
+    await bobPublishes(world);
+    await fetchTrackerFrom(world.b, world.a);
+
+    const seenByAlice = await core.call('show', { ref: id }, alice);
+    const seenByBob = await bobCore.call('show', { ref: id }, bob);
+
+    // Bob's change is the later one, so his side of the overlapping hunk stands.
+    const merged = '# Map\n\n## Next\n- [x] first\n- [ ] second\n- [ ] from alice\n\n## Done\n- [x] zero (bob)\n';
+    const conflict = {
+      fields: ['body'],
+      theirs: { body: '# Map\n\n## Next\n- [ ] first (alice)\n- [ ] second\n- [ ] from alice\n\n## Done\n- [x] zero\n' },
+      base: { body: MAP },
+    };
+    expect(seenByAlice).toMatchObject({ ok: true, result: { body: merged, conflict } });
+    expect(seenByBob).toMatchObject({ ok: true, result: { body: merged, conflict } });
   });
 });
 
@@ -471,7 +577,7 @@ describe('ends and outcomes', () => {
     await fetchTracker(world.b);
     await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, alice);
     // A human on b recovers what looks like a dead claim.
-    const humanBob = { ...bob, surface: 'cli' as const };
+    const humanBob = { ...bob, surface: 'cli' as const, tty: true };
     expect(await bobCore.call('release', { id, attempt, abandoned: true }, humanBob)).toMatchObject({ ok: true });
     await bobPublishes(world);
     await fetchTrackerFrom(world.b, world.a);
@@ -483,8 +589,8 @@ describe('ends and outcomes', () => {
       attempt,
       ended: 'done',
       ended_by: 'alice@example.com',
-      // Both outcomes are grimoire's: the later one stands.
-      outcome: { verdict: 'fail', reason: 'release-abandoned', set_by: 'grimoire', at: T1.toISOString() },
+      // Both outcomes are grimoire's, each derived from its own end: the one of the end that stood stands with it.
+      outcome: { verdict: 'pass', reason: 'done', set_by: 'grimoire', at: T0.toISOString() },
       conflict: {
         fields: ['end'],
         theirs: { end: [{ ended: 'release-abandoned', ended_at: T1.toISOString(), ended_by: 'bob@example.com' }] },
@@ -520,6 +626,48 @@ describe('ends and outcomes', () => {
       ok: true,
       result: { past_attempts: [{ attempt, outcome: { verdict: 'fail', set_by: 'human:bob@example.com' }, conflict: null }] },
     });
+  });
+
+  test('a session record cut on both clones: the further reach stands on both, by time, then by a Codex ordinal', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const id = await createIssue(core, alice, { title: 'Traced' });
+    const claimed = await core.call('claim', { id }, alice);
+    const sessions = `attempts/${id[3]}/${id[4]}/${id}/${claimed.ok ? claimed.result.attempt : ''}/sessions`;
+    // Reach as capture records it (spec §14): the last step's time and its ref, a Claude line uuid or a Codex ordinal.
+    const cut = (at: string, ref: string, text: string) =>
+      `---\nreach: ${JSON.stringify({ at: `2026-10-11T${at}.000Z`, ref })}\n---\n${text}\n`;
+    await commitToTracker(world.a, {
+      [`${sessions}/claude1.md`]: cut('03:30:00', '6f1c2d4e-0000-4000-8000-000000000001', 'base'),
+      [`${sessions}/codex1.md`]: cut('03:30:00', '7', 'base'),
+    });
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    await bobTracksRemote(world);
+    await commitToTracker(world.a, {
+      [`${sessions}/claude1.md`]: cut('03:40:00', '6f1c2d4e-0000-4000-8000-00000000000a', 'alice reaches later'),
+      [`${sessions}/codex1.md`]: cut('03:45:00', '11', 'alice: ordinal 11'),
+    });
+    await commitToTracker(world.b, {
+      [`${sessions}/claude1.md`]: cut('03:35:00', '6f1c2d4e-0000-4000-8000-00000000000b', 'bob reaches earlier'),
+      [`${sessions}/codex1.md`]: cut('03:45:00', '12', 'bob: ordinal 12'),
+    });
+    await bobPublishes(world);
+    await fetchTrackerFrom(world.b, world.a);
+
+    await core.call('comment', { id, body: 'a folds' }, alice);
+    await core.call('comment', { id, body: 'b folds' }, bob);
+
+    for (const clone of [world.a, world.b]) {
+      const tip = (await trackerTip(clone))!;
+      expect(await trackerFile(clone, tip, `${sessions}/claude1.md`)).toBe(
+        cut('03:40:00', '6f1c2d4e-0000-4000-8000-00000000000a', 'alice reaches later'),
+      );
+      expect(await trackerFile(clone, tip, `${sessions}/codex1.md`)).toBe(cut('03:45:00', '12', 'bob: ordinal 12'));
+    }
   });
 });
 
@@ -734,9 +882,9 @@ describe('settings, deletes and purges', () => {
     });
     // a still holds them: a late session record, a human outcome override, and a newer cut of the purged session record.
     await commitToTracker(world.a, {
-      [`${dir}/${attempt}/sessions/sk9.md`]: '---\nreach: {"at":"2026-10-11T03:30:00.000Z","n":7}\n---\n',
+      [`${dir}/${attempt}/sessions/sk9.md`]: '---\nreach: {"at":"2026-10-11T03:30:00.000Z","ref":"7"}\n---\n',
       [outcome]: '---\nverdict: "pass"\nreason: "override"\nset_by: "human:alice@example.com"\nat: "2026-10-11T05:00:00.000Z"\n---\n',
-      [`${dir}/${open}/sessions/sk1.md`]: '---\nreach: {"at":"2026-10-11T03:40:00.000Z","n":9}\n---\n',
+      [`${dir}/${open}/sessions/sk1.md`]: '---\nreach: {"at":"2026-10-11T03:40:00.000Z","ref":"9"}\n---\n',
     });
     await bobPublishes(world);
 
@@ -780,6 +928,8 @@ describe('id collisions', () => {
       expect(refused).toMatchObject({ ok: false, error: { code: 'AMBIGUOUS_REF', details: { candidates } } });
     }
     expect(await core.call('show', { ref: theirs }, alice)).toMatchObject({ ok: true, result: { id: theirs, title: 'Bob’s k1m0x' } });
+    const link = `https://forge.example/o/r/blob/grimoire/tracker/issues/k/1/${theirs}/issue.md`;
+    expect(await core.call('show', { ref: link }, alice)).toMatchObject({ ok: true, result: { id: theirs } });
     expect(await core.call('update', { id: mine, title: 'Alice’s, renamed' }, alice)).toMatchObject({ ok: true });
     const tip = (await trackerTip(world.a))!;
     const tree = (await world.a.git(['ls-tree', '-r', '--name-only', tip])).split('\n');
@@ -789,7 +939,45 @@ describe('id collisions', () => {
     expect(await trackerFile(world.a, tip, `issues/k/1/${mine}/issue.md`)).toMatch(/^id: "gr-k1m0x"$/m);
   });
 
-  test('a clone that kept working on its side of a collision lands on the right record when it folds the renamed one', async ({
+  test('once only one side of a collision is left, writes by the bare id land on it, as reads do', async ({ world, grimoire }) => {
+    const aliceCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x', 'c4ndy') });
+    const bobCore = grimoire.makeCore({ randomIdSuffix: suffixQueue('k1m0x'), clock: () => T1 });
+    const { alice, bob } = await shared(world, grimoire);
+    await createIssue(aliceCore, alice, { title: 'Alice’s k1m0x' });
+    await createIssue(bobCore, bob, { title: 'Bob’s k1m0x' });
+    await bobPublishes(world);
+    const { alice: mine, bob: theirs } = await renamedIds(aliceCore, alice);
+    // The fold commits, then Bob's side goes (a delete's commit: the directory goes, a tombstone stays).
+    await aliceCore.call('comment', { id: mine, body: 'fold' }, alice);
+    const tip = (await trackerTip(world.a))!;
+    const files = (await world.a.git(['ls-tree', '-r', '--name-only', tip, `issues/k/1/${theirs}`])).split('\n');
+    await commitToTracker(world.a, {
+      ...Object.fromEntries(files.map((file) => [file, null])),
+      [`deleted/${theirs}.md`]: '---\nby: "alice@example.com"\n---\n',
+    });
+
+    const shown = await aliceCore.call('show', { ref: 'gr-k1m0x' }, alice);
+    const updated = await aliceCore.call('update', { id: 'gr-k1m0x', title: 'Alice’s, renamed' }, alice);
+    const claimed = await aliceCore.call('claim', { id: 'gr-k1m0x' }, alice);
+    const attempt = claimed.ok ? claimed.result.attempt : '';
+    const commented = await aliceCore.call('comment', { id: 'gr-k1m0x', body: 'Working on it' }, alice);
+    const closed = await aliceCore.call('close', { id: 'gr-k1m0x', reason: 'done', attempt, debrief: DEBRIEF }, alice);
+    const child = await createIssue(aliceCore, alice, { title: 'Child', parent: 'gr-k1m0x', blocked_by: ['gr-k1m0x'] });
+
+    expect(shown).toMatchObject({ ok: true, result: { id: mine } });
+    expect(updated).toMatchObject({ ok: true });
+    expect(claimed).toMatchObject({ ok: true, result: { id: mine } });
+    expect(commented).toMatchObject({ ok: true, result: { issue: mine } });
+    expect(closed).toEqual({ ok: true, result: { id: mine, attempt, ended: 'done', outcome: 'pass' } });
+    expect(await aliceCore.call('show', { ref: mine }, alice)).toMatchObject({
+      ok: true,
+      result: { title: 'Alice’s, renamed', status: 'done', comment_count: 3 },
+    });
+    const shownChild = await aliceCore.call('show', { ref: child }, alice);
+    expect(shownChild).toMatchObject({ ok: true, result: { parent: mine, blocked_by: [mine] } });
+  });
+
+  test('a clone that kept working on its side of a collision lands on the right record when it folds the renamed one, and its own handle still ends by the bare id', async ({
     world,
     grimoire,
   }) => {
@@ -808,6 +996,9 @@ describe('id collisions', () => {
     const ids = await renamedIds(bobCore, bob);
     const shown = await bobCore.call('show', { ref: ids.bob }, bob);
     const other = await bobCore.call('show', { ref: ids.alice }, bob);
+    const handle = bobsClaim.ok ? bobsClaim.result.attempt : '';
+    // Bob claimed by the bare id before the collision was found: that is the id he knows.
+    const released = await bobCore.call('release', { id: 'gr-k1m0x', attempt: handle, debrief: DEBRIEF }, bob);
 
     expect(shown).toMatchObject({
       ok: true,
@@ -819,6 +1010,8 @@ describe('id collisions', () => {
       },
     });
     expect(other).toMatchObject({ ok: true, result: { title: 'Alice’s k1m0x', labels: [], open_attempts: [] } });
+    expect(released).toEqual({ ok: true, result: { id: ids.bob, attempt: handle, ended: 'release', outcome: 'fail' } });
+    expect(await bobCore.call('show', { ref: ids.bob }, bob)).toMatchObject({ ok: true, result: { open_attempts: [], status: 'open' } });
   });
 });
 
