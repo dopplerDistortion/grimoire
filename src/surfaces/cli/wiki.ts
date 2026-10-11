@@ -284,8 +284,10 @@ export async function runWiki(argv: readonly string[]): Promise<number> {
     process.stderr.write('usage: grimoire wiki list | wiki show <slug> | wiki edit <slug>\n');
     return 2;
   }
-  const { createCore } = await import('../../core');
-  const core = createCore();
+  const { createCore, spawnedAutoSync } = await import('../../core');
+  // A CLI write hands its automatic sync to a detached `grimoire sync --background` (spec §4);
+  // until that child finishes (or if it can't run), the sync-pending marker stands.
+  const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [process.argv[1] ?? '', 'sync', '--background'] }) });
   let outcome: Outcome<unknown>;
   try {
     const ctx = await cliContext();

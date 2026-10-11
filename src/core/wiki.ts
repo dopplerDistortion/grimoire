@@ -144,7 +144,7 @@ export const wikiEdit = define({
     body: s.string(),
     resolves: s.optional(s.array(s.string(oneLine), 'the set-aside sides (conflict ids from wiki_show) this edit reconciles')),
   }),
-  async run(input, { ctx, tracker, actor, scanner }): Promise<WikiEditResult> {
+  async run(input, { ctx, tracker, actor, scanner, requestSync }): Promise<WikiEditResult> {
     const author = writer(ctx);
     const slug = parseSlug(input.slug);
     const resolves = sortedUnique((input.resolves ?? []).map((id) => id.trim().toLowerCase()));
@@ -197,6 +197,8 @@ export const wikiEdit = define({
       });
       return { result: { slug, created: !current, changed: true, base: version, resolved: resolves } };
     });
+    // A human knowledge edit triggers the automatic sync (spec §4).
+    if (write.commit) requestSync(write.commit);
     return write.result;
   },
 });

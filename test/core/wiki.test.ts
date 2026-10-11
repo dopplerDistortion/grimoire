@@ -471,6 +471,28 @@ describe('wiki folds across two clones', () => {
   });
 });
 
+describe('sync after a human knowledge edit', () => {
+  test('a wiki edit and a quarantine each ask for the automatic sync of the commit they made; an edit that changes nothing does not', async ({
+    world,
+    grimoire,
+  }) => {
+    const asked: string[] = [];
+    const core = grimoire.makeCore({ autoSync: ({ tip }) => void asked.push(tip) });
+    const human = terminal(grimoire.ctx);
+
+    const created = await edit(core, human, { ...PAGE, base: null });
+    const afterEdit = await trackerTip(world.a);
+    await edit(core, human, { slug: PAGE.slug, base: created.base, body: PAGE.body });
+    await core.call('quarantine', { page: PAGE.slug, reason: 'suspicious' }, human);
+    const afterMark = await trackerTip(world.a);
+    await core.call('unquarantine', { page: PAGE.slug }, human);
+    const afterClear = await trackerTip(world.a);
+    await core.close();
+
+    expect(asked).toEqual([afterEdit, afterMark, afterClear]);
+  });
+});
+
 describe('what a newer release wrote', () => {
   test('an edit keeps page keys this release doesn’t know, and never rewrites an index a newer release generated', async ({
     world,

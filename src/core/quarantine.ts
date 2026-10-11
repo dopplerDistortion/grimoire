@@ -38,7 +38,7 @@ export const quarantine = define({
     page: s.string({ ...oneLine, description: 'the page’s slug' }),
     reason: s.string({ nonBlank: true, description: 'why it is quarantined (required)' }),
   }),
-  async run(input, { ctx, tracker, actor }): Promise<QuarantineResult> {
+  async run(input, { ctx, tracker, actor, requestSync }): Promise<QuarantineResult> {
     const author = writer(ctx);
     const slug = parseSlug(input.page, 'page');
     const write = await tracker.transact<QuarantineResult>({ op: 'quarantine', author, actor }, async (draft) => {
@@ -56,6 +56,8 @@ export const quarantine = define({
       });
       return { result: { page: slug, quarantined: true, changed: true, record: mark.id } };
     });
+    // A human knowledge decision triggers the automatic sync (spec §4).
+    if (write.commit) requestSync(write.commit);
     return write.result;
   },
 });
@@ -70,7 +72,7 @@ export const unquarantine = define({
     page: s.string({ ...oneLine, description: 'the page’s slug' }),
     reason: s.optional(s.string({ description: 'why it is lifted' })),
   }),
-  async run(input, { ctx, tracker, actor }): Promise<QuarantineResult> {
+  async run(input, { ctx, tracker, actor, requestSync }): Promise<QuarantineResult> {
     const author = writer(ctx);
     const slug = parseSlug(input.page, 'page');
     const write = await tracker.transact<QuarantineResult>({ op: 'unquarantine', author, actor }, async (draft) => {
@@ -89,6 +91,7 @@ export const unquarantine = define({
       });
       return { result: { page: slug, quarantined: false, changed: true, record: clear.id } };
     });
+    if (write.commit) requestSync(write.commit);
     return write.result;
   },
 });
