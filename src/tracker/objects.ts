@@ -8,6 +8,7 @@
 // create objects (spec §4, Read path). A write persists the ones it needs.
 import { GrimoireError } from '../errors';
 import { ObjectReader, type GitObject } from '../git/batch';
+import { GIT_STALL_MS, GitStalledError } from '../git/run';
 import {
   BLOB_MODE,
   decodeCommitHeader,
@@ -151,9 +152,11 @@ export class TrackerObjects extends ObjectSource {
     private readonly repoDir: string,
     private readonly objectsDir: string,
     readonly format: ObjectFormat,
+    /** How long the reader's git may stay silent before it is killed as stuck. */
+    private readonly stallMs = GIT_STALL_MS,
   ) {
     super();
-    this.reader = new ObjectReader(repoDir);
+    this.reader = new ObjectReader(repoDir, stallMs);
   }
 
   warm(): void {
@@ -192,7 +195,7 @@ export class TrackerObjects extends ObjectSource {
 
   private restartReader(): void {
     const old = this.reader;
-    this.reader = new ObjectReader(this.repoDir);
+    this.reader = new ObjectReader(this.repoDir, this.stallMs);
     // After close, the new reader too ends its git once a read is answered.
     if (this.closed) void this.reader.close();
     const closing: Promise<void> = old.close().finally(() => this.retiring.delete(closing));
@@ -201,12 +204,15 @@ export class TrackerObjects extends ObjectSource {
 
   /**
    * Reads `name` through the reader, and once more when its git died under the
-   * read (killed, or crashed): the reader starts a new one for the retry.
+   * read (killed, or crashed): the reader starts a new one for the retry. A
+   * git that stopped answering gives BUSY at once: its caller decides whether
+   * there is time to try again.
    */
   private async read(name: string): Promise<GitObject | null> {
     try {
       return await this.reader.read(name);
-    } catch {
+    } catch (error) {
+      if (error instanceof GitStalledError) throw error;
       return this.reader.read(name);
     }
   }

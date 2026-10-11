@@ -23,23 +23,32 @@ export interface UpdateResult {
 
 const label = s.string(oneLine);
 
-/** Applies add/remove deltas to a sorted set, recording no-ops. */
+/**
+ * Applies add/remove deltas to a sorted set, recording no-ops. Two values are
+ * one member when `key` maps them alike (a blocker's bare id and the record
+ * its forwarding record names); a remove drops every member it matches.
+ */
 function applyDeltas(
   current: readonly string[],
   adds: readonly string[],
   removes: readonly string[],
   names: { add: string; remove: string },
   noops: Noop[],
+  key: (value: string) => string = (value) => value,
 ): string[] {
-  const set = new Set(current);
+  let members = [...current];
   adds.forEach((value, i) => {
-    if (set.has(value)) noops.push({ field: `${names.add}[${i}]`, reason: 'already set' });
-    else set.add(value);
+    const k = key(value);
+    if (members.some((member) => key(member) === k)) noops.push({ field: `${names.add}[${i}]`, reason: 'already set' });
+    else members.push(value);
   });
   removes.forEach((value, i) => {
-    if (!set.delete(value)) noops.push({ field: `${names.remove}[${i}]`, reason: 'not set' });
+    const k = key(value);
+    const kept = members.filter((member) => key(member) !== k);
+    if (kept.length === members.length) noops.push({ field: `${names.remove}[${i}]`, reason: 'not set' });
+    else members = kept;
   });
-  return sortedUnique(set);
+  return sortedUnique(members);
 }
 
 function overlapping(adds: readonly string[], removes: readonly string[], field: string): Record<string, string> {
@@ -161,13 +170,23 @@ export const update = define({
         if (target === current.parent) noops.push({ field: 'parent', reason: 'unchanged' });
         else nextParent = target;
       }
+      // A blocker is the record it names: a bare id written before a
+      // collision and the id its forwarding record names are one blocker.
+      const named = namedIn(draft);
       const blockers = blockersAdd.map((blocker, i) => draft.resolveWrite(blocker, `blocked_by_add[${i}]`));
+      const adding = new Set(blockers.map(named));
+      const alsoAdded: Record<string, string> = {};
+      blockersRemove.forEach((blocker, i) => {
+        if (adding.has(named(blocker))) alsoAdded[`blocked_by_remove[${i}]`] = `"${blocker}" names ${named(blocker)}, which is also being added`;
+      });
+      if (Object.keys(alsoAdded).length > 0) throw invalid(alsoAdded);
       const blockedBy = applyDeltas(
         current.blocked_by,
         blockers,
         blockersRemove,
         { add: 'blocked_by_add', remove: 'blocked_by_remove' },
         noops,
+        named,
       );
       const links = [...current.links];
       linksAdd.forEach((link, i) => {
@@ -182,7 +201,7 @@ export const update = define({
         ? findCycle(
             draft.issues().map((issue) => (issue.id === id ? next : issue)),
             id,
-            namedIn(draft),
+            named,
           )
         : null;
       if (cycle) {

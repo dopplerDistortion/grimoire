@@ -5,7 +5,7 @@ import { VERSION } from '../version';
 import { zeroOid } from '../git/objects';
 import { locateRepo, type RepoLocation } from '../git/repo';
 import { packedRefsStamp, RefUpdater } from '../git/refs';
-import { runGit } from '../git/run';
+import { GIT_STALL_MS, GitStalledError, runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
 import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, TRACKER_REF } from './layout';
@@ -60,6 +60,8 @@ export interface TrackerOptions {
   readonly randomIdSuffix?: (length: number) => string;
   /** How long one write may keep retrying before BUSY (default ~10 s). */
   readonly budgetMs?: number;
+  /** How long a local git may say nothing before it is killed as stuck (default GIT_STALL_MS). */
+  readonly gitStallMs?: number;
 }
 
 export interface TrackerStore {
@@ -77,8 +79,12 @@ export interface TrackerStore {
    * idempotency key, checks the marker, re-runs `body` on a fresh draft, and
    * commits the draft's edits as one commit with a compare-and-set ref move.
    * `body` may run several times and must only touch the draft. Any error
-   * means the ref did not move. BUSY after the budget, or at once for a ref
-   * lock older than ~30 s (`details.stale_lock`).
+   * means the ref did not move (but a plain Error, when a git that stopped
+   * answering after it was told to move the ref can't say whether it did).
+   * BUSY after the budget, or at once for a ref lock older than ~30 s
+   * (`details.stale_lock`). A git that says nothing for `gitStallMs` is
+   * killed and the round tried again on a new one, or BUSY when a whole stall
+   * no longer fits in the budget.
    */
   transact<R>(
     spec: WriteSpec,
@@ -127,6 +133,14 @@ interface RemoteConfig {
   readonly chosen: string | null;
   /** The configured remotes' names, plus `grimoire.remote`'s: whose remote-tracking tracker counts. */
   readonly names: readonly string[];
+}
+
+/** The `shallow` file as last read, and whether each commit's history reaches one of its commits. */
+interface ShallowMemo {
+  /** The file's mtime and size when it was read. */
+  readonly stamp: string;
+  readonly boundary: ReadonlySet<string>;
+  readonly reaches: BoundedMap<string, boolean>;
 }
 
 type RefMove = { moved: true } | { moved: false; staleLock?: { path: string; age_ms: number } };
@@ -196,13 +210,14 @@ class GitTrackerStore implements TrackerStore {
   private readonly clock: () => Date;
   private readonly randomSuffix: (length: number) => string;
   private readonly budgetMs: number;
+  private readonly stallMs: number;
   /** Moves the tracker ref for writes, through one long-lived git. */
   private readonly updater: RefUpdater;
   private remoteConfig: { stamp: string; value: RemoteConfig } | null = null;
   private checkoutConfig: { stamp: string; root: string | null } | null = null;
   /** Whether a tip's history holds a root commit, by `<root> <tip>`. */
   private readonly holds = new BoundedMap<string, boolean>(1_024);
-  private shallowMemo: { key: string; tips: ReadonlySet<string> } | null = null;
+  private shallowMemo: ShallowMemo | null = null;
   /** The latest comment time this store wrote: comment times never go back within a process. */
   private commentMs = 0;
 
@@ -210,13 +225,19 @@ class GitTrackerStore implements TrackerStore {
     readonly location: RepoLocation,
     private readonly options: TrackerOptions,
   ) {
-    this.objects = new TrackerObjects(location.root, path.join(location.commonDir, 'objects'), location.objectFormat);
+    this.stallMs = options.gitStallMs ?? GIT_STALL_MS;
+    this.objects = new TrackerObjects(location.root, path.join(location.commonDir, 'objects'), location.objectFormat, this.stallMs);
     this.loader = new SnapshotLoader(this.objects);
     this.fairness = new FairnessLock(location.commonDir);
-    this.updater = new RefUpdater(location.root, 'grimoire: write', () => packedRefsStamp(location.commonDir));
+    this.updater = new RefUpdater(location.root, 'grimoire: write', () => packedRefsStamp(location.commonDir), this.stallMs);
     this.clock = options.clock ?? (() => new Date());
     this.randomSuffix = options.randomIdSuffix ?? randomIdSuffix;
     this.budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
+  }
+
+  /** A one-shot git in the repository, killed (GitStalledError) when it says nothing for the stall time. */
+  private git(args: readonly string[]) {
+    return runGit(this.location.root, args, { stallMs: this.stallMs });
   }
 
   async close(): Promise<void> {
@@ -265,7 +286,9 @@ class GitTrackerStore implements TrackerStore {
   private async prefetch(): Promise<void> {
     const warming = this.updater.warm();
     try {
-      await this.snapshotOf(await this.resolveTips());
+      const tips = await this.resolveTips();
+      await this.isShallow(tips);
+      await this.snapshotOf(tips);
     } catch {
       // The round resolves and loads again, and reports what went wrong.
     }
@@ -296,47 +319,63 @@ class GitTrackerStore implements TrackerStore {
     options: { foldOnly?: boolean },
   ): Promise<WriteResult<R>> {
     for (;;) {
-      const tips = await this.resolveTips();
-      if (await this.isShallow(tips)) throw shallowHistory(this.location.root);
-      const snapshot = await this.snapshotOf(tips);
-      const now = this.clock();
-      if (spec.idempotency) {
-        const replay = await lookupKey(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, now);
-        if (replay) return { result: replay.result as R, commit: null, replayed: true, sealed: false };
+      try {
+        const written = await this.round(spec, body, options);
+        if (written) return written;
+        if (Date.now() >= deadline) throw busy('the tracker kept moving for the whole write budget');
+      } catch (error) {
+        // The stuck git was killed before the ref could move: try again on a new one while a whole stall still fits.
+        if (!(error instanceof GitStalledError) || Date.now() + this.stallMs >= deadline) throw error;
       }
-      checkTrackerMarker(snapshot.marker);
-      const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs);
-      const outcome = await body(draft);
-      const edits = draft.edits();
-      if (spec.idempotency) {
-        const recorded = await keyEdits(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, outcome.result, now);
-        for (const [file, content] of recorded) edits.set(file, content);
-      }
-      const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
-      if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false, sealed: false };
-
-      // The fold's merged tree becomes real only now, in the write that commits it.
-      if (snapshot.virtual) await snapshot.virtual.persist(snapshot.rootTree);
-      const tree = (await this.objects.editTree(snapshot.rootTree, edits)) ?? (await this.objects.emptyTree());
-      const message = this.message(spec, outcome.issue, outcome.attempt);
-      const commit = await this.objects.writeCommit({
-        tree,
-        parents: snapshot.parents,
-        author: { ...spec.author, when: now },
-        committer: { ...spec.author, when: now },
-        message,
-      });
-      const move = await this.moveRef(tips.local, commit);
-      if (move.moved) {
-        this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
-        return { result: outcome.result, commit, replayed: false, sealed: [...edits.keys()].some(isAttemptEnd) };
-      }
-      if (move.staleLock) {
-        throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
-      }
-      if (Date.now() >= deadline) throw busy('the tracker kept moving for the whole write budget');
       await sleep(5 + Math.random() * 20);
     }
+  }
+
+  /** One compare-and-set round: the write's result, or null when the tracker moved under it. */
+  private async round<R>(
+    spec: WriteSpec,
+    body: (draft: TrackerDraft) => WriteOutcome<R> | Promise<WriteOutcome<R>>,
+    options: { foldOnly?: boolean },
+  ): Promise<WriteResult<R> | null> {
+    const tips = await this.resolveTips();
+    if (await this.isShallow(tips)) throw shallowHistory(this.location.root);
+    const snapshot = await this.snapshotOf(tips);
+    const now = this.clock();
+    if (spec.idempotency) {
+      const replay = await lookupKey(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, now);
+      if (replay) return { result: replay.result as R, commit: null, replayed: true, sealed: false };
+    }
+    checkTrackerMarker(snapshot.marker);
+    const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs);
+    const outcome = await body(draft);
+    const edits = draft.edits();
+    if (spec.idempotency) {
+      const recorded = await keyEdits(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, outcome.result, now);
+      for (const [file, content] of recorded) edits.set(file, content);
+    }
+    const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
+    if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false, sealed: false };
+
+    // The fold's merged tree becomes real only now, in the write that commits it.
+    if (snapshot.virtual) await snapshot.virtual.persist(snapshot.rootTree);
+    const tree = (await this.objects.editTree(snapshot.rootTree, edits)) ?? (await this.objects.emptyTree());
+    const message = this.message(spec, outcome.issue, outcome.attempt);
+    const commit = await this.objects.writeCommit({
+      tree,
+      parents: snapshot.parents,
+      author: { ...spec.author, when: now },
+      committer: { ...spec.author, when: now },
+      message,
+    });
+    const move = await this.moveRef(tips.local, commit);
+    if (move.moved) {
+      this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
+      return { result: outcome.result, commit, replayed: false, sealed: [...edits.keys()].some(isAttemptEnd) };
+    }
+    if (move.staleLock) {
+      throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
+    }
+    return null;
   }
 
   async initialize(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ root: string; created: boolean }> {
@@ -455,7 +494,7 @@ class GitTrackerStore implements TrackerStore {
     if (holds === undefined) {
       holds =
         (await this.reaches(tip, (commit) => commit.startsWith(root) || this.holds.get(`${root} ${commit}`) === true)) ||
-        (await runGit(this.location.root, ['merge-base', '--is-ancestor', root, tip])).code === 0;
+        (await this.git(['merge-base', '--is-ancestor', root, tip])).code === 0;
       this.holds.set(key, holds);
     }
     return holds;
@@ -470,24 +509,44 @@ class GitTrackerStore implements TrackerStore {
     return (await this.shallowTips(tips)).size > 0;
   }
 
-  /** The tips whose history reaches a shallow boundary, memoized by the `shallow` file and the tips. */
+  /** The tips whose history reaches a shallow boundary. */
   private async shallowTips({ local, remote }: Tips): Promise<ReadonlySet<string>> {
     const file = path.join(this.location.commonDir, 'shallow');
     const info = await stat(file).catch(() => null);
     const tips = [...new Set([local, remote].filter((tip): tip is string => tip !== null))];
-    if (!info || tips.length === 0) return new Set();
-    const key = `${info.mtimeMs}:${info.size}:${tips.join(' ')}`;
-    if (this.shallowMemo?.key !== key) {
+    const shallow = new Set<string>();
+    if (!info || tips.length === 0) return shallow;
+    const stamp = `${info.mtimeMs}:${info.size}`;
+    if (this.shallowMemo?.stamp !== stamp) {
       const boundary = new Set((await readFile(file, 'utf8').catch(() => '')).split(/\r?\n/).filter((line) => line !== ''));
-      const shallow = new Set<string>();
-      for (const tip of tips) {
-        const run = await runGit(this.location.root, ['rev-list', '--max-parents=0', tip]);
-        const roots = run.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '');
-        if (roots.some((root) => boundary.has(root))) shallow.add(tip);
-      }
-      this.shallowMemo = { key, tips: shallow };
+      this.shallowMemo = { stamp, boundary, reaches: new BoundedMap(1_024) };
     }
-    return this.shallowMemo.tips;
+    for (const tip of tips) if (await this.reachesBoundary(tip, this.shallowMemo)) shallow.add(tip);
+    return shallow;
+  }
+
+  /**
+   * Whether `tip`'s history reaches a shallow boundary; memoized. Walked back
+   * from `tip` to a boundary commit or to commits already answered, so a tip
+   * that writes moved on by a commit or a few costs cached reads, not a git
+   * process inside the fairness lock; git decides past the walk.
+   */
+  private async reachesBoundary(tip: string, memo: ShallowMemo): Promise<boolean> {
+    let reaches = memo.reaches.get(tip);
+    if (reaches === undefined) {
+      reaches = await this.walk(
+        tip,
+        (commit) => memo.boundary.has(commit) || memo.reaches.get(commit) === true,
+        (commit) => memo.reaches.get(commit) === false,
+      );
+      if (reaches === undefined) {
+        const run = await this.git(['rev-list', '--max-parents=0', tip]);
+        const roots = run.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '');
+        reaches = roots.some((root) => memo.boundary.has(root));
+      }
+      memo.reaches.set(tip, reaches);
+    }
+    return reaches;
   }
 
   /** The clone's remotes and `grimoire.remote`, re-read only when its config file changes. */
@@ -495,7 +554,7 @@ class GitTrackerStore implements TrackerStore {
     const info = await stat(path.join(this.location.commonDir, 'config')).catch(() => null);
     const stamp = info ? `${info.mtimeMs}:${info.size}` : 'none';
     if (this.remoteConfig?.stamp !== stamp) {
-      const run = await runGit(this.location.root, ['config', '-z', '--get-regexp', '^(remote\\..+|grimoire\\.remote)$']);
+      const run = await this.git(['config', '-z', '--get-regexp', '^(remote\\..+|grimoire\\.remote)$']);
       let chosen: string | null = null;
       const names = new Set<string>();
       // `key\nvalue\0` per entry (`key\0` for a key with no value); exit 1: no such keys.
@@ -558,7 +617,7 @@ class GitTrackerStore implements TrackerStore {
       this.bases.set(key, bases);
     }
     if (!bases) {
-      const run = await runGit(this.location.root, ['merge-base', '--all', ...commits]);
+      const run = await this.git(['merge-base', '--all', ...commits]);
       // Exit 1 with no output: unrelated histories, so the fold has no base (unless a shallow boundary hid it).
       if (run.code !== 0 && run.code !== 1) {
         // The commits or their history are missing here (a partial or shallow clone).
@@ -591,24 +650,41 @@ class GitTrackerStore implements TrackerStore {
 
   /**
    * Whether walking back from `tip` meets a commit `found` accepts. False
-   * when the walk gives up (after ANCESTRY_WALK commits) or can't read a
-   * commit: a git process decides then. Writes extend the tracker a commit or
-   * a few at a time, so a new tip usually takes a few cached reads here
-   * instead of a git process inside the fairness lock.
+   * too when the walk gives up: a git process decides then (see `walk`).
    */
   private async reaches(tip: string, found: (commit: string) => boolean): Promise<boolean> {
+    return (await this.walk(tip, found)) === true;
+  }
+
+  /**
+   * Walks back from `tip`: true when it meets a commit `found` accepts, false
+   * when every line of its history ended (at a root, or at a commit `settled`
+   * says needs no walk past it) without meeting one, and undefined when the
+   * walk gave up (after ANCESTRY_WALK commits) or couldn't read a commit: a
+   * git process decides then. Writes extend the tracker a commit or a few at
+   * a time, so a new tip usually takes a few cached reads here instead of a
+   * git process inside the fairness lock.
+   */
+  private async walk(
+    tip: string,
+    found: (commit: string) => boolean,
+    settled: (commit: string) => boolean = () => false,
+  ): Promise<boolean | undefined> {
     const seen = new Set<string>();
     try {
-      for (let frontier = [tip]; frontier.length > 0 && seen.size < ANCESTRY_WALK; ) {
+      for (let frontier = [tip]; frontier.length > 0; ) {
         if (frontier.some(found)) return true;
+        if (seen.size >= ANCESTRY_WALK) return undefined;
         for (const commit of frontier) seen.add(commit);
-        const headers = await Promise.all(frontier.map((commit) => this.objects.commit(commit)));
+        const open = frontier.filter((commit) => !settled(commit));
+        const headers = await Promise.all(open.map((commit) => this.objects.commit(commit)));
         frontier = [...new Set(headers.flatMap((header) => header.parents))].filter((commit) => !seen.has(commit));
       }
+      return false;
     } catch {
       // A commit missing here (a shallow or partial clone): git reports it.
+      return undefined;
     }
-    return false;
   }
 
   /** Whether the history of `commits` stops at a shallow boundary rather than at its own roots. */
@@ -617,7 +693,7 @@ class GitTrackerStore implements TrackerStore {
     const shallow = new Set(listed.split(/\r?\n/).filter((line) => line !== ''));
     if (shallow.size === 0) return false;
     // A shallow commit shows as a root: its parents are cut off.
-    const run = await runGit(this.location.root, ['rev-list', '--max-parents=0', ...commits]);
+    const run = await this.git(['rev-list', '--max-parents=0', ...commits]);
     if (run.code !== 0) return true;
     return run.stdout.toString('utf8').split(/\r?\n/).some((root) => shallow.has(root));
   }
@@ -632,7 +708,7 @@ class GitTrackerStore implements TrackerStore {
   }
 
   private async rootOf(tip: string): Promise<string> {
-    const run = await runGit(this.location.root, ['rev-list', '--first-parent', '--max-parents=0', tip]);
+    const run = await this.git(['rev-list', '--first-parent', '--max-parents=0', tip]);
     return run.stdout.toString('utf8').trim().split(/\r?\n/).pop()!;
   }
 
@@ -650,7 +726,7 @@ class GitTrackerStore implements TrackerStore {
 
   /** Creates the tracker ref with a process of its own, so its reflog entry carries `subject`. */
   private async createRef(commit: string, subject: string): Promise<RefMove> {
-    const run = await runGit(this.location.root, [
+    const run = await this.git([
       'update-ref',
       '--create-reflog',
       '-m',

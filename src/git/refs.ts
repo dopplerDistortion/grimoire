@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
-import { cleanGitEnv, NO_HOOKS, runGit } from './run';
+import { cleanGitEnv, GIT_STALL_MS, GitStalledError, killTree, NO_HOOKS, runGit } from './run';
 
 /**
  * Whether the ref moved. When it didn't, `stderr` is git's reason (a lost
@@ -21,6 +21,8 @@ interface Session {
   onLine: ((line: string) => void) | null;
   onExit: (() => void) | null;
   exited: boolean;
+  /** Killed for answering nothing for the stall time: it is told nothing more. */
+  stalled: boolean;
 }
 
 /** How one transaction on a session ended. */
@@ -35,7 +37,9 @@ type Attempt =
    */
   | { readonly kind: 'lost' }
   /** The process died after it was told to commit: the ref may have moved. */
-  | { readonly kind: 'unknown' };
+  | { readonly kind: 'unknown' }
+  /** git answered nothing for the stall time before it was told to commit, and was killed: the ref did not move. */
+  | { readonly kind: 'stalled' };
 
 /** How many transactions an update may lose (see `Attempt`) before it gives up. */
 const ATTEMPTS = 3;
@@ -56,6 +60,13 @@ const ATTEMPTS = 3;
  * new packed-refs stamp gets a new process, and once `prepare` has locked the
  * ref (nothing can move it then), the stamp is taken again: when it changed
  * since git started, the transaction is aborted and retried on a new process.
+ *
+ * git has `stallMs` to answer each step. One that doesn't is killed (with its
+ * tree on Windows) and the next update starts a new one. Stuck before it was
+ * told to commit, the ref did not move: the update fails with GitStalledError
+ * (BUSY). Stuck after, the ref may have moved: a new git is asked whether it
+ * did, and only when that can't be told either does the update fail with a
+ * plain Error, which promises nothing (ADR 0012).
  */
 export class RefUpdater {
   private session: Session | null = null;
@@ -69,11 +80,13 @@ export class RefUpdater {
     private readonly reflogMessage: string,
     /** The repository's `packedRefsStamp`. */
     private readonly packedRefs: () => Promise<string>,
+    private readonly stallMs = GIT_STALL_MS,
   ) {}
 
   /**
    * Moves `ref` from `old` (the zero oid: create it) to `next`, atomically.
    * After `close`, the update still runs, on a git that exits right after it.
+   * GitStalledError: git got stuck before it could move the ref.
    */
   update(ref: string, next: string, old: string): Promise<RefUpdate> {
     const run = this.tail.then(() => this.transact(ref, next, old)).finally(() => {
@@ -103,14 +116,21 @@ export class RefUpdater {
     await Promise.all(this.ending);
   }
 
-  /** Lets a session's git exit (aborting any open transaction); Node stays alive until it has. */
+  /**
+   * Lets a session's git exit (aborting any open transaction); Node stays
+   * alive until it has. One still running `stallMs` later is killed.
+   */
   private end(session: Session): void {
     if (session.exited) return;
     setActive(session, true);
+    const stuck = setTimeout(() => killTree(session.child), this.stallMs);
     const exited: Promise<void> = new Promise<void>((resolve) => {
       if (session.exited) resolve();
       else session.child.once('close', () => resolve());
-    }).finally(() => this.ending.delete(exited));
+    }).finally(() => {
+      clearTimeout(stuck);
+      this.ending.delete(exited);
+    });
     this.ending.add(exited);
     session.child.stdin.end();
   }
@@ -119,6 +139,7 @@ export class RefUpdater {
     for (let attempt = 1; ; attempt++) {
       const session = this.ensureSession(await this.packedRefs());
       let result = await this.attempt(session, ref, next, old);
+      if (result.kind === 'stalled') throw new GitStalledError('update-ref --stdin', this.stallMs);
       if (result.kind === 'unknown') result = (await this.landed(ref, next)) ? { kind: 'moved' } : { kind: 'lost' };
       if (result.kind === 'moved') return { moved: true };
       if (result.kind === 'refused') return { moved: false, stderr: result.stderr };
@@ -131,7 +152,12 @@ export class RefUpdater {
 
   /** Whether `ref` holds `next`, asked of a new git: `next` is new, so only this update can have put it there. */
   private async landed(ref: string, next: string): Promise<boolean> {
-    const run = await runGit(this.cwd, ['for-each-ref', '--contains', next, '--format=%(refname)', ref]);
+    const run = await runGit(this.cwd, ['for-each-ref', '--contains', next, '--format=%(refname)', ref], {
+      stallMs: this.stallMs,
+    }).catch((error: unknown) => {
+      // Not BUSY, which would promise that the ref did not move.
+      throw new Error(`could not tell whether ${ref} moved to ${next}: ${(error as Error).message}`);
+    });
     if (run.code !== 0) throw new Error(`could not tell whether ${ref} moved to ${next}: ${run.stderr.trim()}`);
     return run.stdout.toString('utf8').trim() === ref;
   }
@@ -140,21 +166,43 @@ export class RefUpdater {
   private attempt(session: Session, ref: string, next: string, old: string): Promise<Attempt> {
     return new Promise((resolve, reject) => {
       let told: 'prepare' | 'checking' | 'commit' | 'abort' = 'prepare';
+      let watchdog: NodeJS.Timeout | undefined;
       const finish = (result: Attempt) => {
+        clearTimeout(watchdog);
         session.onLine = null;
         session.onExit = null;
         setActive(session, false);
         resolve(result);
       };
-      const unexpected = (line: string) => {
-        session.child.kill();
-        if (told === 'commit') return; // its exit says `unknown`: whether the ref moved is found out
+      const fail = (error: Error) => {
+        clearTimeout(watchdog);
         session.onLine = null;
         session.onExit = null;
-        reject(new Error(`git update-ref --stdin answered ${JSON.stringify(line)}`));
+        reject(error);
+      };
+      // git has `stallMs` to answer each step, or it is killed.
+      const watch = () => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => {
+          session.stalled = true;
+          if (this.session === session) this.session = null;
+          killTree(session.child);
+          if (told !== 'commit') return finish({ kind: 'stalled' });
+          // Its exit says `unknown`, and whether the ref moved is found out then, unless it never exits.
+          watchdog = setTimeout(
+            () => fail(new Error(`git update-ref --stdin stopped answering once told to commit, and outlived being killed: whether ${ref} moved is unknown`)),
+            this.stallMs,
+          );
+        }, this.stallMs);
+      };
+      const unexpected = (line: string) => {
+        killTree(session.child);
+        if (told === 'commit') return; // its exit says `unknown`: whether the ref moved is found out
+        fail(new Error(`git update-ref --stdin answered ${JSON.stringify(line)}`));
       };
       session.stderr.length = 0;
       session.onLine = (line) => {
+        watch();
         if (line === 'start: ok' && told === 'prepare') return;
         if (line === 'prepare: ok' && told === 'prepare') {
           // git holds the ref's lock now: no one else can move it.
@@ -162,8 +210,9 @@ export class RefUpdater {
           void this.packedRefs()
             .catch(() => 'unreadable')
             .then((packedRefs) => {
-              if (session.exited) return;
+              if (session.exited || session.stalled) return;
               told = packedRefs === session.packedRefs ? 'commit' : 'abort';
+              watch();
               session.child.stdin.write(`${told}\n`);
             });
           return;
@@ -179,6 +228,7 @@ export class RefUpdater {
         else finish({ kind: 'lost' });
       };
       setActive(session, true);
+      watch();
       session.child.stdin.write(`start\nupdate ${ref} ${next} ${old}\nprepare\n`);
     });
   }
@@ -192,7 +242,16 @@ export class RefUpdater {
       ['-c', `core.hooksPath=${NO_HOOKS}`, 'update-ref', '--stdin', '--create-reflog', '-m', this.reflogMessage],
       { cwd: this.cwd, env: cleanGitEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
     );
-    const session: Session = { child, packedRefs, stderr: [], stdout: '', onLine: null, onExit: null, exited: false };
+    const session: Session = {
+      child,
+      packedRefs,
+      stderr: [],
+      stdout: '',
+      onLine: null,
+      onExit: null,
+      exited: false,
+      stalled: false,
+    };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       session.stdout += chunk;

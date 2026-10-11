@@ -458,7 +458,7 @@ export const close = define({
 export const release = define({
   name: 'release',
   description:
-    'Release your claim on a grimoire issue, giving up your attempt without closing the issue: its outcome is fail. Agents give a debrief. `abandoned: true` recovers a dead claim of your own person: no debrief, and it binds nothing. Replay-safe.',
+    'Release your claim on a grimoire issue, giving up your attempt without closing the issue: its outcome is fail. Agents give a debrief. `abandoned: true` gives up a stale claim of your own person, or one a crashed session left: no debrief, and it binds nothing. Replay-safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',
@@ -466,7 +466,7 @@ export const release = define({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     attempt: handleInput,
     debrief: s.optional(debriefInput),
-    abandoned: s.optional(s.boolean('true: recover a dead claim (no debrief)')),
+    abandoned: s.optional(s.boolean('true: give up a crashed session’s or stale claim (no debrief)')),
     comment: s.optional(s.string({ nonBlank: true, description: 'a comment posted with the release' })),
   }),
   async run(input, env): Promise<EndResult> {
