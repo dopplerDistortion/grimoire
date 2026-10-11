@@ -4,11 +4,11 @@
 // records, `end.md` and the outcome in one commit. Real Claude Code and Codex
 // transcripts from the seam-2 fixtures stand in for the clients' transcripts:
 // their tool-use ids stand in for the ids of the grimoire calls the tests make.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import { fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
+import { FIXTURES_DIR, fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
 import { sessionKey } from '../../src/capture/seen-here';
 import { registerSweep } from '../../src/capture/sweeps';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
@@ -38,7 +38,9 @@ async function claudeConfigDir(...sessions: { folder: string; session: string }[
   await mkdir(project, { recursive: true });
   for (const { folder, session } of sessions) {
     await cp(fixturePath(`${folder}/${session}.jsonl`), path.join(project, `${session}.jsonl`));
-    await cp(fixturePath(`${folder}/${session}`), path.join(project, session), { recursive: true }).catch(() => {});
+    // Its subagents' own transcripts, when it has any.
+    const subagents = path.join(FIXTURES_DIR, folder, session);
+    if (existsSync(subagents)) await cp(subagents, path.join(project, session), { recursive: true });
   }
   return dir;
 }
@@ -113,7 +115,10 @@ async function created(core: Core, ctx: CallContext, title: string): Promise<str
 
 /** `coreTest` plus a Claude Code config dir holding the subagent session, and a core whose capture searches it. */
 const test = coreTest.extend('capture', async ({ world, grimoire }, { onCleanup }) => {
-  const configDir = await claudeConfigDir({ folder: CLAUDE_TX, session: CLAUDE_SESSION });
+  const configDir = await claudeConfigDir(
+    { folder: CLAUDE_TX, session: CLAUDE_SESSION },
+    { folder: 'claude-code/transcripts/plain', session: '0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5' },
+  );
   onCleanup(() => removeDir(configDir));
   let now = new Date('2026-10-11T03:27:17.500Z');
   // The temp folder holding the config dir stands in for the home folder: roots read `~/<config dir>/projects`.
@@ -524,5 +529,81 @@ describe('which contexts are cut', () => {
     done();
 
     expect(cancelled).toBe(1);
+  });
+});
+
+/** Claude Code's spike-A plain session: one turn, whose one write on the issue is `mcp__grimoire__comment` (call PLAIN_COMMENT). */
+const PLAIN_SESSION = '0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5';
+const PLAIN_COMMENT = 'toolu_01FGkSuaFCkBXSzKt8JWTnv7';
+
+/** A person at their own terminal: no transcript, no debrief needed. */
+function person(base: CallContext): CallContext {
+  return { ...base, surface: 'cli', client: null, evidence: {}, tty: true, nonce: 'nonce-human' };
+}
+
+/** A Claude Code MCP call from the plain session's main line carrying only the given evidence. */
+function plainCall(base: CallContext, mcp: CallContext['mcp'], evidence: CallContext['evidence'] = {}): CallContext {
+  return { ...base, client: { name: 'claude-code', version: '2.1.296' }, evidence, ...(mcp ? { mcp } : {}), nonce: 'nonce-plain' };
+}
+
+/**
+ * A person claims; a Claude Code context comments naming the handle at the
+ * time the plain session made its comment call, carrying `ctx`'s evidence;
+ * the person closes. Returns the comment context's session record.
+ */
+async function commentedFrom(
+  capture: { makeCore: (extra?: CoreOptions) => Core; at: (iso: string) => void },
+  base: CallContext,
+  checkout: Checkout,
+  ctx: CallContext,
+  times = { claim: '2026-10-11T03:30:00.000Z', comment: '2026-10-11T03:30:40.051Z', close: '2026-10-11T03:30:45.000Z' },
+): Promise<StoredRecord | undefined> {
+  const core = capture.makeCore();
+  capture.at(times.claim);
+  const id = await created(core, base, 'Commented');
+  const claim = await core.call('claim', { id }, person(base));
+  if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+  const { attempt } = claim.result;
+  capture.at(times.comment);
+  expect(await core.call('comment', { id, body: 'done', attempt }, ctx)).toMatchObject({ ok: true });
+  capture.at(times.close);
+  expect(await core.call('close', { id, reason: 'done', attempt }, person(base))).toMatchObject({ ok: true });
+  return (await sessionRecords(checkout, id, attempt)).find((r) => r.fields.client === 'claude-code');
+}
+
+describe('identity checked against the transcript at cut time', () => {
+  test('a hint that came with no _meta counts once its session’s transcript holds its tool-use id', async ({ world, grimoire, capture }) => {
+    const hint = { session_id: PLAIN_SESSION, tool_use_id: PLAIN_COMMENT };
+    const record = await commentedFrom(capture, grimoire.ctx, world.a, plainCall(grimoire.ctx, { era: 'legacy', hint, meta: null }));
+
+    expect(record!.fields).toMatchObject({ session: PLAIN_SESSION, context: 'main', source: 'hint', excerpt: 'cut' });
+    expect(record!.body).toContain('tool mcp__grimoire__comment');
+  });
+
+  test('a pending hint whose tool-use id its transcript doesn’t hold claims nothing', async ({ world, grimoire, capture }) => {
+    const forged = { session_id: PLAIN_SESSION, tool_use_id: 'toolu_never_made' };
+    const record = await commentedFrom(capture, grimoire.ctx, world.a, plainCall(grimoire.ctx, { era: 'legacy', hint: forged, meta: null }));
+
+    expect(record!.fields).toMatchObject({ session: null, source: null, excerpt: 'not_found' });
+  });
+
+  test('a _meta tool-use id alone is joined to the transcript that holds it', async ({ world, grimoire, capture }) => {
+    const meta = { 'claudecode/toolUseId': PLAIN_COMMENT };
+    const record = await commentedFrom(capture, grimoire.ctx, world.a, plainCall(grimoire.ctx, { era: 'modern', hint: null, meta }));
+
+    expect(record!.fields).toMatchObject({ session: PLAIN_SESSION, context: 'main', source: 'tool-use-id', excerpt: 'cut' });
+  });
+
+  test('the spawn-env session is trusted only if its transcript holds the call', async ({ world, grimoire, capture }) => {
+    const trusted = await commentedFrom(capture, grimoire.ctx, world.a, plainCall(grimoire.ctx, undefined, { spawnEnvId: PLAIN_SESSION }));
+    // The subagent session's main line made no comment call around then, inside its flushed range.
+    const wrong = await commentedFrom(capture, grimoire.ctx, world.a, plainCall(grimoire.ctx, undefined, { spawnEnvId: CLAUDE_SESSION }), {
+      claim: '2026-10-11T03:27:00.000Z',
+      comment: '2026-10-11T03:27:19.000Z',
+      close: '2026-10-11T03:27:30.000Z',
+    });
+
+    expect(trusted!.fields).toMatchObject({ session: PLAIN_SESSION, source: 'spawn-env', excerpt: 'cut' });
+    expect(wrong!.fields).toMatchObject({ session: CLAUDE_SESSION, source: 'spawn-env', excerpt: 'unmatched', facts: 'unmatched', reach: null });
   });
 });

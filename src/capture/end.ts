@@ -111,7 +111,8 @@ interface Target {
   readonly bindingCalls: readonly BindingCall[];
   readonly writeOnly: boolean;
   readonly source: EvidenceSource | null;
-  readonly pendingHint: ReservedHint | null;
+  /** Hints its calls carried with no `_meta` to check them against: the row's, then the ending call's. */
+  readonly pendingHints: readonly ReservedHint[];
   readonly spawnEnv: string | null;
   readonly path: string | null;
   readonly row: boolean;
@@ -173,7 +174,7 @@ async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
       bindingCalls: context.bindingCalls,
       writeOnly: context.writeOnly,
       source: context.row?.source ?? null,
-      pendingHint: context.row?.pending_hint ?? null,
+      pendingHints: context.row?.pending_hint ? [context.row.pending_hint] : [],
       spawnEnv: context.row?.spawn_env ?? latest.spawn_env ?? null,
       path: context.row?.path ?? null,
       row: context.row !== null,
@@ -198,7 +199,7 @@ async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
     bindingCalls: [...(known?.bindingCalls ?? []), endingCall],
     writeOnly: false,
     source: call.source ?? known?.source ?? null,
-    pendingHint: call.pendingHint ?? known?.pendingHint ?? null,
+    pendingHints: [...(known?.pendingHints ?? []), ...(call.pendingHint ? [call.pendingHint] : [])],
     spawnEnv: actor.spawn_env ?? known?.spawnEnv ?? null,
     path: revealed?.transcript_path ?? known?.path ?? null,
     row: known?.row ?? false,
@@ -310,18 +311,17 @@ class ContextCut {
     let source = target.source;
     let location: Awaited<ReturnType<typeof findClaudeTranscript>> | null = null;
 
-    const hint = target.pendingHint;
-    if (session === null && hint !== null) {
+    for (const hint of session === null ? target.pendingHints : []) {
       const hinted = await findClaudeTranscript({ ...base, session: hint.session_id, revealed: await revealed(hint.session_id) });
-      if (hinted.status === 'found') {
-        const read = await readClaudeCodeTranscript(hinted.transcript, hint.agent_id !== undefined ? { agentId: hint.agent_id } : {});
-        if (read.found && read.transcript.steps.some((step) => isCall(step) && step.id === hint.tool_use_id)) {
-          session = hint.session_id;
-          agentId = hint.agent_id;
-          source = 'hint';
-          location = hinted;
-          extra.push({ id: hint.tool_use_id, at: latestAt(target.bindingCalls) ?? input.call.at });
-        }
+      if (hinted.status !== 'found') continue;
+      const read = await readClaudeCodeTranscript(hinted.transcript, hint.agent_id !== undefined ? { agentId: hint.agent_id } : {});
+      if (read.found && read.transcript.steps.some((step) => isCall(step) && step.id === hint.tool_use_id)) {
+        session = hint.session_id;
+        agentId = hint.agent_id;
+        source = 'hint';
+        location = hinted;
+        extra.push({ id: hint.tool_use_id, at: latestAt(target.bindingCalls) ?? input.call.at });
+        break;
       }
     }
     if (location === null) {
