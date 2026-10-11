@@ -153,6 +153,8 @@ describe('the git editor', () => {
         await editing;
         expect(process.listenerCount('SIGINT')).toBe(before);
       } finally {
+        // Releases the editor even when an assertion failed while it was open.
+        await writeFile(go, '');
         await workspace.remove();
       }
     } finally {
