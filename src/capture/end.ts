@@ -9,7 +9,7 @@ import type { Actor, ReservedHint } from '../core/context';
 import type { MachineLocalStore } from '../machine-local';
 import type { SecretScanner } from '../scanner';
 import type { AttemptRecord, TrackerDraft, TrackerView } from '../tracker';
-import { boundContexts, readBindings } from './bindings';
+import { boundContexts, readBindings, type Binding } from './bindings';
 import { CLAUDE_CODE_READER_VERSION, cutClaudeCode, readClaudeCodeTranscript } from './claude-code';
 import { defaultClaudeConfigDir, findClaudeTranscript } from './claude-code/roots';
 import { CODEX_READER_VERSION, cutCodex } from './codex';
@@ -136,13 +136,14 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   const started = Date.now();
   const deadline = input.deadline ?? started + (input.options?.budgetMs ?? CUT_BUDGET_MS);
   const handle = input.attempt?.id ?? null;
-  // Which contexts are bound, and which hold a pending record or a purge, is read in full: the budget bounds the cuts.
-  const targets = await targetsOf(input);
+  // Finding the bound contexts, their pending records and purges is inside the budget too. Past it, a
+  // purge is still honoured at the seal, and a pending record only changes the order.
+  const targets = await targetsOf(input, deadline);
   const pending = new Set<string>();
-  const purged = handle === null ? new Set<string>() : await input.view.purgedSessions(handle).catch(() => new Set<string>());
+  const purged = handle === null ? new Set<string>() : await beforeDeadline(input.view.purgedSessions(handle), deadline, new Set<string>());
   if (handle !== null) {
     for (const target of targets) {
-      if ((await input.view.sessionRecord(handle, target.key).catch(() => null)) !== null) pending.add(target.key);
+      if ((await beforeDeadline(input.view.sessionRecord(handle, target.key), deadline, null)) !== null) pending.add(target.key);
     }
   }
   const rank = (t: Target) => (t.calling ? 0 : pending.has(t.key) ? 2 : 1);
@@ -172,30 +173,21 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
 /**
  * The bound contexts, and the calling context when its ending call binds. A
  * person's own writes at a terminal or in the dashboard name the handle too,
- * but a person is no agent session's context: nothing of theirs is cut.
+ * but a person is no agent session's context: nothing of theirs is cut. When
+ * git can't read the binding trailers within the budget, the agent contexts
+ * seen here stand in for them: past the deadline, each gets `budget`.
  */
-async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
+async function targetsOf(input: EndCaptureInput, deadline: number): Promise<Target[]> {
   const { call } = input;
   const rows: SeenHereRow[] = input.attempt ? await seenHereRows(input.store, { handle: input.attempt.id }).catch(() => []) : [];
-  const bindings = input.attempt ? await readBindings(input.repoRoot, input.attempt, input.view.parents).catch(() => []) : [];
-  const agents = boundContexts(bindings, rows).filter((context) => context.bindings.some((binding) => binding.actor.kind !== 'human'));
-  const targets: Target[] = agents.map((context) => {
-    const latest = context.bindings.at(-1)!.actor;
-    return {
-      key: context.key,
-      client: context.row?.client ?? context.client ?? 'unknown',
-      session: context.session,
-      context: context.context,
-      bindingCalls: context.bindingCalls,
-      writeOnly: context.writeOnly,
-      source: context.row?.source ?? null,
-      pendingHints: context.row?.pending_hint ? [context.row.pending_hint] : [],
-      spawnEnv: context.row?.spawn_env ?? latest.spawn_env ?? null,
-      path: context.row?.path ?? null,
-      row: context.row !== null,
-      calling: false,
-    };
-  });
+  const bindings = input.attempt
+    ? await beforeDeadline(
+        readBindings(input.repoRoot, input.attempt, input.view.parents).catch(() => []),
+        deadline,
+        null,
+      )
+    : [];
+  const targets: Target[] = bindings === null ? rows.filter(agentRow).map(rowTarget) : boundTargets(bindings, rows);
   if (!call.binds || call.actor.kind === 'human') return targets;
 
   // The ending call's own binding write isn't committed yet: the cut looks for it from what this process saw.
@@ -223,6 +215,57 @@ async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
   };
   if (index >= 0) targets.splice(index, 1);
   return [calling, ...targets];
+}
+
+/** The agent contexts the binding writes name, with this machine's rows. */
+function boundTargets(bindings: readonly Binding[], rows: readonly SeenHereRow[]): Target[] {
+  const agents = boundContexts(bindings, rows).filter((context) => context.bindings.some((binding) => binding.actor.kind !== 'human'));
+  return agents.map((context) => {
+    const latest = context.bindings.at(-1)!.actor;
+    return {
+      key: context.key,
+      client: context.row?.client ?? context.client ?? 'unknown',
+      session: context.session,
+      context: context.context,
+      bindingCalls: context.bindingCalls,
+      writeOnly: context.writeOnly,
+      source: context.row?.source ?? null,
+      pendingHints: context.row?.pending_hint ? [context.row.pending_hint] : [],
+      spawnEnv: context.row?.spawn_env ?? latest.spawn_env ?? null,
+      path: context.row?.path ?? null,
+      row: context.row !== null,
+      calling: false,
+    };
+  });
+}
+
+/** A row an agent's binding write left: a person's, at a terminal or in the dashboard, names no session or context. */
+function agentRow(row: SeenHereRow): boolean {
+  if (row.session !== null || row.context !== null || row.spawn_env !== null) return true;
+  return row.client !== 'cli' && row.client !== 'dashboard';
+}
+
+/** A context known only by its row. */
+function rowTarget(row: SeenHereRow): Target {
+  return {
+    key: sessionKey({
+      client: row.client,
+      nonce: row.nonce,
+      ...(row.session !== null ? { session: row.session } : {}),
+      ...(row.context !== null ? { context: row.context } : {}),
+    }),
+    client: row.client,
+    session: row.session,
+    context: row.context,
+    bindingCalls: [],
+    writeOnly: false,
+    source: row.source,
+    pendingHints: row.pending_hint ? [row.pending_hint] : [],
+    spawnEnv: row.spawn_env,
+    path: row.path,
+    row: true,
+    calling: false,
+  };
 }
 
 /**

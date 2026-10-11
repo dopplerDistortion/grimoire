@@ -4,10 +4,12 @@
 // records, `end.md` and the outcome in one commit. Real Claude Code and Codex
 // transcripts from the seam-2 fixtures stand in for the clients' transcripts:
 // their tool-use ids stand in for the ids of the grimoire calls the tests make.
+import * as childProcess from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { describe, expect } from 'vitest';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { describe, expect, vi } from 'vitest';
 import { FIXTURES_DIR, fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
 import { seenHereRows, sessionKey } from '../../src/capture/seen-here';
 import { registerSweep } from '../../src/capture/sweeps';
@@ -19,6 +21,36 @@ import { MachineLocalStore } from '../../src/machine-local';
 import { createScanner } from '../../src/scanner';
 import { openTracker } from '../../src/tracker';
 import { agentContext, commitToTracker, coreTest, fetchTracker, pushTracker, TRACKER_REF, trackerFile, trackerTip } from './support';
+
+// Lets a test put a slow git in place of one git the core runs.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
+
+const realSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn;
+
+/** Runs as `node -e <script> -- <delay ms> <done file> ::git <args>`: the real git, `delay` late; then writes the done file. */
+const SLOW_GIT = `
+const at = process.argv.indexOf('::git');
+const [delay, done] = process.argv.slice(1, at);
+setTimeout(() => {
+  const run = require('node:child_process').spawnSync('git', process.argv.slice(at + 1), { stdio: 'inherit', windowsHide: true });
+  require('node:fs').writeFileSync(done, 'done');
+  process.exit(run.status ?? 1);
+}, Number(delay));
+`;
+
+/** Puts a git answering `delayMs` late in place of the next git the core runs whose arguments match `command`. */
+function slowNextGit(command: RegExp, delayMs: number, doneFile: string): { restore(): void } {
+  let left = 1;
+  vi.mocked(childProcess.spawn).mockImplementation(((name: string, args: readonly string[], options: childProcess.SpawnOptions) => {
+    if (name !== 'git' || left === 0 || !command.test(args.join(' '))) return realSpawn(name, args, options);
+    left--;
+    return realSpawn(process.execPath, ['-e', SLOW_GIT, '--', String(delayMs), doneFile, '::git', ...args], options);
+  }) as unknown as typeof childProcess.spawn);
+  return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn) };
+}
 
 /** Claude Code's spike-A subagent session: the main line launched one subagent, which called grimoire. */
 const CLAUDE_SESSION = '0e195270-803a-4006-be3c-4af4e288c343';
@@ -335,6 +367,38 @@ describe('the hard budget', () => {
     // The calling context is cut first, and waits for its ending call only until the budget runs out.
     expect(records.find((r) => r.fields.context === 'main')!.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['tail_unflushed'], facts: 'scanned' });
     expect(records.find((r) => r.fields.context === CLAUDE_AGENT)!.fields).toMatchObject({ excerpt: 'budget', facts: 'budget', reach: null });
+  });
+});
+
+describe('the hard budget, finding the bound contexts', () => {
+  test('covers reading the binding trailers: a git too slow for the budget leaves each context seen here with budget', async ({ world, grimoire, capture }) => {
+    const budgetMs = 1_500;
+    const gitDelayMs = 4_000;
+    const core = capture.makeCore({ capture: { budgetMs } });
+    const id = await created(core, grimoire.ctx, 'Slow git');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    capture.at('2026-10-11T03:27:30.000Z');
+    const done = path.join(world.root, 'slow-git-done');
+    const slow = slowNextGit(/ log .*--grep=Grimoire-Attempt: /, gitDelayMs, done);
+    try {
+      const started = Date.now();
+      const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+      const took = Date.now() - started;
+
+      expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+      expect(took).toBeLessThan(gitDelayMs);
+      const records = await sessionRecords(world.a, id, attempt);
+      expect(records.map((r) => [r.fields.context, r.fields.excerpt, r.fields.facts]).sort()).toEqual([
+        [CLAUDE_AGENT, 'budget', 'budget'],
+        ['main', 'budget', 'budget'],
+      ]);
+    } finally {
+      slow.restore();
+      // The slow git still runs in the repo: let it finish before the repo goes.
+      for (let waited = 0; !existsSync(done) && waited < gitDelayMs + 5_000; waited += 100) await sleep(100);
+    }
   });
 });
 
