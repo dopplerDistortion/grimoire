@@ -1,10 +1,10 @@
 // Seam 1 for the installer (spec Testing Decisions): the manifest and pointer
 // writers, driven directly against real temporary checkouts. What each file
 // must hold comes from spec §11 and spikes A, C and E.
-import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { gitTest } from '#harness';
 import { BOOTSTRAP, codexHookCommand } from '../../src/installer';
 import { readManifest, type ClientName } from '../../src/installer/manifest';
@@ -12,6 +12,9 @@ import { desiredEntries, type PointerOptions } from '../../src/installer/pointer
 import { parseToml } from '../../src/installer/toml';
 import { applyFiles, planFiles } from '../../src/installer/writer';
 import { SERVER_INSTRUCTIONS } from '../../src/instructions';
+import { adapterBlockBody } from '../../src/installer/texts';
+import { createCore } from '../../src/core';
+import { parseCommand } from '../../src/surfaces/cli/args';
 
 const BOTH: ClientName[] = ['claude-code', 'codex'];
 const OPTIONS: PointerOptions = { clients: BOTH, npmScript: false, adapter: 'end' };
@@ -111,6 +114,23 @@ describe('a first install into a checkout', () => {
     expect(new Set(plan.entries.map((entry) => entry.action))).toEqual(new Set(['unchanged']));
   });
 
+  gitTest('managed files checked out with CRLF line endings or a byte order mark, or JSON re-indented, are unchanged: nothing is written', async ({ world }) => {
+    const root = world.a.dir;
+    await install(root);
+    const crlf = (text: string) => text.replace(/\n/g, '\r\n');
+    for (const file of ['.claude/rules/grimoire.md', '.codex/config.toml', '.grimoire/run.cjs', '.grimoire/manifest.yml']) {
+      await writeFile(path.join(root, file), crlf(await read(root, file)));
+    }
+    await writeFile(path.join(root, 'AGENTS.md'), `﻿${crlf(await read(root, 'AGENTS.md'))}`);
+    await writeFile(path.join(root, '.mcp.json'), `﻿${await read(root, '.mcp.json')}`);
+    await writeFile(path.join(root, '.claude/settings.json'), crlf(`${JSON.stringify(await readJson(root, '.claude/settings.json'), null, 4)}\n`));
+
+    const { plan, applied } = await install(root);
+
+    expect(new Set(plan.entries.map((entry) => entry.action))).toEqual(new Set(['unchanged']));
+    expect(applied.written).toEqual([]);
+  });
+
   gitTest('package.json gets the npm script next to its own; a checkout without one gets none', async ({ world }) => {
     const root = world.a.dir;
     await writeFile(path.join(root, 'package.json'), '{\n    "name": "host",\n    "scripts": {\n        "test": "vitest"\n    }\n}\n');
@@ -207,12 +227,62 @@ describe('drift and conflicts on a later run', () => {
 
     const { plan } = await install(root);
 
-    expect(plan.entries.find((entry) => entry.path === '.codex/config.toml')).toMatchObject({ action: 'rewrite', why: expect.stringContaining('default_tools_approval_mode') });
+    expect(plan.entries.find((entry) => entry.path === '.codex/config.toml')).toMatchObject({
+      action: 'rewrite',
+      why: expect.stringContaining('default_tools_approval_mode'),
+      kept_grants: ['mcp_servers.grimoire.default_tools_approval_mode'],
+    });
     const after = await read(root, '.codex/config.toml');
     // In place: grimoire's group keeps its position (and Codex's trust key), and the later group stays after it.
     expect(sessionStartCommands(after)).toEqual([codexHookCommand(), 'echo later']);
     expect(after).toContain('timeout = 10');
     expect(after).toContain('default_tools_approval_mode = "prompt"');
+  });
+
+  gitTest('a removed Codex block comes back without its approval mode, which is restored only on request', async ({ world }) => {
+    const root = world.a.dir;
+    await install(root);
+    for (const removal of ['block', 'file'] as const) {
+      if (removal === 'block') await writeFile(path.join(root, '.codex/config.toml'), '# no grimoire here\n');
+      else await rm(path.join(root, '.codex/config.toml'));
+
+      const { plan } = await install(root);
+
+      expect(plan.entries.find((entry) => entry.path === '.codex/config.toml'), removal).toMatchObject({
+        action: 'rewrite',
+        kept_grants: ['mcp_servers.grimoire.default_tools_approval_mode'],
+      });
+      const codex = parseToml(await read(root, '.codex/config.toml')) as Record<string, any>;
+      expect(codex.mcp_servers.grimoire.command, removal).toBe('node');
+      expect(codex.mcp_servers.grimoire, removal).not.toHaveProperty('default_tools_approval_mode');
+      expect(sessionStartCommands(await read(root, '.codex/config.toml')), removal).toEqual([codexHookCommand()]);
+    }
+
+    const restored = await install(root, {}, true);
+
+    expect(restored.plan.entries.find((entry) => entry.path === '.codex/config.toml')).toMatchObject({ action: 'restore' });
+    expect(await read(root, '.codex/config.toml')).toContain('default_tools_approval_mode = "approve"');
+  });
+
+  gitTest('a write skipped because the file changed meanwhile leaves it out of the manifest, so a later run never takes it for grimoire’s', async ({ world }) => {
+    const root = world.a.dir;
+    const plan = await planFiles(root, desiredEntries(OPTIONS));
+    // The person writes the file while init waits for their consent.
+    await mkdir(path.join(root, '.claude/rules'), { recursive: true });
+    await writeFile(path.join(root, '.claude/rules/grimoire.md'), 'my own rules\n');
+
+    const applied = await applyFiles(plan);
+
+    expect(applied.skipped).toEqual([{ path: '.claude/rules/grimoire.md', why: expect.stringContaining('changed while init ran') }]);
+    expect(applied.written.at(-1)).toBe('.grimoire/manifest.yml');
+    const manifest = await readManifest(root);
+    expect(manifest.entries.map((entry) => entry.path)).not.toContain('.claude/rules/grimoire.md');
+    expect(manifest.entries.map((entry) => entry.path)).toContain('.mcp.json');
+
+    const again = await install(root);
+
+    expect(again.plan.entries.find((entry) => entry.path === '.claude/rules/grimoire.md')).toMatchObject({ action: 'conflict' });
+    expect(await read(root, '.claude/rules/grimoire.md')).toBe('my own rules\n');
   });
 
   gitTest('a path grimoire never wrote is reported and left untouched', async ({ world }) => {
@@ -251,5 +321,26 @@ describe('drift and conflicts on a later run', () => {
     expect(existsSync(path.join(elsewhere, 'settings.json'))).toBe(false);
     expect(await read(root, '.mcp.json')).toBe('{ // my servers\n}\n');
     expect(applied.written).toContain('.codex/config.toml');
+  });
+});
+
+describe('the adapter doc block', () => {
+  test('names each operation with its CLI form, and every CLI form parses as grimoire’s CLI reads it', async () => {
+    const block = adapterBlockBody({ supersedes: false });
+    for (const bullet of ['**Make an issue a sub-issue of a parent**', '**Apply / remove labels**', '**Close**', '**Blockers**', '**Claim, close and debrief**', '**Frontier query**', '**Claim**']) {
+      expect(block.split('\n').find((line) => line.startsWith(`- ${bullet}`)), bullet).toMatch(/\(CLI `/);
+    }
+    const forms = [...block.matchAll(/\(CLI ([^)]*)\)/g)].flatMap((match) => [...match[1]!.matchAll(/`([^`]+)`/g)].map((form) => form[1]!));
+    expect(forms.length).toBeGreaterThan(8);
+    const core = createCore({ autoSync: 'off' });
+    try {
+      for (const form of forms) {
+        // Placeholders stand for one word each; <json> for a JSON literal.
+        const argv = form.replace(/<json>/g, '{}').replace(/<[a-z-]+>|…/g, 'gr-0abc12').split(' ');
+        expect(() => parseCommand(argv, core.ops), form).not.toThrow();
+      }
+    } finally {
+      await core.close();
+    }
   });
 });

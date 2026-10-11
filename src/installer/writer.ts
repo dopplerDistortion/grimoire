@@ -56,6 +56,11 @@ export interface PlannedEntry {
   readonly action: EntryAction;
   /** Why: the conflict, or the grant that changed. */
   readonly why?: string;
+  /**
+   * A TOML block's grants the person changed or removed, kept as they are
+   * while the rest of the block is written (`kept`, `update`, `rewrite`).
+   */
+  readonly kept_grants?: readonly string[];
 }
 
 export interface PlannedWrite {
@@ -74,6 +79,33 @@ export interface FilePlan {
   readonly manifest: readonly ManifestEntry[];
   /** The manifest's text when planned (null: none), and after. */
   readonly manifestWrite: PlannedWrite | null;
+  /** The manifest's text when planned; null when there was none. */
+  readonly manifestBefore: string | null;
+  /** Each planned entry's manifest entry before and after the plan: a skipped write keeps its path's entries as they were. */
+  readonly records: readonly ManifestRecord[];
+  /** Manifest entries this run doesn't want (another client, a declined adapter), kept as they were. */
+  readonly untouched: readonly ManifestEntry[];
+}
+
+interface ManifestRecord {
+  readonly path: string;
+  readonly before: ManifestEntry | null;
+  readonly after: ManifestEntry | null;
+}
+
+/** The manifest's entries once the writes are done: a path whose write was skipped keeps what it recorded before. */
+function manifestEntries(records: readonly ManifestRecord[], untouched: readonly ManifestEntry[], skipped: ReadonlySet<string>): ManifestEntry[] {
+  const kept = records.flatMap((record) => {
+    const entry = skipped.has(record.path) ? record.before : record.after;
+    return entry ? [entry] : [];
+  });
+  return [...kept, ...untouched];
+}
+
+/** The manifest write that leaves `entries`, or null when the manifest already holds them. */
+function manifestWriteOf(before: string | null, entries: readonly ManifestEntry[]): PlannedWrite | null {
+  const after = serializeManifest(entries);
+  return before !== null && normalizedText(before) === after ? null : { path: MANIFEST_PATH, before, after };
 }
 
 export interface PlanOptions {
@@ -325,6 +357,30 @@ function planBlock(entry: MarkerBlockEntry | TomlBlockEntry, current: string | n
   const conflict = (why: string) => ({ outcome: { planned: { ...described, action: 'conflict' as const, why }, recorded: prior ?? null }, after: null });
   const record = (created: boolean) => recordOf(entry, hash, prior?.created ?? created);
 
+  /**
+   * grimoire's block body with every grant the person changed or removed kept
+   * as theirs (a removed block removed them all), unless they are restored;
+   * everything else in the block is grimoire's to rewrite.
+   */
+  const withGrants = (currentBody: string | null): { body: string; changed: string[]; restored: boolean } => {
+    if (entry.kind !== 'toml-table') return { body: entry.body, changed: [], restored: false };
+    const value = currentBody === null ? undefined : parsed(currentBody);
+    let body = entry.body;
+    const changed: string[] = [];
+    for (const grant of entry.grants) {
+      const name = grant.key.at(-1)!;
+      const theirs = currentBody === null ? undefined : value === undefined ? grantLine(currentBody, name) : valueAt(value, grant.key);
+      if (canonicalJson(theirs ?? null) === canonicalJson(grant.value)) continue;
+      changed.push(grant.key.join('.'));
+      const line = new RegExp(`^${name} = .*\\n`, 'm');
+      body = body.replace(line, theirs === undefined ? '' : `${name} = ${typeof theirs === 'string' ? tomlString(theirs) : JSON.stringify(theirs)}\n`);
+    }
+    if (changed.length > 0 && options.restoreGrants) return { body: entry.body, changed, restored: true };
+    return { body, changed, restored: false };
+  };
+  const keptNote = (grants: { changed: string[]; restored: boolean }, why: string) =>
+    grants.changed.length > 0 && !grants.restored ? { why: `${grants.changed.join(', ')} ${why}`, kept_grants: grants.changed } : {};
+
   const text = current === null ? '' : normalizedText(current);
   const found = findBlock(text.split('\n'), begin, end);
   if (found === 'broken') return conflict(`grimoire's block markers (${begin}) are broken or repeated`);
@@ -334,9 +390,14 @@ function planBlock(entry: MarkerBlockEntry | TomlBlockEntry, current: string | n
       if (clash) return conflict(clash);
     }
     const placement = entry.kind === 'marker-block' && entry.placement === 'top' ? 'top' : 'end';
+    if (!prior) {
+      return { outcome: { planned: { ...described, action: 'create' }, recorded: record(current === null) }, after: inFileStyle(current, withBlock(text, blockOf(entry.body), placement)) };
+    }
+    // grimoire's block is gone: it comes back, but the grants in it count as removed by the person.
+    const grants = withGrants(null);
     return {
-      outcome: { planned: { ...described, action: prior ? 'rewrite' : 'create' }, recorded: record(current === null) },
-      after: inFileStyle(current, withBlock(text, blockOf(entry.body), placement)),
+      outcome: { planned: { ...described, action: grants.restored ? 'restore' : 'rewrite', ...keptNote(grants, 'kept as removed') }, recorded: record(current === null) },
+      after: inFileStyle(current, withBlock(text, blockOf(grants.body), placement)),
     };
   }
 
@@ -346,28 +407,15 @@ function planBlock(entry: MarkerBlockEntry | TomlBlockEntry, current: string | n
   if (same) return { outcome: { planned: { ...described, action: prior ? 'unchanged' : 'adopt' }, recorded: record(false) }, after: null };
   if (!prior) return conflict(`grimoire's block is already in the file, and grimoire's manifest doesn't record it`);
 
-  let body = entry.body;
-  const kept: string[] = [];
-  if (entry.kind === 'toml-table' && !options.restoreGrants) {
-    // A grant the person changed stays as they set it; everything else is grimoire's to rewrite.
-    const value = parsed(currentBody);
-    for (const grant of entry.grants) {
-      const theirs = value === undefined ? grantLine(currentBody, grant.key.at(-1)!) : valueAt(value, grant.key);
-      if (canonicalJson(theirs ?? null) === canonicalJson(grant.value)) continue;
-      kept.push(grant.key.join('.'));
-      const name = grant.key.at(-1)!;
-      const line = new RegExp(`^${name} = .*\\n`, 'm');
-      body = body.replace(line, theirs === undefined ? '' : `${name} = ${typeof theirs === 'string' ? tomlString(theirs) : JSON.stringify(theirs)}\n`);
-    }
-    if (kept.length > 0 && canonicalJson(parsed(currentBody)) === canonicalJson(parsed(body))) {
-      return { outcome: { planned: { ...described, action: 'kept', why: `${kept.join(', ')} changed` }, recorded: prior }, after: null };
-    }
+  const grants = withGrants(currentBody);
+  if (grants.changed.length > 0 && !grants.restored && canonicalJson(parsed(currentBody)) === canonicalJson(parsed(grants.body))) {
+    return { outcome: { planned: { ...described, action: 'kept', ...keptNote(grants, 'changed') }, recorded: prior }, after: null };
   }
   const before = toml ? valueHash(parsed(currentBody) ?? null) : textHash(currentBody);
-  const action = options.restoreGrants && toml ? 'restore' : before === prior.hash ? 'update' : 'rewrite';
+  const action = grants.restored ? 'restore' : before === prior.hash ? 'update' : 'rewrite';
   return {
-    outcome: { planned: { ...described, action, ...(kept.length > 0 ? { why: `${kept.join(', ')} kept as changed` } : {}) }, recorded: record(false) },
-    after: inFileStyle(current, withBlock(text, blockOf(body), found)),
+    outcome: { planned: { ...described, action, ...keptNote(grants, 'kept as changed') }, recorded: record(false) },
+    after: inFileStyle(current, withBlock(text, blockOf(grants.body), found)),
   };
 }
 
@@ -427,16 +475,20 @@ export async function planFiles(root: string, desired: readonly DesiredEntry[], 
   }
 
   const matched = new Set(outcomes.map((outcome) => entryIdentity(outcome.planned)));
-  const recorded = [
-    ...outcomes.flatMap((outcome) => (outcome.recorded ? [outcome.recorded] : [])),
-    // Entries this run doesn't want (another client, a declined adapter) stay recorded as they were.
-    ...manifest.entries.filter((entry) => !matched.has(entryIdentity(entry))),
-  ];
-  const manifestText = serializeManifest(recorded);
+  const records = outcomes.map((outcome) => ({ path: outcome.planned.path, before: priors.get(entryIdentity(outcome.planned)) ?? null, after: outcome.recorded }));
+  const untouched = manifest.entries.filter((entry) => !matched.has(entryIdentity(entry)));
+  const recorded = manifestEntries(records, untouched, new Set());
   const manifestBefore = (await readTextIfExists(path.join(root, MANIFEST_PATH))) ?? null;
-  const manifestWrite =
-    manifestBefore !== null && normalizedText(manifestBefore) === manifestText ? null : { path: MANIFEST_PATH, before: manifestBefore, after: manifestText };
-  return { root, entries: outcomes.map((outcome) => outcome.planned), writes, manifest: recorded, manifestWrite };
+  return {
+    root,
+    entries: outcomes.map((outcome) => outcome.planned),
+    writes,
+    manifest: recorded,
+    manifestWrite: manifestWriteOf(manifestBefore, recorded),
+    manifestBefore,
+    records,
+    untouched,
+  };
 }
 
 export interface AppliedFiles {
@@ -458,14 +510,22 @@ export async function writePlanned(root: string, write: PlannedWrite): Promise<s
   return null;
 }
 
-/** Applies a plan: the files in order, then the manifest. */
+/**
+ * Applies a plan: the files in order, then the manifest. A file skipped
+ * because it changed meanwhile keeps the manifest entries it had, or none:
+ * the manifest never records a write that didn't happen.
+ */
 export async function applyFiles(plan: FilePlan): Promise<AppliedFiles> {
   const written: string[] = [];
   const skipped: { path: string; why: string }[] = [];
-  for (const write of [...plan.writes, ...(plan.manifestWrite ? [plan.manifestWrite] : [])]) {
-    const why = await writePlanned(plan.root, write);
-    if (why === null) written.push(write.path);
-    else skipped.push({ path: write.path, why });
-  }
+  const write = async (planned: PlannedWrite) => {
+    const why = await writePlanned(plan.root, planned);
+    if (why === null) written.push(planned.path);
+    else skipped.push({ path: planned.path, why });
+  };
+  for (const planned of plan.writes) await write(planned);
+  const manifestWrite =
+    skipped.length === 0 ? plan.manifestWrite : manifestWriteOf(plan.manifestBefore, manifestEntries(plan.records, plan.untouched, new Set(skipped.map((entry) => entry.path))));
+  if (manifestWrite) await write(manifestWrite);
   return { written, skipped };
 }

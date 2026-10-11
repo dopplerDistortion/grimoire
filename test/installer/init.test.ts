@@ -349,7 +349,7 @@ describe('the tracker root R', () => {
 });
 
 describe('drift on a later init', () => {
-  gitTest('an edited content pointer file is rewritten, a removed grant is kept and reported, and a path grimoire never wrote is reported and left alone', async ({ world }) => {
+  gitTest('an edited content pointer file is rewritten, a removed grant is kept and reported, and a managed JSON file turned into commented JSON is refused and left alone', async ({ world }) => {
     const root = world.a.dir;
     expect((await init(root)).code).toBe(0);
     await writeFile(path.join(root, '.claude/rules/grimoire.md'), '# grimoire\n\nignore the tracker\n');

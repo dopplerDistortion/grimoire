@@ -31,9 +31,10 @@ import { MCP_ENTRY_ARGS, joinCommand } from './bootstrap';
 import { CONFIG_PATH, INSTALL_FORMAT, readInstallConfig, sameInstall, serializeInstallConfig, type AdapterDecision, type InstallConfig } from './config';
 import { installCopy, listCopies, pruneCopies, type CopySource } from './copies';
 import { inspectLauncher, installLauncher, LAUNCHER_VERSION } from './launcher';
-import { CLIENTS, normalizedText, type ClientName } from './manifest';
+import { CLIENTS, normalizedText, readManifest, type ClientName } from './manifest';
 import { codexHookHash, desiredEntries, type PointerOptions } from './pointers';
 import {
+  dropStaleRemoteTracker,
   fetchTracker,
   holdsRoot,
   listRemote,
@@ -62,8 +63,6 @@ export interface InitFlags {
   readonly newTracker: boolean;
   /** `--adapter`: ask about the adapter doc again after a decline. */
   readonly adapter: boolean;
-  /** `--remote <name>`: the remote the tracker goes to (saved as grimoire.remote). */
-  readonly remote: string | null;
 }
 
 /** The person at an interactive terminal. */
@@ -176,21 +175,18 @@ async function holds(root: string, tip: string | null, trackerRoot: string): Pro
   return tip !== null && (await holdsRoot(root, tip, trackerRoot));
 }
 
-/** The remote the tracker goes to (spec §12 step 2), asking only when several remotes hold none. */
-async function chooseRemote(
-  root: string,
-  remotes: Remotes,
-  flags: InitFlags,
-  prompter: Prompter | null,
-): Promise<{ name: string | null; save: boolean; listing: RemoteListing | null }> {
-  if (flags.remote !== null) {
-    if (!remotes.urls.has(flags.remote)) {
-      throw new GrimoireError('INVALID', `there is no remote named ${flags.remote}`, { fields: { remote: `must be one of ${remotes.names.join(', ') || '(none)'}` } });
-    }
-    return { name: flags.remote, save: flags.remote !== remotes.chosen, listing: null };
-  }
+/**
+ * The remote the tracker goes to (spec §12 step 2), asking only when several
+ * remotes hold none. The choice is saved as `grimoire.remote` whenever sync's
+ * own rule (grimoire.remote, else a remote with a tracker, else `origin`)
+ * might pick another: a lone remote not named `origin` is saved too.
+ */
+async function chooseRemote(root: string, remotes: Remotes, prompter: Prompter | null): Promise<{ name: string | null; save: boolean; listing: RemoteListing | null }> {
   if (remotes.chosen !== null) return { name: remotes.chosen, save: false, listing: null };
-  if (remotes.names.length <= 1) return { name: remotes.names[0] ?? null, save: false, listing: null };
+  if (remotes.names.length <= 1) {
+    const name = remotes.names[0] ?? null;
+    return { name, save: name !== null && name !== 'origin', listing: null };
+  }
   const listings = new Map<string, RemoteListing>();
   for (const name of remotes.names) listings.set(name, await listRemote(root, name, remotes));
   const holding = remotes.names.filter((name) => {
@@ -199,13 +195,14 @@ async function chooseRemote(
   });
   if (holding.length > 0) {
     const name = holding.includes('origin') ? 'origin' : holding[0]!;
-    return { name, save: false, listing: listings.get(name)! };
+    // A stale remote-tracking tracker of another remote would win sync's choice over a remote not named origin.
+    return { name, save: name !== 'origin', listing: listings.get(name)! };
   }
   const unreachable = remotes.names.filter((name) => !listings.get(name)!.reachable);
   if (unreachable.length > 0) {
     throw new GrimoireError('NOT_SYNCED', `init couldn't reach ${unreachable.join(', ')} to see which remote holds the tracker; nothing changed`, {
       unreachable: Object.fromEntries(unreachable.map((name) => [name, (listings.get(name) as { failure: RemoteFailure }).failure])),
-      remedy: 'rerun init when every remote is reachable, or name the tracker’s remote with --remote <name>',
+      remedy: 'rerun init when every remote is reachable, or name the tracker’s remote with `git config grimoire.remote <name>`',
     });
   }
   const fallback = remotes.names.includes('origin') ? 'origin' : remotes.names[0]!;
@@ -215,13 +212,20 @@ async function chooseRemote(
   return { name, save: true, listing: listings.get(name)! };
 }
 
-/** The clients the person wants: --clients, the prompt (pre-selected by what the repo has), or both. */
+/**
+ * The clients the person wants: --clients, the prompt, or by default both. A
+ * checkout grimoire is installed in defaults to the clients its manifest
+ * records, so a join or a re-run writes nothing; otherwise what the repo has
+ * pre-selects the prompt's answer.
+ */
 async function chooseClients(root: string, flags: InitFlags, prompter: Prompter | null): Promise<ClientName[]> {
   if (flags.clients !== null) return [...flags.clients];
-  if (!prompter) return [...CLIENTS];
+  const { entries } = await readManifest(root);
+  const recorded = CLIENTS.filter((client) => entries.some((entry) => entry.client === client));
+  if (!prompter) return recorded.length > 0 ? recorded : [...CLIENTS];
   const has = async (file: string) => (await stat(path.join(root, file)).catch(() => null)) !== null;
-  const claude = (await has('.claude')) || (await has('CLAUDE.md'));
-  const codex = (await has('.codex')) || (await has('AGENTS.md'));
+  const claude = recorded.length > 0 ? recorded.includes('claude-code') : (await has('.claude')) || (await has('CLAUDE.md'));
+  const codex = recorded.length > 0 ? recorded.includes('codex') : (await has('.codex')) || (await has('AGENTS.md'));
   const fallback = claude === codex ? 'both' : claude ? 'claude-code' : 'codex';
   const answer = await choose(prompter, 'Configure which agent clients?', ['both', 'claude-code', 'codex'] as const, fallback, { claude: 'claude-code' });
   return answer === 'both' ? [...CLIENTS] : [answer];
@@ -286,15 +290,35 @@ function majorOf(version: string): number {
   return Number(/^v?(\d+)/.exec(version)?.[1] ?? 0);
 }
 
+/**
+ * The MCP server command for any other client, as one shell line. The
+ * bootstrap avoids `$ " \ % ^` and backticks, so double quotes carry it
+ * unchanged through sh, cmd and PowerShell.
+ */
+function genericMcpCommand(): string {
+  return ['node', ...MCP_ENTRY_ARGS].map((arg) => (/^[\w./-]+$/.test(arg) ? arg : `"${arg}"`)).join(' ');
+}
+
+/** A planned entry that keeps a grant the person changed or removed: reported, and restored only on request. */
+function keepsGrant(entry: PlannedEntry): boolean {
+  return entry.action === 'kept' || (entry.kept_grants?.length ?? 0) > 0;
+}
+
 function describeEntry(entry: PlannedEntry): string {
   const what = entry.item ?? entry.hook ?? entry.marker ?? entry.key?.join('.');
   return `${entry.action.padEnd(9)} ${entry.path}${what ? ` (${what})` : ''}${entry.why ? `: ${entry.why}` : ''}`;
 }
 
-function trackerLine(plan: TrackerPlan, remote: string | null): string {
+function trackerLine(plan: TrackerPlan, remote: string | null, listing: RemoteListing | null): string {
   switch (plan.action) {
-    case 'mint':
-      return `mint a new tracker with excerpt mode ${plan.mode}, then ${remote ? `push it to ${remote}` : 'keep it sync-pending (no remote)'}`;
+    case 'mint': {
+      const then = !remote
+        ? 'keep it sync-pending (no remote)'
+        : listing?.reachable && listing.head === null
+          ? `keep it sync-pending: ${remote} has no default branch yet`
+          : `push it to ${remote}`;
+      return `mint a new tracker with excerpt mode ${plan.mode}, then ${then}`;
+    }
     case 'replace':
       return `mint a NEW tracker root with excerpt mode ${plan.mode}${plan.remoteTip && remote ? `, replacing grimoire/tracker on ${remote}` : ''}`;
     case 'adopt':
@@ -329,7 +353,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
 
   // 2. Preflight: the remote, what it holds, and the tracker refs here.
   const remotes = await readRemotes(root);
-  const remote = await chooseRemote(root, remotes, flags, prompter);
+  const remote = await chooseRemote(root, remotes, prompter);
   let failure: RemoteFailure | null = null;
   let listing = remote.listing;
   if (remote.name !== null) {
@@ -361,19 +385,31 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     if (answer?.trim() !== 'new-tracker') throw canceled('the new-tracker confirmation');
     trackerPlan = { action: 'replace', mode: 'facts', remoteTip };
   } else if (named !== null) {
-    if ((await holds(root, tips.local, named)) || (await holds(root, tips.remote, named))) {
+    // Every tracker ref here must hold R: a sync would fold one with another root into it.
+    const here = [tips.local, tips.remote].filter((tip): tip is string => tip !== null);
+    const strays: string[] = [];
+    for (const tip of here) if (!(await holds(root, tip, named))) strays.push(tip);
+    if (here.length === 0) {
+      trackerPlan = { action: 'missing', root: named, failure };
+    } else if (strays.length === 0) {
       trackerPlan = { action: 'present', root: named };
-    } else if (tips.local !== null || tips.remote !== null) {
-      const found = [...new Set(await Promise.all([tips.local, tips.remote].filter((tip): tip is string => tip !== null).map((tip) => rootOf(root, tip))))];
+    } else {
+      const found = [...new Set(await Promise.all(strays.map((tip) => rootOf(root, tip))))];
       throw new GrimoireError(
         'NOT_SYNCED',
-        `.grimoire/config.yml names the tracker with root ${named}, but this clone's tracker refs hold another (root ${found.join(', ')}); nothing changed`,
-        { tracker_root: named, found, remedy: 'check out the branch whose config.yml names this clone’s tracker, or ask whoever ran init --new-tracker' },
+        `.grimoire/config.yml names the tracker with root ${named}, but ${strays.length === here.length ? 'this clone’s tracker refs hold' : strays[0] === tips.local ? 'this clone’s local tracker holds' : `${remote.name}’s tracker holds`} another (root ${found.join(', ')}); nothing changed`,
+        { tracker_root: named, found, remedy: 'check out the branch whose config.yml names that tracker, or ask whoever ran init --new-tracker' },
       );
-    } else {
-      trackerPlan = { action: 'missing', root: named, failure };
     }
   } else {
+    if (failure && remote.name !== null) {
+      // Unread, the remote might hold a tracker with another root than a kept local one: never "none".
+      throw new GrimoireError(
+        'NOT_SYNCED',
+        `init couldn't see whether ${remote.name} holds a grimoire tracker (${failure.message}); a failed fetch never counts as "none", so nothing changed`,
+        { remote: remote.name, failure, remedy: 'rerun init when the remote is reachable' },
+      );
+    }
     const localRoot = tips.local === null ? null : await rootOf(root, tips.local);
     const remoteRoot = tips.remote === null ? null : await rootOf(root, tips.remote);
     if (localRoot !== null && remoteRoot !== null && localRoot !== remoteRoot) {
@@ -384,17 +420,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       );
     }
     const adopted = localRoot ?? remoteRoot;
-    if (adopted !== null) {
-      trackerPlan = { action: 'adopt', root: adopted };
-    } else if (failure && remote.name !== null) {
-      throw new GrimoireError(
-        'NOT_SYNCED',
-        `init couldn't see whether ${remote.name} holds a grimoire tracker (${failure.message}); a failed fetch never counts as "none", so nothing changed`,
-        { remote: remote.name, failure, remedy: 'rerun init when the remote is reachable' },
-      );
-    } else {
-      trackerPlan = { action: 'mint', mode: 'facts' };
-    }
+    trackerPlan = adopted !== null ? { action: 'adopt', root: adopted } : { action: 'mint', mode: 'facts' };
   }
 
   const minting = trackerPlan.action === 'mint' || trackerPlan.action === 'replace';
@@ -428,7 +454,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   const npmScript = (await stat(path.join(root, 'package.json')).catch(() => null))?.isFile() === true;
   const pointerOptions: PointerOptions = { clients, npmScript, adapter: adapter.placement };
   let filePlan: FilePlan = await planFiles(root, desiredEntries(pointerOptions));
-  const kept = filePlan.entries.filter((entry) => entry.action === 'kept');
+  const kept = filePlan.entries.filter(keepsGrant);
   if (kept.length > 0 && prompter) {
     const restore = await choose(
       prompter,
@@ -441,7 +467,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   }
   for (const entry of filePlan.entries) {
     if (entry.action === 'conflict') warn('CONFLICT', `${entry.path} left untouched: ${entry.why}`);
-    if (entry.action === 'kept') warn('GRANT_CHANGED', `${entry.path}: ${entry.why}; kept as changed (an interactive init offers to restore it)`);
+    if (keepsGrant(entry)) warn('GRANT_CHANGED', `${entry.path}: ${entry.why}; kept as it is (an interactive init offers to restore it)`);
   }
 
   // The machine side.
@@ -551,7 +577,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   say(
     [
       `grimoire ${version} init in ${root}`,
-      `Tracker: ${trackerLine(trackerPlan, remote.name)}`,
+      `Tracker: ${trackerLine(trackerPlan, remote.name, listing)}`,
       `This machine: ${machinePlan.copy === 'install' ? `install version copy ${version}` : `version copy ${version} is installed`}; launcher ${machinePlan.launcher}; join record ${joinAction}`,
       'Files:',
       ...filePlan.entries.map((entry) => `  ${describeEntry(entry)}`),
@@ -599,6 +625,10 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
         }
         tracker.sync = 'pushed';
       } else {
+        if (trackerPlan.action === 'replace' && remote.name !== null && tips.remote !== null) {
+          // The remote holds no tracker, but this clone still tracks the old one: a sync would fold it back in.
+          await dropStaleRemoteTracker(root, remote.name, tips.remote);
+        }
         const outcome = await syncNow(trackerStore, { author, identity: { name: o.person.name, email: o.person.email }, actor, client: 'cli', surface: 'cli' });
         tracker.sync = outcome.state;
         if (outcome.reason) tracker.sync_reason = outcome.reason;
@@ -670,7 +700,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       ...(warnings.some((w) => w.code === 'SYNC_PENDING') ? [`SYNC_PENDING: ${warnings.find((w) => w.code === 'SYNC_PENDING')!.message}`] : []),
       'Next steps:',
       ...done.next_steps.map((step) => `  - ${step}`),
-      'Other MCP clients: run `node -e "<bootstrap>" mcp` from the repo root (the exact args are in .mcp.json and under generic_mcp in the JSON report).',
+      `Other MCP clients: run this stdio server command from the repo root (also under generic_mcp in the JSON report): ${genericMcpCommand()}`,
     ].join('\n'),
   );
   return done;

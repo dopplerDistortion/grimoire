@@ -112,19 +112,33 @@ export function codexBlockBody(): string {
   ].join('\n');
 }
 
+/** A Codex hook group's definition, as Codex hashes it for trust. */
+export interface CodexHookGroup {
+  /** The snake_case event, e.g. `session_start`. */
+  readonly event_name: string;
+  readonly matcher?: string | null;
+  readonly hooks: readonly { readonly type: string; readonly command: string; readonly timeout: number; readonly async: boolean }[];
+}
+
 /**
- * The hash Codex trusts grimoire's SessionStart group under (spike E, P4):
- * `sha256:` over compact JSON with sorted keys of the group's definition. The
- * join record keeps the one last announced, so a change asks for `/hooks`
- * approval again.
+ * The hash Codex trusts a hook group under (spike E, P4; Codex 0.162.1
+ * hook_hash): `sha256:` over compact JSON with sorted keys of
+ * {event_name, matcher (only when set), hooks}.
+ */
+export function codexHookGroupHash(group: CodexHookGroup): string {
+  const { matcher, ...rest } = group;
+  return sha256(canonicalJson(matcher === null || matcher === undefined ? rest : { ...rest, matcher }));
+}
+
+/**
+ * The hash Codex trusts grimoire's SessionStart group under. The join record
+ * keeps the one last announced, so a change asks for `/hooks` approval again.
  */
 export function codexHookHash(): string {
-  return sha256(
-    canonicalJson({
-      event_name: 'session_start',
-      hooks: [{ type: 'command', command: codexHookCommand(), timeout: CODEX_HOOK_TIMEOUT, async: false }],
-    }),
-  );
+  return codexHookGroupHash({
+    event_name: 'session_start',
+    hooks: [{ type: 'command', command: codexHookCommand(), timeout: CODEX_HOOK_TIMEOUT, async: false }],
+  });
 }
 
 /** Claude Code's exec-form hook group for `event`. */

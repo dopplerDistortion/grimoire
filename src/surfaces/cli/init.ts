@@ -24,7 +24,7 @@ import { agentMarkersIn } from './shell';
 import { terminalOn } from './wiki';
 
 const BOOLEAN_FLAGS = new Set(['--yes', '--json', '--new-tracker', '--adapter', '--help']);
-const VALUE_FLAGS = new Set(['--clients', '--excerpts', '--remote', '--from']);
+const VALUE_FLAGS = new Set(['--clients', '--excerpts', '--from']);
 
 interface InitCommand {
   readonly flags: InitFlags;
@@ -65,7 +65,6 @@ export function parseInitArgs(argv: readonly string[]): InitCommand {
     excerpts: excerpts as InitFlags['excerpts'],
     newTracker: booleans.has('--new-tracker'),
     adapter: booleans.has('--adapter'),
-    remote: values.get('--remote') ?? null,
   };
   if (flags.newTracker && flags.yes) throw new UsageError('init --new-tracker is interactive only: it never runs with --yes', 'init');
   return { flags, json: booleans.has('--json'), help: booleans.has('--help'), from: values.get('--from') ?? null };
@@ -74,7 +73,7 @@ export function parseInitArgs(argv: readonly string[]): InitCommand {
 function initHelp(): Record<string, unknown> {
   return {
     verb: 'init',
-    usage: 'npx @goksening/grimoire@<version> init [--yes] [--clients claude-code,codex] [--excerpts excerpts|facts|none] [--new-tracker] [--adapter] [--remote <name>] [--json]',
+    usage: 'npx @goksening/grimoire@<version> init [--yes] [--clients claude-code,codex] [--excerpts excerpts|facts|none] [--new-tracker] [--adapter] [--json]',
     description:
       'Installs grimoire into this host repo, or joins this clone to the version its checkout pins: the tracker, this machine’s version copy and launcher, and the pointer files agent clients read. Shows the plan, the grants and the excerpt disclosure, then asks once.',
     gate: 'a person runs it with no agent marker set; without an interactive terminal it needs --yes (safe defaults: excerpt mode facts, adapter declined, changed permission entries never restored); --new-tracker is interactive and asks for a typed confirmation',
@@ -84,7 +83,6 @@ function initHelp(): Record<string, unknown> {
       '--excerpts': 'the excerpt mode a new tracker starts with (asked otherwise; facts under --yes)',
       '--new-tracker': 'mint a new tracker root instead of adopting the one this repo has',
       '--adapter': 'ask again about making grimoire the tracker in docs/agents/issue-tracker.md after a decline',
-      '--remote': 'the remote grimoire pushes grimoire/tracker to (saved as git config grimoire.remote)',
       '--json': 'alone: print the plan as JSON and write nothing (no terminal needed); with --yes: run, printing only the JSON report',
     },
     output: 'one JSON object: the report (plan, what was written, next steps), or {"error": …}',

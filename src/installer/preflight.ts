@@ -136,6 +136,15 @@ export async function saveRemote(root: string, remote: string): Promise<void> {
 }
 
 
+/**
+ * Deletes `remote`'s remote-tracking tracker ref while it still holds `stale`:
+ * the remote holds no tracker any more, and a sync would fold the stale
+ * history in (what `git fetch --prune` would drop).
+ */
+export async function dropStaleRemoteTracker(root: string, remote: string, stale: string): Promise<void> {
+  await runGit(root, ['update-ref', '-d', remoteTrackerRef(remote), stale]);
+}
+
 /** Moves the local tracker ref back to `previous` (deleting it when there was none), if it still holds `current`. */
 export async function restoreTrackerRef(root: string, previous: string | null, current: string): Promise<void> {
   await runGit(root, previous === null ? ['update-ref', '-d', TRACKER_REF, current] : ['update-ref', '-m', 'grimoire: init --new-tracker undone', TRACKER_REF, previous, current]);
