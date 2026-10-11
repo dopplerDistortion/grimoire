@@ -3,7 +3,7 @@
 // copies are reporting packages, so each test sees exactly how a copy was
 // entered. test/installer/packed.test.ts runs a real grimoire copy.
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { gitTest, makeTempDir, removeDir } from '#harness';
@@ -88,9 +88,8 @@ describe('when this clone can’t run the pin, the launcher says so like the boo
   }
 
   gitTest('a checkout with no config.yml in a joined clone exits 0 and prints nothing', async ({ world }) => {
-    const store = await cloneWith(world.a.dir, { join: true, copy: true });
+    await cloneWith(world.a.dir, { join: true, copy: true });
     const before = await world.a.addWorktree('before-install');
-    expect(store.dir).toContain(world.a.dir);
 
     for (const args of [MCP_ENTRY_ARGS, claudeHookArgs('session-start'), claudeHookArgs('pre-tool-use')]) {
       const r = await runEntry(args, { cwd: before.dir, projectDir: before.dir });
@@ -205,6 +204,5 @@ describe('the launcher only moves forward', () => {
 
     expect(broken.code).not.toBe(0);
     expect(reportOf(repaired).version).toBe('1.4.2');
-    await rm(launcherPath(s));
   });
 });

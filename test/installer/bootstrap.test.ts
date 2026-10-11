@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { git, gitTest, makeTempDir, removeDir, runCommand } from '#harness';
+import { git, gitTest, makeTempDir, removeDir } from '#harness';
 import {
   BOOTSTRAP,
   claudeHookArgs,
@@ -16,16 +16,11 @@ import {
   MCP_ENTRY_ARGS,
   notSetUpLine,
 } from '../../src/installer';
+import { runEntry } from './support';
 
 /** The stand-in launcher: prints what the bootstrap passed it, and what the process itself got. */
 const REPORTING_LAUNCHER =
   "module.exports = (args, root) => process.stdout.write(JSON.stringify({ args, root, argv: process.argv.slice(1), stdin: require('fs').readFileSync(0, 'utf8') }));\n";
-
-/** Runs `node <args>` the way an agent client spawns an entry: no shell, `${CLAUDE_PROJECT_DIR}` substituted. */
-function runEntry(args: readonly string[], options: { cwd: string; projectDir?: string; input?: string }) {
-  const substituted = args.map((arg) => (options.projectDir === undefined ? arg : arg.replace('${CLAUDE_PROJECT_DIR}', options.projectDir)));
-  return runCommand(process.execPath, substituted, { cwd: options.cwd, input: options.input ?? '' });
-}
 
 async function writeLauncher(commonDir: string, text = REPORTING_LAUNCHER): Promise<void> {
   await mkdir(path.join(commonDir, 'grimoire'), { recursive: true });
@@ -117,7 +112,7 @@ describe('the bootstrap hands the launcher its arguments (spike A R3 fallback)',
     await git(nested, ['init', '--quiet']);
     await writeConfig(nested);
 
-    const quiet = await runEntry(MCP_ENTRY_ARGS, { cwd: path.join(nested) });
+    const quiet = await runEntry(MCP_ENTRY_ARGS, { cwd: nested });
     await writeLauncher(path.join(nested, '.git'));
     const inner = await runEntry(MCP_ENTRY_ARGS, { cwd: nested });
 
