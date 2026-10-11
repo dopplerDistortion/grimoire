@@ -385,8 +385,17 @@ class Fold {
         const fold = kindOf(path) === 'marker' ? foldMarker : foldSettings;
         return { mode: BLOB_MODE, name, oid: this.objects.putBlob(fold(baseBytes, aBytes!, bBytes!)) };
       }
-      case 'outcome':
-        return { mode: BLOB_MODE, name, oid: this.objects.putBlob(foldOutcome(await this.objects.blob(a.oid), await this.objects.blob(b.oid))) };
+      case 'outcome': {
+        // The attempt's own `end.md` on each side: when both sealed it differently, the outcome follows the end that stands.
+        const end = [ATTEMPTS_DIR, ...path.slice(1, 4), name.replace(/\.md$/, ''), 'end.md'].join('/');
+        const [aBytes, bBytes, aEnd, bEnd] = await Promise.all([
+          this.objects.blob(a.oid),
+          this.objects.blob(b.oid),
+          ...[this.roots.a, this.roots.b].map((root) => (root ? this.objects.fileAt(root, end) : null)),
+        ]);
+        const ends = aEnd && bEnd && !aEnd.equals(bEnd) ? ([aEnd, bEnd] as const) : null;
+        return { mode: BLOB_MODE, name, oid: this.objects.putBlob(foldOutcome(aBytes!, bBytes!, ends)) };
+      }
       case 'session':
         return { mode: BLOB_MODE, name, oid: this.objects.putBlob(foldSession(await this.objects.blob(a.oid), await this.objects.blob(b.oid))) };
       default:

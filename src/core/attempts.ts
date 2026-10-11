@@ -2,7 +2,7 @@
 // attempt lifecycle, as compare-and-set writes on the tracker.
 import { GrimoireError, invalid } from '../errors';
 import type { SecretScanner } from '../scanner';
-import { ATTEMPT_PATTERN, parseWriteRef, type AttemptRecord, type IssueRecord, type TrackerView, type Verdict } from '../tracker';
+import { ATTEMPT_PATTERN, bareId, parseWriteRef, type AttemptRecord, type IssueRecord, type TrackerView, type Verdict } from '../tracker';
 import type { Actor } from './context';
 import { fieldConflict, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
 import { define, oneLine, writer, type OpEnv } from './op';
@@ -76,11 +76,11 @@ export const claim = define({
   }),
   async run(input, { ctx, tracker, actor }): Promise<ClaimResult> {
     const author = writer(ctx);
-    const id = parseWriteRef(input.id, 'id');
+    const ref = parseWriteRef(input.id, 'id');
     const key = input.idempotency_key;
-    const spec = { op: 'claim', author, actor, ...(key ? { idempotency: { key, fingerprint: { issue: id } } } : {}) };
+    const spec = { op: 'claim', author, actor, ...(key ? { idempotency: { key, fingerprint: { issue: ref } } } : {}) };
     const write = await tracker.transact(spec, (draft) => {
-      draft.resolveWrite(id, 'id');
+      const id = draft.resolveWrite(ref, 'id');
       const issue = draft.issue(id)!;
       const open = openAttemptsOf(draft, id);
       if (open.length > 0) throw alreadyClaimed(id, open, author.email);
@@ -258,13 +258,16 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
   const author = writer(ctx);
   const me = author.email;
   const by = recordedActor(me, actor);
-  const { id, ending } = request;
+  const { ending } = request;
   const binds = ending !== 'release-abandoned';
   checkDebrief(request.debrief);
   const write = await tracker.transact({ op: request.op, author, actor }, (draft) => {
+    let id = request.id;
     let record: AttemptRecord | undefined;
     if (request.attempt !== undefined) {
       record = draft.attempt(request.attempt);
+      // A fold that kept an id collision apart moved the attempt to `<id>~<hash4>`: the bare id it was claimed by still names it.
+      if (record && bareId(id) === id && bareId(record.issue) === id) id = record.issue;
       if (!record || record.issue !== id) {
         draft.resolveWrite(id, 'id');
         throw notAssignee(`${request.attempt} is not an attempt on ${id}`);
@@ -284,7 +287,7 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
         );
       }
     } else {
-      draft.resolveWrite(id, 'id');
+      id = draft.resolveWrite(id, 'id');
       const open = openAttemptsOf(draft, id);
       if (open.length > 0) throw attemptOpen(id, open.find((a) => a.assignee === me) ?? open[0]!, me);
       const status = draft.issue(id)!.status;
@@ -307,10 +310,9 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     let parentEdit: { record: IssueRecord; body: string; noops: readonly number[] } | null = null;
     if (request.parentPatch && issue) {
       if (issue.parent === null) throw invalid({ parent_patch: `${id} has no parent` });
-      const parent = draft.issue(issue.parent);
-      if (!parent) draft.resolveWrite(issue.parent, 'parent_patch');
-      const patched = applyPatch(parent!.body, request.parentPatch);
-      parentEdit = { record: parent!, body: patched.body, noops: patched.noops };
+      const parent = draft.issue(issue.parent) ?? draft.issue(draft.resolveWrite(issue.parent, 'parent_patch'))!;
+      const patched = applyPatch(parent.body, request.parentPatch);
+      parentEdit = { record: parent, body: patched.body, noops: patched.noops };
     }
 
     const now = draft.now.toISOString();
