@@ -45,18 +45,28 @@ export interface SessionStartContext {
 }
 
 /**
- * What this session start has to say. Nothing yet: the knowledge delivery
- * fast path (copies and stubs, reloadSkills) and the session line's
- * priorities (pin mismatch, due chores, proposals, stray edits) plug in here.
- * The not-joined notice never reaches this code: the bootstrap and the
- * launcher print it when there is no launcher, copy or join record.
+ * What this session start has to say. So far only the last of §12's
+ * priorities: the content pointer files upkeep refreshed, until they are
+ * committed. The knowledge delivery fast path (copies and stubs,
+ * reloadSkills) and the higher priorities (pin mismatch, due chores,
+ * proposals, stray edits) plug in here. The not-joined notice never reaches
+ * this code: the bootstrap and the launcher print it when there is no
+ * launcher, copy or join record.
  *
  * Whoever makes this return `reloadSkills` should assert both clients' output
  * through the verb (runHook), including a Codex payload under Claude Code's
  * env markers (test/surfaces/hooks/session-start.test.ts).
  */
-async function compose(_payload: unknown, _ctx: SessionStartContext): Promise<SessionStartMessage> {
-  return {};
+async function compose(_payload: unknown, ctx: SessionStartContext): Promise<SessionStartMessage> {
+  const [{ findHostRoot }, { locateMachineLocalStore }, { refreshedPointerFiles, refreshNotice }] = await Promise.all([
+    import('../../core/host'),
+    import('../../machine-local'),
+    import('../../upkeep/refreshed'),
+  ]);
+  const root = await findHostRoot(ctx.startDir).catch(() => null);
+  const store = root === null ? null : await locateMachineLocalStore(root);
+  const refreshed = store ? await refreshedPointerFiles(store, root!).catch(() => null) : null;
+  return refreshed ? { line: refreshNotice(refreshed.paths.length, null) } : {};
 }
 
 /** The verb's body: the payload in, what to print out. */

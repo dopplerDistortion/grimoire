@@ -41,6 +41,12 @@ export interface McpDeps {
   readonly track?: (call: Promise<unknown>) => void;
   /** Told the connecting client once a request names it (tools/list or tools/call): the process record notes it. */
   readonly onClient?: (client: ClientInfo) => void;
+  /**
+   * Told once the opening is done: the 2025-era `initialized` notification, or
+   * the first tools/list or tools/call (the 2026-07-28 era has no handshake).
+   * Upkeep starts after it (spec §13).
+   */
+  readonly onOpened?: () => void;
 }
 
 /** Connection facts the server keeps from its spawn env: ids only (spec §8, §14). */
@@ -56,7 +62,10 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
       { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
     );
 
+    server.oninitialized = () => deps.onOpened?.();
+
     server.setRequestHandler('tools/list', async (_request, extra) => {
+      deps.onOpened?.();
       noteClient(clientOf(extra.mcpReq.envelope as Record<string, unknown> | undefined));
       const core = await deps.core();
       // Only agent ops are ever offered, and only those the registry marks as MCP tools (spec §7, §8).
@@ -132,6 +141,7 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
     // A per-call failure never ends the process, and never reaches the client as
     // a protocol error: the SDK would answer a throw with JSON-RPC -32603.
     server.setRequestHandler('tools/call', (request, extra) => {
+      deps.onOpened?.();
       const notices: string[] = [];
       const call = callTool(request, extra, notices).catch((error: unknown) =>
         toolResult({ error: errorBodyOf(error, (line) => process.stderr.write(`grimoire mcp: ${line}\n`)) }, notices, true),

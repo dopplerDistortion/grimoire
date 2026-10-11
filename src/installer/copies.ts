@@ -188,8 +188,10 @@ export async function listCopies(store: MachineLocalStore): Promise<InstalledCop
 export type KeepReason = 'pinned' | 'running' | 'upgrading' | 'previous' | 'requested' | 'unknown-pin';
 
 export interface PruneOptions {
-  /** Versions the caller still needs (init keeps the copy it just installed, before config.yml pins it). */
+  /** Versions the caller still needs (the version the pruning process runs). */
   readonly keep?: readonly string[];
+  /** How long to wait for an install holding the lock (default two minutes); BUSY after it. Upkeep never waits. */
+  readonly waitMs?: number;
 }
 
 export interface PruneResult {
@@ -248,5 +250,5 @@ export async function pruneCopies(store: MachineLocalStore, options: PruneOption
       removed,
       kept: copies.filter((copy) => reasons.has(copy.version)).map((copy) => ({ version: copy.version, why: [...reasons.get(copy.version)!] })),
     };
-  });
+  }, options.waitMs === undefined ? {} : { waitMs: options.waitMs });
 }

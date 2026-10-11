@@ -23,6 +23,7 @@ import {
 } from '../../src/installer';
 import { revealedRoot } from '../../src/capture/transcript-roots';
 import { MachineLocalStore } from '../../src/machine-local';
+import { partLeaseName } from '../../src/upkeep';
 import { initializeTracker } from '../core/support';
 import { packGrimoire, reportingPackage, runEntry, writeConfig } from './support';
 
@@ -82,6 +83,9 @@ describe('a clone joined from the packed tarball', () => {
     for (const version of ['1.0.0-test.2', '1.0.0']) {
       await installCopy(store, version, { dir: await reportingPackage(world.root, version), integrity: null });
     }
+    // The server's own upkeep prunes too; while this test is the only pruner, what it sees can't depend on how soon that runs.
+    const pruning = await store.leases.acquire(partLeaseName('prune-copies'), { ttlMs: 120_000 });
+    expect(pruning.status).toBe('acquired');
     const client = new Client({ name: 'claude-code', version: '2.1.296' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [...MCP_ENTRY_ARGS], cwd: world.a.dir, stderr: 'pipe' }));
     let duringServe: Awaited<ReturnType<typeof pruneCopies>>;
@@ -97,6 +101,7 @@ describe('a clone joined from the packed tarball', () => {
     }
     await expect.poll(async () => (await store.processes.list()).length, { timeout: 10_000 }).toBe(0);
     const afterServe = await pruneCopies(store);
+    if (pruning.status === 'acquired') await pruning.lease.release();
 
     expect(duringServe.removed).toEqual([]);
     expect(duringServe.kept).toContainEqual({ version: PIN, why: ['running'] });

@@ -12,9 +12,10 @@
 //   is refused, per file.
 // - A file is written by temp file plus rename, after re-checking that it
 //   still holds what the plan saw.
-import { lstat, mkdir } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import path from 'node:path';
-import { readTextIfExists, writeFileAtomic } from '../machine-local';
+import { readTextIfExists } from '../machine-local';
+import { linkedComponent, readCheckoutText, safeWrite } from '../safe-write';
 import {
   MANIFEST_PATH,
   canonicalJson,
@@ -148,17 +149,6 @@ function recordOf(entry: DesiredEntry, hash: string, created: boolean): Manifest
   };
 }
 
-/** The first path component at or below `root` that is a symlink (or junction), or null. */
-async function symlinkedComponent(root: string, relative: string): Promise<string | null> {
-  let at = root;
-  for (const part of relative.split('/')) {
-    at = path.join(at, part);
-    const info = await lstat(at).catch(() => null);
-    if (!info) return null;
-    if (info.isSymbolicLink()) return path.relative(root, at).split(path.sep).join('/');
-  }
-  return null;
-}
 
 /** Text as it is written back: the file's own byte order mark and line endings kept. */
 function inFileStyle(original: string | null, text: string): string {
@@ -439,7 +429,7 @@ export async function planFiles(root: string, desired: readonly DesiredEntry[], 
   for (const [relative, entries] of byPath) {
     const refuse = (why: string) =>
       outcomes.push(...entries.map((entry) => ({ planned: { ...describe(entry), action: 'conflict' as const, why }, recorded: priors.get(entryIdentity(describe(entry))) ?? null })));
-    const link = await symlinkedComponent(root, relative);
+    const link = await linkedComponent(root, relative);
     if (link !== null) {
       refuse(`${link} is a symlink; grimoire never writes through one`);
       continue;
@@ -450,7 +440,13 @@ export async function planFiles(root: string, desired: readonly DesiredEntry[], 
       refuse(`${relative} is not a file`);
       continue;
     }
-    const current = (await readTextIfExists(file)) ?? null;
+    // Only text that round-trips is rewritten: anything else would come back with the person's text replaced.
+    const read = await readCheckoutText(file);
+    if (read.state === 'not-text') {
+      refuse(`${relative} is not UTF-8 text`);
+      continue;
+    }
+    const current = read.state === 'text' ? read.text : null;
     const prior = (entry: DesiredEntry) => priors.get(entryIdentity(describe(entry)));
     let after: string | null = null;
     const first = entries[0]!;
@@ -498,16 +494,18 @@ export interface AppliedFiles {
   readonly skipped: { readonly path: string; readonly why: string }[];
 }
 
-/** Writes one planned file, after re-checking it; false when it changed since the plan. */
+/** Writes one planned file through a safe write (spec §13); returns why it was left alone, or null when written. */
 export async function writePlanned(root: string, write: PlannedWrite): Promise<string | null> {
-  const link = await symlinkedComponent(root, write.path);
-  if (link !== null) return `${link} is a symlink; grimoire never writes through one`;
-  const file = path.join(root, write.path);
-  const now = (await readTextIfExists(file)) ?? null;
-  if (now !== write.before) return `${write.path} changed while init ran`;
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFileAtomic(file, write.after);
-  return null;
+  const skip = await safeWrite(root, write.path, write.before, write.after);
+  if (skip === null) return null;
+  switch (skip.reason) {
+    case 'link':
+      return `${skip.at} is a symlink; grimoire never writes through one`;
+    case 'changed':
+      return `${write.path} changed while init ran`;
+    case 'not-a-file':
+      return `${write.path} is not a file`;
+  }
 }
 
 /**

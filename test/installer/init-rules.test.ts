@@ -9,7 +9,10 @@ import { describe, expect } from 'vitest';
 import { gitTest, runCommand, type Checkout, type Clone } from '#harness';
 import type { Identity } from '../../src/core/context';
 import { readPerson } from '../../src/core/host';
-import { BOOTSTRAP, readJoinRecord } from '../../src/installer';
+import { BOOTSTRAP, installCopy, listCopies, readJoinRecord } from '../../src/installer';
+import { instructionRulesText } from '../../src/installer/texts';
+import { worktreeLeaseName } from '../../src/upkeep';
+import { installed } from '../upkeep/support';
 import { readManifest } from '../../src/installer/manifest';
 import { codexHookHash } from '../../src/installer/pointers';
 import { MachineLocalStore } from '../../src/machine-local';
@@ -246,6 +249,50 @@ async function cloneOfEmptyRemote(root: string): Promise<string> {
   return clone;
 }
 
+describe('upkeep in init', () => {
+  gitTest('init runs upkeep last: copies nothing needs are pruned, the one it installed stays, and drifted pointer files elsewhere on the pin are refreshed', async ({ world }) => {
+    const root = world.a.dir;
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    await installCopy(store, '0.9.0', { dir: await reportingPackage(world.root, '0.9.0'), integrity: null });
+    await installCopy(store, '2.0.0', { dir: await reportingPackage(world.root, '2.0.0'), integrity: null });
+    const linked = await world.a.addWorktree('feature');
+    await installed(linked.dir, VERSION);
+    await writeFile(path.join(linked.dir, '.claude/rules/grimoire.md'), 'drifted\n');
+
+    const { report, said } = await initIn(root);
+
+    expect(report.machine?.pruned).toEqual(['2.0.0']);
+    expect((await listCopies(store)).map((copy) => copy.version)).toEqual(['0.9.0', VERSION]);
+    expect(report.upkeep?.runs).toContainEqual(expect.objectContaining({ part: 'pointer-refresh', status: 'ran', worktree: expect.stringContaining('feature') }));
+    expect(await readFile(path.join(linked.dir, '.claude/rules/grimoire.md'), 'utf8')).toBe(instructionRulesText());
+    expect(said).toMatch(/grimoire refreshed 1 pointer file in .*feature: commit it/);
+  });
+
+  gitTest('init waits for upkeep (or doctor --fix) holding this worktree before it writes the checkout, recorded as running its version', async ({ world }) => {
+    const root = world.a.dir;
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    const held = await store.leases.acquire(await worktreeLeaseName(root), { ttlMs: 60_000 });
+    if (held.status !== 'acquired') throw new Error('lease not taken');
+
+    let settled = false;
+    const running = initIn(root).finally(() => (settled = true));
+    // From before it installs its copy until config.yml pins it, init's process record keeps that copy from any pruner.
+    await expect.poll(async () => (await store.processes.live({ role: 'init' })).map((record) => [record.pin, record.worktree]), { timeout: 20_000 }).toEqual([
+      [VERSION, root],
+    ]);
+    // Well past what init takes on its own, it still waits, and has written nothing.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(settled).toBe(false);
+    expect(existsSync(path.join(root, '.grimoire', 'config.yml'))).toBe(false);
+    expect(existsSync(path.join(root, '.claude', 'rules', 'grimoire.md'))).toBe(false);
+    await held.lease.release();
+    const { report } = await running;
+
+    expect(report.written).toContain('.grimoire/config.yml');
+    expect(await store.processes.live({ role: 'init' })).toEqual([]);
+  });
+});
+
 describe('what init leaves alone and warns about', () => {
   gitTest('an existing triage-labels doc is left alone, a rules file grimoire never wrote is a conflict left byte for byte, and a large AGENTS.md is warned about', async ({ world }) => {
     const root = world.a.dir;
@@ -263,6 +310,24 @@ describe('what init leaves alone and warns about', () => {
     expect(await readFile(path.join(root, '.claude/rules/grimoire.md'), 'utf8')).toBe('my rules\r\n');
     expect(report.written).not.toContain('.claude/rules/grimoire.md');
     expect((await readManifest(root)).entries.map((entry) => entry.path)).not.toContain('.claude/rules/grimoire.md');
+  });
+
+  gitTest('a re-run keeps the adapter block that was made the tracker above another tracker’s doc as the superseding one', async ({ world }) => {
+    const root = world.a.dir;
+    await world.a.commitFile('docs/agents/issue-tracker.md', '# Issue tracker: GitHub\n\nIssues live on GitHub.\n');
+    await initIn(root, { answers: [
+      { when: /agent clients/, type: 'both' },
+      { when: /Make grimoire the tracker/, type: 'make' },
+      { when: /Excerpt mode/, type: 'facts' },
+      { when: /Go ahead/, type: 'y' },
+    ] });
+    const doc = await readFile(path.join(root, 'docs/agents/issue-tracker.md'), 'utf8');
+    expect(doc).toContain('This section supersedes the rest of this file');
+
+    const { report } = await initIn(root);
+
+    expect(report.plan.files.find((entry) => entry.path === 'docs/agents/issue-tracker.md')?.action).toBe('unchanged');
+    expect(await readFile(path.join(root, 'docs/agents/issue-tracker.md'), 'utf8')).toBe(doc);
   });
 
   gitTest('without a git user.email a mint is refused before anything is written, while a join only warns', async ({ world }) => {
