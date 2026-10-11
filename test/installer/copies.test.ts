@@ -1,10 +1,12 @@
 // Version copies (spec §6, §11): installed whole under the install lock with
 // their tarball integrity, and pruned only when nothing needs them. Seam 1:
 // the installer driven directly, against a real clone and real npm tarballs.
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { describe, expect } from 'vitest';
-import { gitTest } from '#harness';
+import { git, gitTest } from '#harness';
 import {
   copyDir,
   installCopy,
@@ -16,11 +18,49 @@ import {
 } from '../../src/installer';
 import { GrimoireError } from '../../src/errors';
 import { MachineLocalStore } from '../../src/machine-local';
+import { findGitDirs } from '../../src/machine-local/git-dirs';
 import { npmPack, reportingPackage, writeConfig } from './support';
 
 async function pkgListing(store: MachineLocalStore): Promise<string[]> {
   return (await readdir(path.join(store.dir, 'pkg')).catch(() => [] as string[])).sort();
 }
+
+interface TarEntry {
+  readonly name: string;
+  /** ustar typeflag: '0' file, '1' hard link, '2' symlink, '5' folder. */
+  readonly type?: string;
+  readonly data?: string;
+  readonly linkTo?: string;
+}
+
+/** A ustar archive built by hand, so it can hold what `npm pack` never writes. */
+function tarArchive(entries: readonly TarEntry[]): Buffer {
+  const blocks: Buffer[] = [];
+  for (const entry of entries) {
+    const data = Buffer.from(entry.data ?? '');
+    const header = Buffer.alloc(512);
+    header.write(entry.name, 0, 100, 'utf8');
+    header.write('0000644\0', 100);
+    header.write('0000000\0', 108);
+    header.write('0000000\0', 116);
+    header.write(`${data.length.toString(8).padStart(11, '0')}\0`, 124);
+    header.write('00000000000\0', 136);
+    header.write(entry.type ?? '0', 156);
+    header.write(entry.linkTo ?? '', 157, 100, 'utf8');
+    header.write('ustar\0', 257);
+    header.write('00', 263);
+    header.fill(' ', 148, 156);
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
+    blocks.push(header, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  blocks.push(Buffer.alloc(1024));
+  return Buffer.concat(blocks);
+}
+
+const MANIFEST: TarEntry = { name: 'package/package.json', data: JSON.stringify({ name: '@goksening/grimoire', version: '1.4.2' }) };
+const ENTRY: TarEntry = { name: 'package/dist/launch.mjs', data: 'export async function launch() {}\n' };
 
 describe('installing a copy', () => {
   gitTest('from an npm tarball: unpacked into pkg/<version>/ with .complete recording npm’s integrity', async ({ world }) => {
@@ -78,6 +118,63 @@ describe('installing a copy', () => {
       expect(error, name).toBeInstanceOf(GrimoireError);
       expect((error as GrimoireError).code, name).toBe('INVALID');
     }
+    expect(await pkgListing(store)).toEqual([]);
+  });
+
+  gitTest('a hand-built tarball of the same shape installs, so the refusals below are about what each one adds', async ({ world }) => {
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const tarball = path.join(world.root, 'good.tgz');
+    await writeFile(tarball, gzipSync(tarArchive([{ name: 'package/', type: '5' }, MANIFEST, ENTRY])));
+
+    expect((await installCopy(store, '1.4.2', { tarball })).status).toBe('installed');
+  });
+
+  gitTest('refused, writing nothing outside pkg/ and leaving no temp folder: unsafe paths, links, truncated or non-gzip data', async ({ world }) => {
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const archives: Record<string, Buffer> = {
+      'parent path': gzipSync(tarArchive([MANIFEST, ENTRY, { name: 'package/../../escaped.txt', data: 'out' }])),
+      'absolute path': gzipSync(tarArchive([MANIFEST, ENTRY, { name: '/escaped.txt', data: 'out' }])),
+      'drive path': gzipSync(tarArchive([MANIFEST, ENTRY, { name: 'C:escaped.txt', data: 'out' }])),
+      symlink: gzipSync(tarArchive([MANIFEST, ENTRY, { name: 'package/link', type: '2', linkTo: '../../escaped.txt' }])),
+      'hard link': gzipSync(tarArchive([MANIFEST, ENTRY, { name: 'package/link', type: '1', linkTo: 'package/package.json' }])),
+      // The archive ends partway through a file's data.
+      truncated: gzipSync(tarArchive([MANIFEST, { ...ENTRY, data: 'x'.repeat(2000) }]).subarray(0, 512 * 3)),
+      'not gzip': Buffer.from('this is not a tarball'),
+    };
+
+    for (const [name, bytes] of Object.entries(archives)) {
+      const tarball = path.join(world.root, 'crafted.tgz');
+      await writeFile(tarball, bytes);
+
+      const error = await installCopy(store, '1.4.2', { tarball }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(error, name).toBeInstanceOf(GrimoireError);
+      expect((error as GrimoireError).code, name).toBe('INVALID');
+      expect((error as GrimoireError).message, name).toContain("can't be unpacked");
+      expect(await pkgListing(store), name).toEqual([]);
+    }
+    for (const outside of [path.join(store.dir, 'escaped.txt'), path.join(store.dir, 'pkg', 'escaped.txt'), path.join(world.root, 'escaped.txt')]) {
+      expect(existsSync(outside), outside).toBe(false);
+    }
+  });
+
+  gitTest('a package folder holding a link is refused, never followed', async ({ world }) => {
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const dir = await reportingPackage(world.root, '1.4.2');
+    await mkdir(path.join(world.root, 'elsewhere'));
+    // A junction needs no privilege on Windows; elsewhere a directory symlink.
+    await symlink(path.join(world.root, 'elsewhere'), path.join(dir, 'dist', 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+
+    const error = await installCopy(store, '1.4.2', { dir, integrity: null }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect((error as GrimoireError).code).toBe('INVALID');
+    expect((error as GrimoireError).message).toContain('not a regular file');
     expect(await pkgListing(store)).toEqual([]);
   });
 
@@ -155,6 +252,70 @@ describe('pruning copies', () => {
       '2.0.0': ['upgrading'],
       '2.1.0': ['requested'],
     });
+  });
+
+  gitTest('a submodule’s checkout, named by core.worktree, is a registered worktree whose pin is kept', async ({ world }) => {
+    const superproject = path.join(world.root, 'super');
+    await mkdir(superproject);
+    await git(superproject, ['init', '--quiet']);
+    await git(superproject, ['-c', 'protocol.file.allow=always', 'submodule', 'add', '--quiet', world.remoteUrl, 'sub']);
+    const dirs = (await findGitDirs(path.join(superproject, 'sub')))!;
+    // The submodule's git dir lives in the superproject's .git/modules/, away from its checkout.
+    expect(path.basename(path.dirname(dirs.commonDir))).toBe('modules');
+    const store = new MachineLocalStore(dirs.commonDir);
+    await installAll(store, world.root, ['1.0.0', '2.0.0']);
+    await writeConfig(dirs.worktree, '1.0.0');
+
+    const result = await pruneCopies(store);
+
+    expect(result.removed).toEqual(['2.0.0']);
+    expect(result.kept).toEqual([{ version: '1.0.0', why: ['pinned'] }]);
+  });
+
+  gitTest('a registered worktree whose pin can’t be read now keeps every copy: a main checkout git doesn’t record, a locked worktree that is away', async ({ world }) => {
+    // `git clone --separate-git-dir`: the main checkout's .git is a file, and nothing in the git dir names the checkout.
+    const separate = path.join(world.root, 'separate.git');
+    await git(world.root, ['clone', '--quiet', '--separate-git-dir', separate, world.remoteUrl, 'sep']);
+    await git(path.join(world.root, 'sep'), ['worktree', 'add', '--quiet', '-b', 'upgrade', path.join(world.root, 'sep-upgrade')]);
+    const store = new MachineLocalStore((await findGitDirs(path.join(world.root, 'sep')))!.commonDir);
+    await installAll(store, world.root, ['1.0.0', '1.1.0', '1.2.0']);
+    await writeConfig(path.join(world.root, 'sep'), '1.0.0');
+    await writeConfig(path.join(world.root, 'sep-upgrade'), '1.2.0');
+
+    const unrecorded = await pruneCopies(store);
+
+    // A linked worktree on removable media: locked, its folder away for now.
+    const linked = await world.a.addWorktree('usb');
+    const aStore = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await installAll(aStore, world.root, ['1.0.0', '1.1.0', '1.2.0']);
+    await writeConfig(world.a.dir, '1.2.0');
+    await writeConfig(linked.dir, '1.0.0');
+    await world.a.git(['worktree', 'lock', linked.dir]);
+    await rename(linked.dir, `${linked.dir}-unplugged`);
+
+    const away = await pruneCopies(aStore);
+
+    for (const result of [unrecorded, away]) {
+      expect(result.removed).toEqual([]);
+      expect(Object.fromEntries(result.kept.map((k) => [k.version, k.why]))).toEqual({
+        '1.0.0': ['unknown-pin'],
+        '1.1.0': ['previous', 'unknown-pin'],
+        '1.2.0': ['pinned', 'unknown-pin'],
+      });
+    }
+  });
+
+  gitTest('a linked worktree whose folder is gone and isn’t locked keeps nothing (git prunes it too)', async ({ world }) => {
+    const linked = await world.a.addWorktree('gone');
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await installAll(store, world.root, ['1.0.0', '1.1.0', '1.2.0']);
+    await writeConfig(world.a.dir, '1.2.0');
+    await writeConfig(linked.dir, '1.0.0');
+    await rm(linked.dir, { recursive: true, force: true });
+
+    const result = await pruneCopies(store);
+
+    expect(result.removed).toEqual(['1.0.0']);
   });
 
   gitTest('with nothing pinned it keeps the newest copy; leftovers of interrupted installs go; unknown names stay', async ({ world }) => {

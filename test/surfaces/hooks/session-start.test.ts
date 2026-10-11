@@ -3,8 +3,10 @@
 // accepts. Claude Code reloads skills from `hookSpecificOutput.reloadSkills`;
 // Codex fails the hook on any key it doesn't know, so it only ever gets the
 // plain line.
+import { Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { readFixture, readFixtureJson } from '#harness';
+import { runHook } from '../../../src/surfaces/hooks/run-hook';
 import { sessionStart, sessionStartClient, sessionStartOutput } from '../../../src/surfaces/hooks/session-start';
 
 const CLAUDE = ['startup', 'startup-plain', 'clear', 'compact', 'resume', 'fork'].map((name) => `claude-code/hook-payloads/session-start-${name}.json`);
@@ -17,11 +19,24 @@ describe('telling the clients apart by the payload alone', () => {
     for (const fixture of CODEX) expect(sessionStartClient(readFixtureJson(fixture)), fixture).toBe('codex');
   });
 
-  it('a Codex payload stays codex whatever the environment says (a Codex started from Claude Code’s shell inherits its markers)', () => {
+  it('the verb, under Claude Code’s env markers (a Codex started from Claude Code’s shell inherits them), gives a Codex payload no JSON Codex would reject', async () => {
     vi.stubEnv('CLAUDECODE', '1');
     vi.stubEnv('CLAUDE_PROJECT_DIR', process.cwd());
 
-    expect(sessionStartClient(readFixtureJson(CODEX[0]!))).toBe('codex');
+    for (const fixture of CODEX) {
+      let output = '';
+      const stdout = new Writable({
+        write(chunk: Buffer, _encoding, done) {
+          output += chunk.toString('utf8');
+          done();
+        },
+      });
+      const code = await runHook('session-start', process.cwd(), { stdin: Readable.from([readFixture(fixture)]), stdout });
+
+      expect(code, fixture).toBe(0);
+      // Codex's schema denies unknown keys: reloadSkills (Claude Code's) would fail the hook and drop the line.
+      expect(output, fixture).not.toContain('reloadSkills');
+    }
   });
 
   it('anything else is no client', () => {

@@ -165,13 +165,55 @@ describe('when grimoire is missing', () => {
     expect([unknown.code, unknown.stdout, unknown.stderr]).toEqual([0, '', '']);
   });
 
-  it('reads the pin however config.yml quotes it', async () => {
+  it('reads the pin however config.yml quotes it, from the top-level version: line only', async () => {
     const repo = await awkwardRepo();
-    for (const line of ['version: 2.0.0-rc.1', 'version: "2.0.0-rc.1"', "version: '2.0.0-rc.1' # pinned"]) {
-      await writeConfig(repo, `${line}\ninstall_format: 1\n`);
+    const configs = [
+      'version: 2.0.0-rc.1\ninstall_format: 1\n',
+      'version: "2.0.0-rc.1"\ninstall_format: 1\n',
+      "version: '2.0.0-rc.1' # pinned\ninstall_format: 1\n",
+      'version:2.0.0-rc.1\r\ninstall_format: 1\r\n',
+      '﻿version: 2.0.0-rc.1\n',
+      // Decoys before the real line: a comment and keys that end in `version:`.
+      '# schema version: 2\nversion: 2.0.0-rc.1\n',
+      '#version: 3.0.0\ntracker_version: 3\nformat_version: 4.0.0\nversion: 2.0.0-rc.1\n',
+      'tracker:\n  version: 5.0.0\nversion: 2.0.0-rc.1\n',
+      'install_format: 1\nversion: 2.0.0-rc.1+build.7\n',
+    ];
+    for (const config of configs) {
+      await writeConfig(repo, config);
       const r = await runEntry(claudeHookArgs('session-start'), { cwd: repo, projectDir: repo });
-      expect(r.stdout, line).toBe(`${notSetUpLine('2.0.0-rc.1')}\n`);
+      const pin = config.includes('+build.7') ? '2.0.0-rc.1+build.7' : '2.0.0-rc.1';
+      expect(r.stdout, JSON.stringify(config)).toBe(`${notSetUpLine(pin)}\n`);
     }
+  });
+
+  it('a pin that isn’t strict semver, or none, gets the join command without a pin, never a wrong one', async () => {
+    const repo = await awkwardRepo();
+    for (const config of ['version: latest\n', 'version: ^1.4.2\n', 'version: v1.4.2\n', 'version: 1.4\n', 'version: 1.4.2.5\n', 'version: 1.4.2abc\n', 'install_format: 1\n', 'tracker:\n  version: 1.4.2\n']) {
+      await writeConfig(repo, config);
+
+      const start = await runEntry(claudeHookArgs('session-start'), { cwd: repo, projectDir: repo });
+      const mcp = await runEntry(MCP_ENTRY_ARGS, { cwd: repo });
+
+      expect([start.code, start.stdout, start.stderr], JSON.stringify(config)).toEqual([0, `${notSetUpLine(null)}\n`, '']);
+      expect([mcp.code, mcp.stdout, mcp.stderr], JSON.stringify(config)).toEqual([3, '', `${notSetUpLine(null)}\n`]);
+    }
+    expect(notSetUpLine(null)).toBe("grimoire isn't set up on this machine; ask the user to run `npx @goksening/grimoire init`");
+  });
+
+  it('a config.yml it can’t read never fails a hook; mcp shows the error', async () => {
+    const repo = await awkwardRepo();
+    // A folder where the file should be: reading it fails (EISDIR), as EACCES or a checkout racing the read would.
+    await mkdir(path.join(repo, '.grimoire', 'config.yml'), { recursive: true });
+
+    const start = await runEntry(claudeHookArgs('session-start'), { cwd: repo, projectDir: repo });
+    const pre = await runEntry(claudeHookArgs('pre-tool-use'), { cwd: repo, projectDir: repo });
+    const mcp = await runEntry(MCP_ENTRY_ARGS, { cwd: repo });
+
+    expect([start.code, start.stdout, start.stderr]).toEqual([0, '', '']);
+    expect([pre.code, pre.stdout, pre.stderr]).toEqual([0, '', '']);
+    expect(mcp.code).not.toBe(0);
+    expect(mcp.stderr).toContain('EISDIR');
   });
 
   it('a launcher that throws never fails a hook; mcp shows the error', async () => {

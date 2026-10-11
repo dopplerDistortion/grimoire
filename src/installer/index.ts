@@ -46,4 +46,4 @@ export {
 } from './records';
 export { compareSemver, isStrictSemver } from './semver';
 export { SHIM_PATH, shimText } from './shim';
-export { registeredWorktrees, worktreePins, type WorktreePin } from './worktrees';
+export { registeredWorktrees, worktreePins, type ClonePins, type Registry, type WorktreePin } from './worktrees';

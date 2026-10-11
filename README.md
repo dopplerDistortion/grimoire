@@ -79,6 +79,8 @@ imports the pinned version copy's `dist/launch.mjs` (`src/surfaces/launch.ts`);
 the committed shell shim (`src/installer/run.cjs`) does the same for CLI verbs.
 Run directly, the bin hands every verb but `init`, `leave` and `uninstall` to
 that copy too (`src/surfaces/delegate.ts`), or exits 3 with the join command.
+A hook verb always exits 0 and swallows its own failures; set `GRIMOIRE_DEBUG=1`
+to see them on stderr.
 
 The dashboard (Preact) lives in
 `src/surfaces/dashboard/`, and `npm run dev:dashboard` serves it.

@@ -2,6 +2,7 @@
 // A hook always exits 0, whatever happens, an unknown event included (v1
 // tolerance, §21): a failing hook would only show the user an error, or make
 // Codex drop the session line. Each event's code loads only for that event.
+import { hookFailed } from './debug';
 
 type Stdin = NodeJS.ReadableStream & { readonly isTTY?: boolean };
 
@@ -30,8 +31,9 @@ export async function runHook(event: string | undefined, startDir: string, io: H
       output = await preToolUse(await readAll(io.stdin), { startDir });
     }
     if (output !== '') io.stdout.write(output);
-  } catch {
+  } catch (error) {
     // Never a failed hook: say nothing instead.
+    hookFailed(error);
   }
   return 0;
 }

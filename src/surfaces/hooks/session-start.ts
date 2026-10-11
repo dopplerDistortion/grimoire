@@ -50,6 +50,10 @@ export interface SessionStartContext {
  * priorities (pin mismatch, due chores, proposals, stray edits) plug in here.
  * The not-joined notice never reaches this code: the bootstrap and the
  * launcher print it when there is no launcher, copy or join record.
+ *
+ * Whoever makes this return `reloadSkills` should assert both clients' output
+ * through the verb (runHook), including a Codex payload under Claude Code's
+ * env markers (test/surfaces/hooks/session-start.test.ts).
  */
 async function compose(_payload: unknown, _ctx: SessionStartContext): Promise<SessionStartMessage> {
   return {};

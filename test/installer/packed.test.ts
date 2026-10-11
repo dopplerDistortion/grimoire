@@ -3,7 +3,7 @@
 // tarball into a clone's version copies with the launcher and a join record,
 // then reached only through the frozen bootstrap (and the shell shim), started
 // in a subdirectory: never through the working tree or node_modules.
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
@@ -28,16 +28,18 @@ import { packGrimoire, reportingPackage, runEntry, writeConfig } from './support
 /** A version no build of the working tree reports, so only the installed copy can answer with it. */
 const PIN = '1.0.0-test.1';
 
-let packed: Awaited<ReturnType<typeof packGrimoire>>;
+// Unset when the build or pack in beforeAll failed: afterAll must not hide that failure.
+let packed: Awaited<ReturnType<typeof packGrimoire>> | undefined;
 beforeAll(async () => {
   packed = await packGrimoire(PIN);
 });
-afterAll(() => packed.cleanup());
+afterAll(() => packed?.cleanup());
 
 /** Joins clone `root` to PIN from the packed tarball, as init's step 5 does, and pins it. */
 async function joined(root: string): Promise<MachineLocalStore> {
   const store = new MachineLocalStore(path.join(root, '.git'));
-  const copy = await installCopy(store, PIN, { tarball: packed.tarball, integrity: packed.integrity });
+  const { tarball, integrity } = packed!;
+  const copy = await installCopy(store, PIN, { tarball, integrity });
   expect(copy.status).toBe('installed');
   await installLauncher(store);
   await writeJoinRecord(store, PIN, { excerpt_mode: 'facts', codex_hook_hash: null, joined_at: Date.now() });
@@ -104,17 +106,30 @@ describe('a clone joined from the packed tarball', () => {
     const claudeStart = readFixture('claude-code/hook-payloads/session-start-startup.json');
     const pre = readFixture('claude-code/hook-payloads/pre-tool-use.json');
     const unknown = [...claudeHookArgs('pre-tool-use').slice(0, -1), 'subagent-stop'];
-
-    const runs = [
-      await runEntry(claudeHookArgs('session-start'), { cwd: sub, projectDir: world.a.dir, input: claudeStart }),
-      await runEntry(claudeHookArgs('pre-tool-use'), { cwd: sub, projectDir: world.a.dir, input: pre }),
-      await runEntry(unknown, { cwd: sub, projectDir: world.a.dir, input: '{}' }),
+    // GRIMOIRE_DEBUG puts a hook's swallowed failure on stderr, so a copy whose hook path breaks can't pass as a quiet hook.
+    const env = { ...process.env, GRIMOIRE_DEBUG: '1' };
+    const hooks = async () => [
+      await runEntry(claudeHookArgs('session-start'), { cwd: sub, projectDir: world.a.dir, input: claudeStart, env }),
+      await runEntry(claudeHookArgs('pre-tool-use'), { cwd: sub, projectDir: world.a.dir, input: pre, env }),
+      await runEntry(unknown, { cwd: sub, projectDir: world.a.dir, input: '{}', env }),
     ];
+
+    const runs = await hooks();
+    // The same entries against a copy missing each event's own chunk: still exit 0 and silent on stdout, but debug says why.
+    const chunks = path.join(copyDir(store, PIN), 'dist', 'chunks');
+    const eventChunks = (await readdir(chunks)).filter((name) => /^(session-start|pre-tool-use)-/.test(name));
+    expect(eventChunks).toHaveLength(2);
+    for (const name of eventChunks) await rm(path.join(chunks, name));
+    const [brokenStart, brokenPre] = await hooks();
     // Without the copy the same session-start entry would print the not-set-up line instead.
     await rm(path.join(copyDir(store, PIN), '.complete'));
     const withoutCopy = await runEntry(claudeHookArgs('session-start'), { cwd: sub, projectDir: world.a.dir, input: claudeStart });
 
     for (const r of runs) expect([r.code, r.stdout, r.stderr]).toEqual([0, '', '']);
+    for (const r of [brokenStart!, brokenPre!]) {
+      expect([r.code, r.stdout]).toEqual([0, '']);
+      expect(r.stderr).toMatch(/^grimoire hook failed: .*(Cannot find module|ERR_MODULE_NOT_FOUND)/s);
+    }
     expect(withoutCopy.stdout).toBe(`${notSetUpLine(PIN)}\n`);
   });
 

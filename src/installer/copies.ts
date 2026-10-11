@@ -185,7 +185,7 @@ export async function listCopies(store: MachineLocalStore): Promise<InstalledCop
 }
 
 /** Why prune kept a copy. */
-export type KeepReason = 'pinned' | 'running' | 'upgrading' | 'previous' | 'requested';
+export type KeepReason = 'pinned' | 'running' | 'upgrading' | 'previous' | 'requested' | 'unknown-pin';
 
 export interface PruneOptions {
   /** Versions the caller still needs (init keeps the copy it just installed, before config.yml pins it). */
@@ -202,8 +202,10 @@ export interface PruneResult {
  * lock. It never removes a copy that a registered worktree pins, that a live
  * process runs, that an upgrade in progress involves, or the newest previous
  * version (the newest copy older than the newest pinned one; with nothing
- * pinned, the newest copy). Folders that never completed and leftover temp
- * folders go too; names it doesn't know are left alone.
+ * pinned, the newest copy). While a registered worktree's pin can't be known
+ * (a locked worktree that is away, a main checkout git doesn't record, an
+ * unreadable config.yml) it keeps every copy. Folders that never completed and
+ * leftover temp folders go too; names it doesn't know are left alone.
  */
 export async function pruneCopies(store: MachineLocalStore, options: PruneOptions = {}): Promise<PruneResult> {
   return withInstallLock(store, async () => {
@@ -215,7 +217,8 @@ export async function pruneCopies(store: MachineLocalStore, options: PruneOption
       reasons.set(version, (reasons.get(version) ?? new Set()).add(why));
     };
 
-    const pinned = (await worktreePins(store.commonDir)).map((entry) => entry.pin).filter((pin): pin is string => pin !== null);
+    const { pins, unknown } = await worktreePins(store.commonDir);
+    const pinned = pins.map((entry) => entry.pin).filter((pin): pin is string => pin !== null);
     for (const pin of pinned) keep(pin, 'pinned');
     for (const record of await store.processes.live()) keep(record.pin, 'running');
     for (const { value } of await store.coordination.list<Partial<UpgradeRecord>>(UPGRADE_RECORDS)) {
@@ -226,6 +229,8 @@ export async function pruneCopies(store: MachineLocalStore, options: PruneOption
     const newestPinned = pinned.filter(isStrictSemver).sort(compareSemver).at(-1);
     const previous = copies.filter((copy) => newestPinned === undefined || compareSemver(copy.version, newestPinned) < 0).at(-1);
     keep(previous?.version, 'previous');
+    // Any copy could be the one an unknown pin names.
+    if (unknown.length > 0) for (const copy of copies) keep(copy.version, 'unknown-pin');
 
     const removed: string[] = [];
     for (const copy of copies) {

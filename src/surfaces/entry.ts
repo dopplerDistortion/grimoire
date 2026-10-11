@@ -3,6 +3,7 @@
 // (./cli/main.ts) and a version copy's launcher entry (./launch.ts). Each
 // verb's code is a dynamic import, so it loads only for that verb.
 import { VERSION } from '../version';
+import { hookFailed } from './hooks/debug';
 
 export interface EntryOptions {
   /** The path of `grimoire.mjs`: the detached sync child runs it. */
@@ -34,7 +35,8 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
     try {
       const { runHook } = await import('./hooks/run-hook');
       return await runHook(rest[1], from ?? process.cwd());
-    } catch {
+    } catch (error) {
+      hookFailed(error);
       return 0;
     }
   }

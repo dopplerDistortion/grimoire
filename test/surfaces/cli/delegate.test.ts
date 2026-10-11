@@ -2,9 +2,10 @@
 // hands every verb but init, leave and uninstall to the checkout's pinned,
 // joined copy through the clone's launcher; with no launcher it prints the
 // join command and exits 3. The built bin, real repos, a reporting copy.
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
-import { gitTest, runCommand } from '#harness';
+import { gitTest, runCommand, type RunResult } from '#harness';
 import { notSetUpLine } from '../../../src/installer';
 import { MachineLocalStore } from '../../../src/machine-local';
 import { joinClone, reportingPackage, reportOf, writeConfig } from '../../installer/support';
@@ -46,17 +47,41 @@ describe('the bin in an installed checkout', () => {
     expect([pre.code, pre.stdout, pre.stderr]).toEqual([0, '', '']);
   });
 
-  gitTest('init, leave and uninstall, --version and --help always run as the version invoked', async ({ world }) => {
+  gitTest('a launcher that fails to load: a verb exits 3 with the join command, which replaces it; a hook exits 0 silently', async ({ world }) => {
     await writeConfig(world.a.dir, '1.4.2');
+    await mkdir(path.join(world.a.dir, '.git', 'grimoire'), { recursive: true });
+    await writeFile(path.join(world.a.dir, '.git', 'grimoire', 'launcher.cjs'), 'module.exports = (');
 
-    const version = await grimoire(['--version'], world.a.dir);
-    const help = await grimoire(['--help'], world.a.dir);
-    const init = await grimoire(['init', '--yes'], world.a.dir);
+    const show = await grimoire(['show', 'gr-7k2pq'], world.a.dir);
+    const start = await grimoire(['hook', 'session-start'], world.a.dir, '{}');
 
-    expect(version.code).toBe(0);
-    expect(help.code).toBe(0);
-    // Not the join command: this version answered (it has no `init` verb yet, so a usage error).
-    expect(init.stderr).not.toContain('npx @goksening/grimoire@1.4.2 init');
-    expect(init.code).toBe(2);
+    expect([show.code, show.stdout]).toEqual([3, '']);
+    expect(show.stderr).toContain('launcher.cjs');
+    expect(show.stderr).toContain('`npx @goksening/grimoire@1.4.2 init`');
+    expect([start.code, start.stdout, start.stderr]).toEqual([0, '', '']);
+  });
+
+  gitTest('init, leave and uninstall, --version and --help always run as the version invoked', async ({ world }) => {
+    const own = [['init'], ['leave'], ['uninstall'], ['--version'], ['--help']];
+    // No launcher: a delegated verb would get the join command and exit 3.
+    await writeConfig(world.a.dir, '1.4.2');
+    const unjoined: RunResult[] = [];
+    for (const args of own) unjoined.push(await grimoire(args, world.a.dir));
+    // A joined clone: a delegated verb would reach the reporting copy instead.
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await joinClone(store, '1.4.2', { dir: await reportingPackage(world.root, '1.4.2'), integrity: null });
+    const joined: RunResult[] = [];
+    for (const args of own) joined.push(await grimoire(args, world.a.dir));
+
+    // Without a TTY, init (no --yes), leave and uninstall refuse or fail as this version does; none is ever handed on.
+    own.forEach((args, i) => {
+      for (const r of [unjoined[i]!, joined[i]!]) {
+        expect(r.code, args[0]).not.toBe(3);
+        expect(r.stderr, args[0]).not.toContain(notSetUpLine('1.4.2'));
+        expect(r.stdout, args[0]).not.toContain('"copy"');
+      }
+    });
+    expect(joined[3]!.stdout).toContain(`"version"`);
+    expect(joined[3]!.stdout).not.toContain('1.4.2');
   });
 });

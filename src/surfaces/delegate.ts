@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { readCheckoutConfig } from '../core/host';
-import { notSetUpLine } from '../installer/bootstrap';
+import { joinCommand, notSetUpLine } from '../installer/bootstrap';
 import { isStrictSemver } from '../installer/semver';
 import { findGitDirs } from '../machine-local/git-dirs';
 
@@ -49,21 +49,33 @@ export async function delegate(argv: readonly string[], options: DelegateOptions
   const config = await readCheckoutConfig(dirs.worktree).catch(() => null);
   if (!config) return 'local';
 
+  // The hook verbs keep their rules: only session-start speaks, on stdout, and every hook exits 0.
+  const tell = (line: string): number => {
+    if (verb === 'hook') {
+      if (words[1] === 'session-start') process.stdout.write(`${line}\n`);
+      return 0;
+    }
+    process.stderr.write(`${line}\n`);
+    return 3;
+  };
+  const strict = config.pin !== null && isStrictSemver(config.pin);
   const launcher = path.join(dirs.commonDir, 'grimoire', 'launcher.cjs');
   if (existsSync(launcher)) {
-    const launch = createRequire(import.meta.url)(launcher) as (args: readonly string[], root: string) => Promise<void>;
-    await launch(argv, dirs.worktree);
-    return 'launched';
+    try {
+      const launch = createRequire(import.meta.url)(launcher) as (args: readonly string[], root: string) => Promise<void>;
+      await launch(argv, dirs.worktree);
+      return 'launched';
+    } catch (error) {
+      // A launcher that fails to load is one `init` replaces (it fails its self-check). A hook says
+      // nothing, as the bootstrap does when the launcher throws.
+      if (verb === 'hook') return 0;
+      const message = error instanceof Error ? error.message : String(error);
+      return tell(`grimoire's launcher ${launcher} failed to load (${message}); ask the user to run \`${joinCommand(strict ? config.pin : null)}\``);
+    }
   }
-  const line =
-    config.pin !== null && isStrictSemver(config.pin)
+  return tell(
+    strict
       ? notSetUpLine(config.pin)
-      : `grimoire can't run here: .grimoire/config.yml pins ${JSON.stringify(config.pin)}, which is not a strict semver version`;
-  // The hook verbs keep their rules: only session-start speaks, on stdout, and every hook exits 0.
-  if (verb === 'hook') {
-    if (words[1] === 'session-start') process.stdout.write(`${line}\n`);
-    return 0;
-  }
-  process.stderr.write(`${line}\n`);
-  return 3;
+      : `grimoire can't run here: .grimoire/config.yml pins ${JSON.stringify(config.pin)}, which is not a strict semver version`,
+  );
 }

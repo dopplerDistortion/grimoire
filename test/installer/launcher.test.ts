@@ -3,7 +3,7 @@
 // copies are reporting packages, so each test sees exactly how a copy was
 // entered. test/installer/packed.test.ts runs a real grimoire copy.
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { gitTest, makeTempDir, removeDir } from '#harness';
@@ -17,6 +17,8 @@ import {
   LAUNCHER_VERSION,
   MCP_ENTRY_ARGS,
   notSetUpLine,
+  SHIM_PATH,
+  shimText,
   writeJoinRecord,
 } from '../../src/installer';
 import { MachineLocalStore } from '../../src/machine-local';
@@ -40,6 +42,19 @@ describe('a joined clone runs the pinned copy', () => {
     expect(mcp).toEqual({ version: '1.4.2', args: ['mcp'], info, cwd: sub, stdin: '' });
     expect(start).toEqual({ version: '1.4.2', args: ['--from', world.a.dir, 'hook', 'session-start'], info, cwd: sub, stdin: CLAUDE_START });
     expect(pre).toMatchObject({ version: '1.4.2', args: ['--from', world.a.dir, 'hook', 'pre-tool-use'], info, stdin: '{}' });
+  });
+
+  gitTest('a pin the records store names by hash (upper case, build metadata) still finds its join record', async ({ world }) => {
+    const pin = '1.0.0-RC.1+build.5';
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await joinClone(store, pin, { dir: await reportingPackage(world.root, pin), integrity: null });
+    await writeConfig(world.a.dir, pin);
+
+    const mcp = reportOf(await runEntry(MCP_ENTRY_ARGS, { cwd: world.a.dir }));
+
+    // The launcher's copy of the store's file naming took the hashed branch.
+    expect(await readdir(path.join(store.dir, 'records', 'join'))).toEqual([expect.stringMatching(/^~[0-9a-f]{40}\.json$/)]);
+    expect([mcp.version, mcp.info.pin]).toEqual([pin, pin]);
   });
 
   gitTest('mixed pins in one clone: each worktree runs the copy its own config.yml pins', async ({ world }) => {
@@ -112,17 +127,25 @@ describe('when this clone can’t run the pin, the launcher says so like the boo
     }
   });
 
-  gitTest('a copy that fails to start fails mcp with the error, never a hook', async ({ world }) => {
+  gitTest('a copy that fails to start fails mcp with the error on stderr, a CLI verb with an INTERNAL error object on stdout, never a hook', async ({ world }) => {
     const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
     await joinClone(store, '1.4.2', { dir: await reportingPackage(world.root, '1.4.2', { failing: true }), integrity: null });
     await writeConfig(world.a.dir, '1.4.2');
+    const shim = path.join(world.a.dir, SHIM_PATH);
+    await writeFile(shim, shimText());
 
     const mcp = await runEntry(MCP_ENTRY_ARGS, { cwd: world.a.dir });
     const start = await runEntry(claudeHookArgs('session-start'), { cwd: world.a.dir, projectDir: world.a.dir, input: CLAUDE_START });
+    const list = await runEntry([shim, 'list'], { cwd: world.a.dir });
 
-    expect(mcp.code).toBe(1);
+    expect([mcp.code, mcp.stdout]).toEqual([1, '']);
     expect(mcp.stderr).toContain('the copy failed to start');
     expect([start.code, start.stdout, start.stderr]).toEqual([0, '', '']);
+    // §10: exit 1 means stdout carries exactly one error object.
+    expect(list.code).toBe(1);
+    expect(JSON.parse(list.stdout)).toEqual({
+      error: { code: 'INTERNAL', message: expect.stringContaining('the copy failed to start'), retryable: false, details: { pin: '1.4.2', copy: copyDir(store, '1.4.2') } },
+    });
   });
 });
 

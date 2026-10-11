@@ -95,10 +95,21 @@ function launch(args, root) {
   return import(url.pathToFileURL(path.join(copy, 'dist', 'launch.mjs')).href)
     .then((entry) => entry.launch(args, info))
     .catch((/** @type {unknown} */ error) => {
-      if (hook) return;
-      process.stderr.write('grimoire: ' + pin + ' failed to run from ' + copy + ': ' + (error instanceof Error ? error.stack || error.message : String(error)) + '\n');
+      // A hook never fails (GRIMOIRE_DEBUG shows why it said nothing).
+      if (hook) return debug(error);
+      const message = 'grimoire ' + pin + ' failed to run from ' + copy + ': ' + (error instanceof Error ? error.message : String(error));
+      process.stderr.write(message + '\n' + (error instanceof Error && error.stack ? error.stack + '\n' : ''));
+      // A CLI verb's exit 1 always comes with one error object on stdout (spec §9, §10); mcp's stdout is the protocol.
+      if (verb[0] !== 'mcp') {
+        process.stdout.write(JSON.stringify({ error: { code: 'INTERNAL', message, retryable: false, details: { pin, copy } } }) + '\n');
+      }
       process.exitCode = 1;
     });
+}
+
+/** With GRIMOIRE_DEBUG set, a hook's swallowed failure goes to stderr; a hook still exits 0. @param {unknown} error */
+function debug(error) {
+  if (process.env.GRIMOIRE_DEBUG) process.stderr.write('grimoire hook failed: ' + (error instanceof Error ? error.stack || error.message : String(error)) + '\n');
 }
 
 module.exports = launch;

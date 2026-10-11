@@ -115,15 +115,21 @@ function buildEnv(): NodeJS.ProcessEnv {
  */
 export async function packGrimoire(version: string): Promise<{ tarball: string; integrity: string; packageDir: string; cleanup: () => Promise<void> }> {
   const dir = await makeTempDir('grimoire-pack-');
-  const packageDir = path.join(dir, 'package');
-  const built = await runCommand(
-    process.execPath,
-    [path.join(repoRoot, 'scripts', 'build.mjs'), 'cli', '--out-dir', path.join(packageDir, 'dist'), '--version', version],
-    { cwd: repoRoot, env: buildEnv() },
-  );
-  expect(built.code, built.stdout + built.stderr).toBe(0);
-  const manifest = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8')) as Record<string, unknown>;
-  await writeFile(path.join(packageDir, 'package.json'), `${JSON.stringify({ ...manifest, version, devDependencies: undefined, scripts: undefined }, null, 2)}\n`);
-  const { tarball, integrity } = npmPack(packageDir, dir);
-  return { tarball, integrity, packageDir, cleanup: () => removeDir(dir) };
+  try {
+    const packageDir = path.join(dir, 'package');
+    const built = await runCommand(
+      process.execPath,
+      [path.join(repoRoot, 'scripts', 'build.mjs'), 'cli', '--out-dir', path.join(packageDir, 'dist'), '--version', version],
+      { cwd: repoRoot, env: buildEnv() },
+    );
+    expect(built.code, built.stdout + built.stderr).toBe(0);
+    const manifest = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8')) as Record<string, unknown>;
+    await writeFile(path.join(packageDir, 'package.json'), `${JSON.stringify({ ...manifest, version, devDependencies: undefined, scripts: undefined }, null, 2)}\n`);
+    const { tarball, integrity } = npmPack(packageDir, dir);
+    return { tarball, integrity, packageDir, cleanup: () => removeDir(dir) };
+  } catch (error) {
+    // A failed build or pack leaves nothing behind, and its own error is the one reported.
+    await removeDir(dir);
+    throw error;
+  }
 }

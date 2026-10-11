@@ -1,7 +1,7 @@
 // The shell shim, `.grimoire/run.cjs` (spec §10, §11): committed, dependency
 // free, found by its own location; `run.cjs pin` answers without loading a
 // copy. Seam 3: the shim's real text, run by real node in real repos.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { gitTest, runCommand } from '#harness';
@@ -75,8 +75,11 @@ describe('run.cjs <verb> runs the pinned copy in this process', () => {
     await mkdir(sub);
 
     const report = reportOf(await shim(file, ['show', 'gr-7k2pq', '--input', '-'], sub));
+    // From inside another clone, a shim that searched from the cwd would find that clone instead.
+    const elsewhere = reportOf(await shim(file, ['list'], world.b.dir));
 
     expect(report).toMatchObject({ version: '1.4.2', args: ['show', 'gr-7k2pq', '--input', '-'], info: { root: world.a.dir, pin: '1.4.2' }, cwd: sub });
+    expect(elsewhere).toMatchObject({ version: '1.4.2', args: ['list'], info: { root: world.a.dir }, cwd: world.b.dir });
   });
 
   gitTest('a linked worktree’s shim reaches the main checkout’s launcher', async ({ world }) => {
@@ -89,6 +92,42 @@ describe('run.cjs <verb> runs the pinned copy in this process', () => {
     const report = reportOf(await shim(file, ['list'], linked.dir));
 
     expect(report.info).toMatchObject({ root: linked.dir, home: store.dir });
+  });
+
+  gitTest('the hook verbs keep their rules with no launcher, a pin that isn’t strict semver, or no config.yml: only session-start speaks, every hook exits 0', async ({ world }) => {
+    const file = await writeShim(world.a.dir);
+    const hooks = async () => ({
+      start: await shim(file, ['hook', 'session-start'], world.a.dir),
+      pre: await shim(file, ['hook', 'pre-tool-use'], world.a.dir),
+    });
+
+    await writeConfig(world.a.dir, '1.4.2');
+    const noLauncher = await hooks();
+    await writeFile(path.join(world.a.dir, '.grimoire', 'config.yml'), 'version: latest\n');
+    const notStrict = await hooks();
+    await rm(path.join(world.a.dir, '.grimoire', 'config.yml'));
+    const noConfig = await hooks();
+
+    expect([noLauncher.start.code, noLauncher.start.stdout, noLauncher.start.stderr]).toEqual([0, `${notSetUpLine('1.4.2')}\n`, '']);
+    expect([notStrict.start.code, notStrict.start.stderr]).toEqual([0, '']);
+    expect(notStrict.start.stdout).toContain('"latest", which is not a strict semver version');
+    expect([noConfig.start.code, noConfig.start.stdout, noConfig.start.stderr]).toEqual([0, '', '']);
+    for (const { pre } of [noLauncher, notStrict, noConfig]) expect([pre.code, pre.stdout, pre.stderr]).toEqual([0, '', '']);
+  });
+
+  gitTest('a launcher that fails to load: a verb exits 3 with the join command, which replaces it; a hook exits 0 silently', async ({ world }) => {
+    await writeConfig(world.a.dir, '1.4.2');
+    const file = await writeShim(world.a.dir);
+    await mkdir(path.join(world.a.dir, '.git', 'grimoire'), { recursive: true });
+    await writeFile(path.join(world.a.dir, '.git', 'grimoire', 'launcher.cjs'), 'module.exports = (');
+
+    const list = await shim(file, ['list'], world.a.dir);
+    const start = await shim(file, ['hook', 'session-start'], world.a.dir);
+
+    expect([list.code, list.stdout]).toEqual([3, '']);
+    expect(list.stderr).toContain(joinCommand('1.4.2'));
+    expect(list.stderr).toContain('launcher.cjs');
+    expect([start.code, start.stdout, start.stderr]).toEqual([0, '', '']);
   });
 
   gitTest('exits 3 with the join command on stderr when this machine has no launcher, or no copy of the pin', async ({ world }) => {
