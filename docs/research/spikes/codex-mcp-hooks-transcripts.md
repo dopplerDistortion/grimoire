@@ -25,7 +25,7 @@
 >
 > **Only Codex 0.162.1 was run.** Where older versions matter (the `_meta` keys in T6), they were read from the source at tags `rust-v0.140.0`, `rust-v0.150.0` and `rust-v0.162.1`, and are marked as source-only.
 
-**Review fix pass (same day).** An independent review led to more captures with the same kit: a legacy-mode compaction, a legacy root thread with a subagent, two turns on one thread, the truncation runs (now fixtured), the P7 refusal as the model saw it, a hook listing with mixed groups and handlers, a SessionStart run with Claude Code's real output shape, R4 with Codex killed early, and an archived session whose `.zst` is Codex's own frame. Those runs used `C:\gok130\` as the scratch folder, `TEMP` and `CODEX_HOME`, so their artifacts hold no user name. Corrections from that pass are folded into the sections below.
+**Review fix pass (same day).** An independent review led to more captures with the same kit: a legacy-mode compaction, a legacy root thread with a subagent, two turns on one thread, the truncation runs (now fixtured), the P7 refusal as the model saw it, a hook listing with mixed groups and handlers, a SessionStart run with Claude Code's real output shape, R4 with Codex killed early, and an archived session whose `.zst` is Codex's own frame. Those runs used `C:\gok130\` as the scratch folder, `TEMP` and `CODEX_HOME`, so their artifacts hold no user name. Corrections from that pass are folded into the sections below. Once the fixtures were extracted, both scratch folders (`%TEMP%\gok130\`, `C:\gok130\`) were deleted, so the raw captures named below no longer exist.
 
 ## Verdicts
 
