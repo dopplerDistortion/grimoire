@@ -48,3 +48,5 @@ Each decision records its actor and its basis. The basis is human review in v1, 
 - The controls are procedural. A local agent with a shell can still forge records, so host-repo review of `.grimoire/` changes is the backstop.
 
 _Amended by ADR 0008: skill versions are identified and matched on normalized text (BOM stripped, LF line endings), and the offered versions come from the ledger, never from bytes on disk._
+
+_Amended by ADR 0010: skill texts are never merged by git, so two accepts from one base are no longer withheld. In a fork, a delete wins over a restore, which wins over an accept, and between two accepts the lower version hash serves until a human acknowledges the one that stands. A change to a checkout's copy is a stray edit: it is set aside, never served, and recorded only by a human, so observed changes are no longer recorded automatically. With no skill files on code branches, the backstop is the tracker log and each version's provenance, not host-repo review of `.grimoire/`._

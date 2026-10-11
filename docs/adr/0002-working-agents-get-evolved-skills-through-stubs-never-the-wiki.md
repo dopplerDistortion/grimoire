@@ -27,3 +27,5 @@ Evolved skills grant nothing. Grimoire keeps only `name`, `description` and the 
 - This leaves the paper's tested setup: nobody has measured whether agents pick the right evolved skill from its description. For that reason, active evolved skills are capped (by default 8 skills, with descriptions of at most 300 characters), and each trace records which evolved skills the attempt read.
 - Using a skill costs one extra file read. Adding, retiring or re-describing an evolved skill rewrites two files outside the dotfolder, and both are recorded in the manifest.
 - The wiki is still plain committed files, so an agent that searches the repo can find it. We accept that leak and don't police it.
+
+_Amended by ADR 0010: evolved-skill text lives on the tracker branch. `.grimoire/skills/<name>/SKILL.md` and the stubs are copies that grimoire generates in each checkout and nobody commits. Each evolved skill is one `SKILL.md`, with no supporting files. The wiki isn't in any checkout, so the grep leak above narrows to deliberate reads of the tracker branch._

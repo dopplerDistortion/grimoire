@@ -47,3 +47,5 @@ All of a clone's worktrees must share one live issue state, so that a claim made
 - **Forks without push access** can't share tracker state with upstream.
 
 _Amended by ADR 0008: `Grimoire-Actor` also carries the context, call id, spawn-env id, process nonce and any chore-exposure basis. `Grimoire-Attempt` carries the handle the caller named, on claim, update, comment and ending ops only. `end.md` keeps only attempt-level fields, and per-context entries are read from the frozen session records. A single session record's purge writes its own tombstone._
+
+_Amended by ADR 0010: the tracker also holds the wiki (`knowledge/wiki/`), and the evolved-skill texts are its skill versions. The fold merges wiki pages and resolves skill forks by rules that belong to the store format. Accepted chore submits and human knowledge decisions trigger the same background sync as attempt-ending writes._
