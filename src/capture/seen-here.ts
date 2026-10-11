@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import type { Actor, ReservedHint } from '../core/context';
 import type { MachineLocalStore } from '../machine-local';
-import type { EvidenceSource } from './evidence';
+import { MAIN_CONTEXT, type EvidenceSource } from './evidence';
 import type { StepOrigin } from './steps';
 import { revealedRoot } from './transcript-roots';
 
@@ -53,12 +53,24 @@ function clientFamily(client: string): string {
 }
 
 /**
+ * The context a write counts for. A Claude Code shell names its session but
+ * never its context (spike A: a subagent's Bash env carries the parent's
+ * session and no agent id), so a Claude Code session with no context is its
+ * main line, as a hinted MCP call from it names it: one context, whichever
+ * surface it wrote through. Null when nothing names one.
+ */
+export function contextOf(actor: Pick<Actor, 'client' | 'session' | 'context'>): string | null {
+  if (actor.context !== undefined) return actor.context;
+  return actor.session !== undefined && clientFamily(actor.client ?? '') === 'claude-code' ? MAIN_CONTEXT : null;
+}
+
+/**
  * A context's session key (spec §3: hash of the client, the session or the
  * process nonce, and the context): the name of its session record, and of
  * its seen-here row within an attempt.
  */
 export function sessionKey(actor: Pick<Actor, 'client' | 'session' | 'context' | 'nonce'>): string {
-  const parts = [clientFamily(actor.client ?? ''), actor.session ?? `nonce:${actor.nonce}`, actor.context ?? ''];
+  const parts = [clientFamily(actor.client ?? ''), actor.session ?? `nonce:${actor.nonce}`, contextOf(actor) ?? ''];
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
 }
 
@@ -86,7 +98,7 @@ export async function recordSeenHere(store: MachineLocalStore, seen: BindingSeen
     issue: seen.issue,
     client: actor.client ?? 'unknown',
     session: actor.session ?? null,
-    context: actor.context ?? null,
+    context: contextOf(actor),
     call: actor.call ?? current?.call ?? null,
     spawn_env: actor.spawn_env ?? current?.spawn_env ?? null,
     nonce: actor.nonce,

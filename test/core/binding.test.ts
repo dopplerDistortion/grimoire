@@ -6,15 +6,16 @@
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { readFixtureJson, type Checkout } from '#harness';
-import { boundContexts, readBindings, workerKindOf, type Binding } from '../../src/capture/bindings';
+import { boundContexts, readBindings, type Binding } from '../../src/capture/bindings';
 import { noteCutReach, seenHereRows, sessionKey } from '../../src/capture/seen-here';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
 import type { CallContext, Core, McpCallFacts } from '../../src/core';
 import { MachineLocalStore } from '../../src/machine-local';
+import { clientIn, evidenceIn } from '../../src/surfaces/cli/shell';
 import { metaIds, takeHint } from '../../src/surfaces/mcp/hint';
 import { openTracker } from '../../src/tracker';
 import type { AttemptRecord } from '../../src/tracker/attempt';
-import { coreTest as test, T0, trackerFile, trackerTip, TRACKER_REF } from './support';
+import { coreTest as test, expectRefUnmoved, T0, trackerFile, trackerTip, TRACKER_REF } from './support';
 
 interface ToolsCall {
   params: { arguments?: Record<string, unknown>; _meta?: Record<string, unknown> };
@@ -140,6 +141,20 @@ function claudeMain(base: CallContext, toolUseId: string, agent?: { agent_id: st
   return mcpContext(base, 'claude-code', { era: 'modern', hint, meta: { 'claudecode/toolUseId': toolUseId } }, 'spawn-1');
 }
 
+/**
+ * A CLI call from Claude Code's Bash tool in session `0b95f7c0…`, observed from
+ * the env spike A recorded for it: the shell names the session, never a context.
+ */
+function claudeShell(base: CallContext): CallContext {
+  const env = {
+    AI_AGENT: 'claude-code_2-1-296_agent',
+    CLAUDE_CODE_CHILD_SESSION: '1',
+    CLAUDECODE: '1',
+    CLAUDE_CODE_SESSION_ID: '0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5',
+  };
+  return { ...base, surface: 'cli', client: clientIn(env), evidence: evidenceIn(env), tty: false, nonce: 'nonce-cli' };
+}
+
 async function created(core: Core, ctx: CallContext, title: string): Promise<string> {
   const outcome = await core.call('create', { title }, ctx);
   if (!outcome.ok) throw new Error(JSON.stringify(outcome.error));
@@ -154,7 +169,9 @@ async function claimed(core: Core, ctx: CallContext, id: string): Promise<string
 
 describe('seen-here rows', () => {
   test('every binding write leaves a row on this machine: one per attempt and context, holding its ids, worktree, times and transcript path', async ({ world, grimoire }) => {
-    const { core } = grimoire;
+    let now = T0;
+    const core = grimoire.makeCore({ clock: () => now });
+    const later = new Date(T0.getTime() + 5 * 60_000);
     const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
     // The hook revealed this session's transcript earlier.
     const transcript = 'C:\\Users\\user\\.claude\\projects\\C--repo\\0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5.jsonl';
@@ -162,6 +179,7 @@ describe('seen-here rows', () => {
     const id = await created(core, grimoire.ctx, 'Seen here');
 
     const attempt = await claimed(core, claudeMain(grimoire.ctx, 'toolu_claim'), id);
+    now = later;
     await core.call('update', { id, title: 'Seen here, retitled', attempt }, claudeMain(grimoire.ctx, 'toolu_update'));
     await core.call('comment', { id, body: 'From a subagent', attempt }, claudeMain(grimoire.ctx, 'toolu_sub', { agent_id: 'a77', agent_type: 'general-purpose' }));
 
@@ -180,8 +198,9 @@ describe('seen-here rows', () => {
       source: 'hint',
       pending_hint: null,
       worktree: world.a.dir,
+      // The first binding write seen here, and the latest.
       at: T0.toISOString(),
-      last_at: T0.toISOString(),
+      last_at: later.toISOString(),
       path: transcript,
       reach: null,
     });
@@ -215,14 +234,43 @@ describe('seen-here rows', () => {
     const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
     const id = await created(core, grimoire.ctx, 'Replayed');
     const first = claudeMain(grimoire.ctx, 'toolu_first');
-    await core.call('claim', { id, idempotency_key: 'k-1' }, first);
+    const claim = await core.call('claim', { id, idempotency_key: 'k-1' }, first);
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    const { attempt } = claim.result;
     const rows = await seenHereRows(machine);
 
-    await core.call('claim', { id, idempotency_key: 'k-1' }, claudeMain(grimoire.ctx, 'toolu_retry'));
-    await core.call('close', { id, reason: 'done', attempt: 'at-zzzzzz', debrief: DEBRIEF }, claudeMain(grimoire.ctx, 'toolu_wrong'));
+    await expectRefUnmoved(world.a, async () => {
+      expect(await core.call('claim', { id, idempotency_key: 'k-1' }, claudeMain(grimoire.ctx, 'toolu_retry'))).toMatchObject({
+        ok: true,
+        result: { replayed: true, attempt },
+      });
+      // Failing inside the compare-and-set round: a handle that isn't this issue's, and a done without its debrief.
+      const wrong = { id, reason: 'done' as const, attempt: 'at-zzzzzz', debrief: DEBRIEF };
+      expect(await core.call('close', wrong, claudeMain(grimoire.ctx, 'toolu_wrong'))).toMatchObject({ ok: false, error: { code: 'NOT_ASSIGNEE' } });
+      expect(await core.call('close', { id, reason: 'done', attempt }, claudeMain(grimoire.ctx, 'toolu_bare'))).toMatchObject({
+        ok: false,
+        error: { code: 'DEBRIEF_REQUIRED' },
+      });
+    });
 
     expect(await seenHereRows(machine)).toEqual(rows);
     expect(rows.map((row) => row.call)).toEqual(['toolu_first']);
+  });
+
+  test('a hinted call with no _meta to check the hint against claims nothing now: its row keeps the hint for a later cut', async ({ world, grimoire }) => {
+    const { core } = grimoire;
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const hint = { session_id: '0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5', tool_use_id: 'toolu_unchecked' };
+    const ctx = mcpContext(grimoire.ctx, 'claude-code', { era: 'legacy', hint, meta: null }, 'spawn-1');
+    const id = await created(core, grimoire.ctx, 'Pending hint');
+
+    const attempt = await claimed(core, ctx, id);
+
+    // The trailer carries nothing the hint said.
+    expect(await tipActor(world.a)).toEqual({ kind: 'agent', client: 'claude-code', spawn_env: 'spawn-1', nonce: 'nonce-mcp' });
+    expect(await seenHereRows(machine)).toEqual([
+      expect.objectContaining({ handle: attempt, session: null, context: null, call: null, source: 'spawn-env', pending_hint: hint }),
+    ]);
   });
 });
 
@@ -309,6 +357,24 @@ describe('bindings, read from the trailers', () => {
     expect((await bindingsIn(world.a, otherAttempt)).map((b) => b.op)).toEqual(['claim', 'comment']);
   });
 
+  test('a reassign is an ending call: its commit names the attempt it ended, never the one it opened', async ({ world, grimoire }) => {
+    const { core } = grimoire;
+    const person = { ...grimoire.ctx, surface: 'cli' as const, client: null, evidence: {}, tty: true, nonce: 'nonce-human' };
+    const id = await created(core, grimoire.ctx, 'Handed over');
+    const attempt = await claimed(core, claudeMain(grimoire.ctx, 'toolu_claim'), id);
+
+    const reassigned = await core.call('reassign', { id, assignee: world.b.identity.email }, person);
+    if (!reassigned.ok) throw new Error(JSON.stringify(reassigned.error));
+
+    const bindings = await bindingsIn(world.a, attempt);
+    expect(bindings.map((b) => [b.op, b.actor.kind, b.printed])).toEqual([
+      ['claim', 'agent', [attempt]],
+      ['reassign', 'human', [attempt]],
+    ]);
+    expect(await bindingsIn(world.a, reassigned.result.attempt)).toEqual([]);
+    expect(boundContexts(bindings, []).map((c) => c.writeOnly)).toEqual([false, false]);
+  });
+
   test('an abandoned release binds nothing: the claim stays the only binding write', async ({ world, grimoire }) => {
     const { core } = grimoire;
     const id = await created(core, grimoire.ctx, 'Abandoned');
@@ -352,6 +418,56 @@ describe('bindings, read from the trailers', () => {
     ]);
   });
 
+  test('one Claude Code session that claims over MCP and comments through the CLI is one bound context, with one row', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core } = grimoire;
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const id = await created(core, grimoire.ctx, 'Both surfaces');
+    const attempt = await claimed(core, claudeMain(grimoire.ctx, 'toolu_claim'), id);
+    expect(await core.call('comment', { id, body: 'From the shell', attempt }, claudeShell(grimoire.ctx))).toMatchObject({ ok: true });
+
+    const contexts = boundContexts(await bindingsIn(world.a, attempt), await seenHereRows(machine));
+
+    expect(
+      contexts.map(({ client, session, context, bindings }) => ({ client, session, context, ops: bindings.map((b) => b.op) })),
+    ).toEqual([{ client: 'claude-code', session: '0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5', context: 'main', ops: ['claim', 'comment'] }]);
+    const rows = await seenHereRows(machine);
+    expect(rows).toHaveLength(1);
+    expect(contexts[0]!.row).toEqual(rows[0]);
+    expect(rows[0]).toMatchObject({ context: 'main', nonce: 'nonce-cli', source: 'shell-env' });
+  });
+
+  test('a context bound through the CLI: each binding write holds the id its result printed, which is how the cut finds its shell call', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core } = grimoire;
+    const shell = claudeShell(grimoire.ctx);
+    const id = await created(core, grimoire.ctx, 'Through the shell');
+    const claim = await core.call('claim', { id }, shell);
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    const { attempt } = claim.result;
+    const comment = await core.call('comment', { id, body: 'Working on it', attempt }, shell);
+    const update = await core.call('update', { id, title: 'Through the shell, retitled', attempt }, shell);
+    const close = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, shell);
+    if (!comment.ok || !update.ok || !close.ok) throw new Error('a binding write failed');
+
+    const bindings = await bindingsIn(world.a, attempt);
+    const [context] = boundContexts(bindings, []);
+
+    // What the CLI printed for each write (spec §10: the server-minted write id, or the handle for a claim).
+    expect(bindings.map((b) => [b.op, b.printed])).toEqual([
+      ['claim', [attempt]],
+      ['comment', [comment.result.id]],
+      ['update', [update.result.revision]],
+      ['close', [close.result.attempt]],
+    ]);
+    // No call id: the cut finds each call by what it printed, else by its verb, the issue and the time (spec §14 CLI calls).
+    expect(context!.bindingCalls).toEqual(bindings.map((b) => ({ grimoire: b.op, printed: b.printed, at: b.at })));
+  });
+
   test('bound contexts: one bound only by update or comment is write-only; a binding without a row is still bound; a row without a matching write is ignored', async ({
     world,
     grimoire,
@@ -377,7 +493,9 @@ describe('bindings, read from the trailers', () => {
     expect(root).toMatchObject({ context: 'root-1', writeOnly: false, row: { call: 'call_claim' } });
     expect(subagent).toMatchObject({ session: 'root-1', context: 'sub-1', writeOnly: true, row: null });
     // No call id: the cut finds the call by its operation and the time grimoire saw it (T6's fallback).
-    expect(subagent!.bindingCalls).toEqual([{ grimoire: 'update', at: subagent!.bindings[0]!.at }]);
+    expect(subagent!.bindingCalls).toEqual([
+      { grimoire: 'update', printed: [expect.stringMatching(/^[0-9a-f]{64}$/)], at: subagent!.bindings[0]!.at },
+    ]);
   });
 });
 
@@ -409,7 +527,6 @@ describe('worker kind', () => {
       ['update', 'human'],
       ['close', 'human'],
     ]);
-    expect(workerKindOf(handBindings, world.a.identity.email)).toBe('human');
     expect(await endOf(byHand, handAttempt)).toMatch(/^worker_kind: "human"$/m);
 
     // Claimed by hand, then Alice's own agent passed the handle once.
@@ -417,13 +534,11 @@ describe('worker kind', () => {
     const helpedAttempt = await claimed(core, human, helped);
     await core.call('comment', { id: helped, body: 'On it', attempt: helpedAttempt }, claudeMain(grimoire.ctx, 'toolu_help'));
     await core.call('close', { id: helped, reason: 'done', attempt: helpedAttempt }, human);
-    const helpedBindings = await bindingsIn(world.a, helpedAttempt);
-    expect(workerKindOf(helpedBindings, world.a.identity.email)).toBe('agent');
+    expect((await bindingsIn(world.a, helpedAttempt)).map((b) => [b.op, b.person, b.actor.kind])).toEqual([
+      ['claim', world.a.identity.email, 'human'],
+      ['comment', world.a.identity.email, 'agent'],
+      ['close', world.a.identity.email, 'human'],
+    ]);
     expect(await endOf(helped, helpedAttempt)).toMatch(/^worker_kind: "agent"$/m);
-
-    // The rule on its own: another person's agent binding write never makes it an agent's.
-    const bobsBinding = { ...helpedBindings[1]!, person: bob.email };
-    expect(bobsBinding.actor.kind).toBe('agent');
-    expect(workerKindOf([handBindings[0]!, bobsBinding], world.a.identity.email)).toBe('human');
   });
 });

@@ -5,7 +5,6 @@
 export {
   boundContexts,
   readBindings,
-  workerKindOf,
   type Binding,
   type BoundContext,
 } from './bindings';

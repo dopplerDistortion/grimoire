@@ -10,8 +10,9 @@
 // and a row without a matching write is ignored.
 import { runGit } from '../git/run';
 import type { AttemptRecord } from '../tracker/attempt';
+import { issueRevision, parseIssue } from '../tracker/record';
 import type { BindingCall } from './cut';
-import { sessionKey, type SeenHereRow } from './seen-here';
+import { contextOf, sessionKey, type SeenHereRow } from './seen-here';
 
 /** One binding write, as its commit records it. */
 export interface Binding {
@@ -28,10 +29,66 @@ export interface Binding {
   readonly at: string;
   /** `Grimoire-Actor`: the observed identity, ids only; empty when the trailer can't be read. */
   readonly actor: Readonly<Record<string, string>>;
+  /**
+   * What the write's result printed that names it (spec §10: every CLI write
+   * prints its server-minted write id, or the handle for a claim): the handle
+   * for a claim or an ending call, the comment's id, the issue's new revision.
+   * A CLI call is found by it in its shell tool result (spec §14 CLI calls).
+   * Empty when the commit doesn't show it.
+   */
+  readonly printed: readonly string[];
 }
 
 /** The ops whose binding writes end the attempt (spec §14: an ending call). */
 const ENDING_OPS = new Set(['close', 'release', 'reassign']);
+
+/** One file a commit changed, as `git log --name-status` lists it. */
+interface Changed {
+  readonly status: string;
+  readonly path: string;
+}
+
+function changedFiles(text: string | undefined): Changed[] {
+  return (text ?? '').split('\n').flatMap((line) => {
+    const match = /^([A-Z])[0-9]*\t(.+)$/.exec(line.trim());
+    return match ? [{ status: match[1]!, path: match[2]! }] : [];
+  });
+}
+
+/**
+ * What a binding write's result printed, read back from its commit (spec §3
+ * Layout): the handle for a claim or an ending call; for a comment, the name
+ * of the comment file it added; for an update, the revision of the issue
+ * record it wrote.
+ */
+async function printedBy(
+  repoRoot: string,
+  commit: string,
+  write: Pick<Binding, 'op' | 'attempt' | 'issue'>,
+  files: readonly Changed[],
+): Promise<string[]> {
+  const { op, attempt, issue } = write;
+  if (op === 'claim' || ENDING_OPS.has(op)) return [attempt];
+  if (issue === null) return [];
+  const issueDir = (file: Changed) => file.path.startsWith('issues/') && file.path.includes(`/${issue}/`);
+  if (op === 'comment') {
+    const added = files.find((file) => file.status === 'A' && issueDir(file) && /\/comments\/[^/]+\.md$/.test(file.path));
+    const id = added && /\/comments\/([^/]+)\.md$/.exec(added.path)?.[1];
+    return id ? [id] : [];
+  }
+  if (op === 'update') {
+    const record = files.find((file) => file.status === 'M' && issueDir(file) && file.path.endsWith(`/${issue}/issue.md`));
+    if (!record) return [];
+    const blob = await runGit(repoRoot, ['cat-file', 'blob', `${commit}:${record.path}`]);
+    if (blob.code !== 0) return [];
+    try {
+      return [issueRevision(parseIssue(blob.stdout))];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
 
 const FIELD = '\x1f';
 const RECORD = '\x1e';
@@ -79,7 +136,9 @@ export async function readBindings(
       '--reverse',
       '--topo-order',
       '--no-color',
-      `--format=%H${FIELD}%ae${FIELD}%cI${FIELD}%B${RECORD}`,
+      '--no-renames',
+      '--name-status',
+      `--format=${RECORD}%H${FIELD}%ae${FIELD}%cI${FIELD}%B${FIELD}`,
       '--fixed-strings',
       `--grep=Grimoire-Attempt: ${attempt.id}`,
       ...heads,
@@ -92,18 +151,18 @@ export async function readBindings(
   if (run.code !== 0) throw new Error(`git log failed reading ${attempt.id}'s bindings: ${run.stderr.trim()}`);
   const bindings: Binding[] = [];
   for (const record of run.stdout.toString('utf8').split(RECORD)) {
-    const [commit, person, at, message] = record.replace(/^\n/, '').split(FIELD);
+    const [commit, person, at, message, files] = record.split(FIELD);
     if (!commit || message === undefined) continue;
     const trailers = trailersOf(message);
     if (trailers.get('Grimoire-Attempt') !== attempt.id) continue;
+    const write = { op: trailers.get('Grimoire-Op') ?? '', attempt: attempt.id, issue: trailers.get('Grimoire-Issue') ?? null };
     bindings.push({
       commit,
-      op: trailers.get('Grimoire-Op') ?? '',
-      issue: trailers.get('Grimoire-Issue') ?? null,
-      attempt: attempt.id,
+      ...write,
       person: person ?? '',
       at: at ?? '',
       actor: actorOf(trailers.get('Grimoire-Actor')),
+      printed: await printedBy(repoRoot, commit, write, changedFiles(files)),
     });
   }
   return bindings;
@@ -118,7 +177,11 @@ export interface BoundContext {
   readonly context: string | null;
   /** Its binding writes, oldest first. */
   readonly bindings: readonly Binding[];
-  /** Each binding write as the cut looks for it: by call id, else by operation and time (T6's fallback). */
+  /**
+   * Each binding write as the cut looks for it: by call id; else (a CLI call,
+   * or a Codex MCP call without `callId`) by what it printed, its operation and
+   * the time grimoire saw it.
+   */
   readonly bindingCalls: readonly BindingCall[];
   /** Bound only through `update` or `comment`: its window ends with its last turn naming the issue. */
   readonly writeOnly: boolean;
@@ -126,13 +189,15 @@ export interface BoundContext {
   readonly row: SeenHereRow | null;
 }
 
-const keyOfActor = (actor: Readonly<Record<string, string>>): string =>
-  sessionKey({
-    client: actor.client ?? '',
-    nonce: actor.nonce ?? '',
-    ...(actor.session !== undefined ? { session: actor.session } : {}),
-    ...(actor.context !== undefined ? { context: actor.context } : {}),
-  });
+/** A trailer's actor as the session key reads it. */
+const factsOf = (actor: Readonly<Record<string, string>>) => ({
+  client: actor.client ?? '',
+  nonce: actor.nonce ?? '',
+  ...(actor.session !== undefined ? { session: actor.session } : {}),
+  ...(actor.context !== undefined ? { context: actor.context } : {}),
+});
+
+const keyOfActor = (actor: Readonly<Record<string, string>>): string => sessionKey(factsOf(actor));
 
 const keyOfRow = (row: SeenHereRow): string =>
   sessionKey({
@@ -166,22 +231,15 @@ export function boundContexts(bindings: readonly Binding[], rows: readonly SeenH
       key,
       client: latest.client ?? null,
       session: latest.session ?? null,
-      context: latest.context ?? null,
+      context: contextOf(factsOf(latest)),
       bindings: writes,
       bindingCalls: writes.map((write): BindingCall =>
-        write.actor.call !== undefined ? { id: write.actor.call, at: write.at } : { grimoire: write.op, at: write.at },
+        write.actor.call !== undefined
+          ? { id: write.actor.call, at: write.at }
+          : { grimoire: write.op, printed: write.printed, at: write.at },
       ),
       writeOnly: writes.every((write) => write.op !== 'claim' && !ENDING_OPS.has(write.op)),
       row: rowsByKey.get(`${writes[0]!.attempt}/${key}`) ?? null,
     };
   });
-}
-
-/**
- * The attempt's worker kind (spec §14, Worker kind): `agent` when any binding
- * write by the attempt's own person had an agent actor, otherwise `human`.
- * Another person's agent never changes it.
- */
-export function workerKindOf(bindings: readonly Binding[], assignee: string): 'agent' | 'human' {
-  return bindings.some((binding) => binding.person === assignee && binding.actor.kind === 'agent') ? 'agent' : 'human';
 }

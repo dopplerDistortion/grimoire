@@ -1,7 +1,7 @@
 import { createScanner, bundledRules, type SecretScanner } from '../scanner';
 import { buildExcerpt } from './excerpt';
 import { pathRewriter, type PathSpellings } from './paths';
-import { isCall, isResult, type Step, type StepOrigin, type Transcript } from './steps';
+import { isCall, isResult, type ResultStep, type Step, type StepOrigin, type ToolCallStep, type Transcript } from './steps';
 
 // Cutting one bound context's transcript (spec §14 Window, Readers' format
 // check, The excerpt): client-neutral, over the steps a client's reader made.
@@ -13,14 +13,23 @@ export interface BindingCallById {
 }
 
 /**
- * A binding call the evidence holds no call id for (T6's fallback, for a Codex
- * call without `_meta.callId`): it is found by its grimoire operation and the
- * time grimoire saw it. More than one call fitting gives `unmatched`.
+ * A binding call the evidence holds no call id for: a CLI call (spec §14 CLI
+ * calls), or a Codex MCP call without `_meta.callId` (T6's fallback). It is
+ * found, in order:
+ *
+ * 1. as the shell command running that CLI verb whose result printed one of
+ *    `printed`;
+ * 2. as the MCP call of that operation the time brackets (more than one
+ *    fitting gives `unmatched`);
+ * 3. as the last shell command running grimoire with that verb and the issue
+ *    id, at or before the time.
  */
 export interface BindingCallByTime {
   readonly id?: undefined;
-  /** The grimoire operation: the MCP tool's name (`claim`, `close`, …). */
+  /** The grimoire operation: the MCP tool's name and the CLI verb (`claim`, `close`, …). */
   readonly grimoire: string;
+  /** What the write's result printed that names it: the handle, the comment's id, the new revision. */
+  readonly printed?: readonly string[];
   readonly at: string;
 }
 
@@ -123,10 +132,20 @@ export function cutTranscript(transcript: Transcript, options: CutOptions): Cut 
       continue;
     }
     if (call.id === undefined) {
+      const printing = cliCallAtTime(steps, call, (_step, result) => printedIn(result, call.printed ?? []));
+      if (printing !== undefined) {
+        bindingIds.push(printing);
+        continue;
+      }
       const fits = callsAtTime(steps, call);
       if (fits.length > 1) return emptyCut(base, 'unmatched');
       if (fits.length === 1) {
         bindingIds.push(fits[0]!);
+        continue;
+      }
+      const naming = cliCallAtTime(steps, call, (step) => namesIssue(step, evidence.issue));
+      if (naming !== undefined) {
+        bindingIds.push(naming);
         continue;
       }
       if (!pastFlushedEnd(call, transcript)) return emptyCut(base, 'unmatched');
@@ -228,6 +247,46 @@ function callsAtTime(steps: readonly Step[], call: BindingCallByTime): string[] 
   };
   const bracketing = fitting(0);
   return bracketing.length > 0 ? bracketing : fitting(MATCH_SLACK_MS);
+}
+
+/**
+ * The last shell command running the CLI verb of a binding call known only by
+ * operation and time (spec §14 CLI calls) that `fits`: issued at or before the
+ * time (a commit's time is cut to the second, so up to a second after it), and
+ * not answered before it, since the write lands while the command runs.
+ */
+function cliCallAtTime(
+  steps: readonly Step[],
+  call: BindingCallByTime,
+  fits: (step: ToolCallStep, result: string) => boolean,
+): string | undefined {
+  const at = Date.parse(call.at);
+  if (!Number.isFinite(at)) return undefined;
+  const results = new Map<string, ResultStep>();
+  for (const step of steps) if (isResult(step) && !results.has(step.id)) results.set(step.id, step);
+  let found: string | undefined;
+  for (const step of steps) {
+    if (step.kind !== 'tool_call' || step.grimoire !== 'cli' || !runsVerb(step, call.grimoire)) continue;
+    if (Date.parse(step.at) > at + MATCH_SLACK_MS) continue;
+    const result = results.get(step.id);
+    if (result !== undefined && Date.parse(result.at) < at) continue;
+    if (fits(step, result?.text ?? '')) found = step.id;
+  }
+  return found;
+}
+
+/** Whether a shell command runs the grimoire CLI with `verb` (`node .grimoire/run.cjs close …`, `npm run -s grimoire -- close …`). */
+function runsVerb(step: ToolCallStep, verb: string): boolean {
+  // A command string, or an argv whose words JSON separates with `","`.
+  const verbAfterGrimoire = new RegExp(
+    `(?:\\.grimoire[\\\\/]+run\\.cjs|(?<![\\w.-])grimoire)(?![\\w.-])[\\s",]+(?:--[\\s",]+)?${escapeRegExp(verb)}(?![\\w-])`,
+  );
+  return verbAfterGrimoire.test(JSON.stringify(step.input));
+}
+
+/** Whether a result's text holds one of the ids a write printed, as a whole word. */
+function printedIn(text: string, printed: readonly string[]): boolean {
+  return printed.some((id) => id !== '' && new RegExp(`(?<![\\w-])${escapeRegExp(id)}(?![\\w-])`).test(text));
 }
 
 /**
