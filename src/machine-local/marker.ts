@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { GrimoireError } from '../errors';
 import { createFileExclusive, readTextIfExists } from './fs-atomic';
 
 // The machine-local store's own version marker (spec §5, ADR 0011): the file
@@ -15,28 +16,6 @@ export interface MachineMarker {
   readonly format: number | null;
   readonly compat: number | null;
   readonly requires: string | null;
-}
-
-/** UPGRADE_REQUIRED for the machine marker. The core adds `running`, `pin` and `remedies`. */
-export class MachineUpgradeRequiredError extends Error {
-  override readonly name = 'MachineUpgradeRequiredError';
-  readonly code = 'UPGRADE_REQUIRED' as const;
-  readonly retryable = false;
-
-  constructor(
-    message: string,
-    readonly details: {
-      readonly marker: 'machine';
-      readonly why: 'newer' | 'older';
-      readonly requires: string | null;
-    },
-  ) {
-    super(message);
-  }
-
-  toBody() {
-    return { code: this.code, message: this.message, retryable: this.retryable, details: this.details };
-  }
 }
 
 export class MachineMarkerFile {
@@ -59,7 +38,7 @@ export class MachineMarkerFile {
   }
 
   /**
-   * Throws UPGRADE_REQUIRED (marker `machine`) unless J ≤ compat ≤ K. A store
+   * Throws GrimoireError UPGRADE_REQUIRED (marker `machine`) unless J ≤ compat ≤ K. A store
    * with no marker yet passes; a marker without a readable compat counts as older.
    */
   async check(): Promise<void> {
@@ -68,13 +47,18 @@ export class MachineMarkerFile {
   }
 }
 
+/**
+ * Throws GrimoireError UPGRADE_REQUIRED with details `{marker: 'machine', why,
+ * requires}` unless J ≤ compat ≤ K; the core adds `running`, `pin` and `remedies`.
+ */
 export function checkMachineMarker(marker: MachineMarker): void {
   const { J, K } = MACHINE_FORMAT_RANGE;
   const compat = marker.compat;
   if (compat !== null && compat >= J && compat <= K) return;
   const why = compat !== null && compat > K ? 'newer' : 'older';
   const requires = marker.requires;
-  throw new MachineUpgradeRequiredError(
+  throw new GrimoireError(
+    'UPGRADE_REQUIRED',
     why === 'newer'
       ? `this machine's grimoire data needs a newer grimoire (machine compat ${compat}${requires ? `, grimoire ${requires} or later` : ''}); stop grimoire work and relay the remedies to the user`
       : `this machine's grimoire data is older than this grimoire can run against (machine compat ${compat ?? 'unknown'}); stop grimoire work and relay the remedies to the user`,

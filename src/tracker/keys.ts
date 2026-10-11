@@ -26,6 +26,11 @@ function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/** The hash a key is stored and recorded under (never the key itself). */
+export function keyHash(key: string): string {
+  return sha256(key);
+}
+
 function monthOf(date: Date): string {
   return date.toISOString().slice(0, 7);
 }

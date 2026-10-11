@@ -11,10 +11,11 @@ export {
   type WriteResult,
   type Person,
 } from './store';
-export type { TrackerView, TrackerDraft } from './view';
+export type { TrackerView, TrackerDraft, NewComment } from './view';
+export type { IssueComment, CommentEntry } from './comment';
 export type { IssueRecord, IssueLink } from './record';
 export { issueRevision, sortedUnique } from './record';
-export type { Idempotency } from './keys';
+export { keyHash, type Idempotency } from './keys';
 export { parseWriteRef, ID_PATTERN } from './ids';
 export { TRACKER_REF } from './layout';
 export { TRACKER_FORMAT_RANGE, V1_MARKER } from './marker';

@@ -2,7 +2,16 @@
 // edits on top of it.
 import { TREE_MODE } from '../git/objects';
 import { ID_LENGTH, ID_PREFIX, MAX_ID_LENGTH, notFound, parseWriteRef, resolveReadRef } from './ids';
-import { DELETED_DIR, FORMAT_FILE, FORWARDS_DIR, ISSUES_DIR, issueFile, SETTINGS_FILE } from './layout';
+import {
+  byCommentOrder,
+  commentEntry,
+  commentName,
+  parseComment,
+  serializeComment,
+  type CommentEntry,
+  type IssueComment,
+} from './comment';
+import { COMMENTS_DIR, commentFile, DELETED_DIR, FORMAT_FILE, FORWARDS_DIR, ISSUES_DIR, issueFile, SETTINGS_FILE } from './layout';
 import { lineValue, parseLines } from './lines';
 import { parseMarker, type Marker } from './marker';
 import { BoundedMap, type TrackerObjects } from './objects';
@@ -25,6 +34,20 @@ export interface TrackerView {
   resolveWrite(ref: string, field?: string): string;
   /** `link_base` + the record's path, or the bare id when no `link_base` is set (spec §3, Links). */
   link(id: string): string;
+  /** The issue's comments, oldest first, from their file names (no bodies read). */
+  comments(id: string): readonly CommentEntry[];
+  /** One comment of the issue, read in full. */
+  readComment(issue: string, comment: string): Promise<IssueComment>;
+}
+
+/** A comment a write adds; the draft picks its id and time. */
+export interface NewComment {
+  readonly actor: Readonly<Record<string, unknown>>;
+  readonly kind: 'comment' | 'debrief';
+  readonly body: string;
+  readonly attempt?: string;
+  /** sha256 of the idempotency key. */
+  readonly key?: string;
 }
 
 /** A view a write round edits; its edits become that round's one commit. */
@@ -37,6 +60,12 @@ export interface TrackerDraft extends TrackerView {
   nextSeq(): number;
   /** Writes an issue record (canonically serialized; its unknown keys kept). */
   putIssue(record: IssueRecord): void;
+  /**
+   * Adds a write-once comment to a live issue. Its time is the round's instant,
+   * forced past the issue's latest comment and the latest comment time this
+   * store wrote; comments added in one round share it and are ordered by `n`.
+   */
+  addComment(issue: string, comment: NewComment): IssueComment;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
@@ -55,6 +84,9 @@ export class Snapshot implements TrackerView {
     private readonly settings: ReadonlyMap<string, unknown>,
     /** Ids gone from the live view but never reused: deleted and forwarded. */
     readonly retiredIds: ReadonlySet<string>,
+    /** Each issue's comment files, in comment order. */
+    private readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>,
+    private readonly readBlob: (oid: string) => Promise<Buffer>,
   ) {
     this.ordered = [...records.values()].sort(byOrder);
     this.ids = new Set(records.keys());
@@ -82,11 +114,28 @@ export class Snapshot implements TrackerView {
     const base = this.settings.get('link_base');
     return typeof base === 'string' && base !== '' ? base + issueFile(id) : id;
   }
+
+  comments(id: string): readonly CommentEntry[] {
+    return this.commentFiles.get(id) ?? [];
+  }
+
+  async readComment(issue: string, comment: string): Promise<IssueComment> {
+    const stored = this.commentFiles.get(issue)?.find((c) => c.id === comment);
+    if (!stored) throw new Error(`no comment ${comment} on ${issue}`);
+    return parseComment(stored.id, await this.readBlob(stored.oid));
+  }
+}
+
+interface StoredComment extends CommentEntry {
+  readonly oid: string;
 }
 
 export class Draft implements TrackerDraft {
   private readonly written = new Map<string, IssueRecord>();
   private readonly minted = new Set<string>();
+  private readonly added = new Map<string, IssueComment[]>();
+  private commentMs: number | null = null;
+  private commentN = 0;
 
   constructor(
     private readonly base: Snapshot,
@@ -94,6 +143,8 @@ export class Draft implements TrackerDraft {
     /** Every id taken on either tip, retired ones included. */
     private readonly takenIds: () => Promise<ReadonlySet<string>>,
     private readonly randomSuffix: (length: number) => string,
+    /** The latest comment time this store has written, in epoch ms. */
+    private readonly storeCommentMs = 0,
   ) {}
 
   get tip(): string {
@@ -129,6 +180,42 @@ export class Draft implements TrackerDraft {
     return this.base.link(id);
   }
 
+  comments(id: string): readonly CommentEntry[] {
+    const added = this.added.get(id);
+    if (!added) return this.base.comments(id);
+    return [...this.base.comments(id), ...added.map((c) => commentEntry(c.id)!)].sort(byCommentOrder);
+  }
+
+  async readComment(issue: string, comment: string): Promise<IssueComment> {
+    return this.added.get(issue)?.find((c) => c.id === comment) ?? this.base.readComment(issue, comment);
+  }
+
+  addComment(issue: string, comment: NewComment): IssueComment {
+    if (!this.issue(issue)) throw notFound('id', issue);
+    const existing = this.comments(issue);
+    const latest = existing.length > 0 ? existing[existing.length - 1]!.ms : 0;
+    const ms = Math.max(this.commentMs ?? Math.max(this.now.getTime(), this.storeCommentMs + 1), latest + 1);
+    this.commentMs = ms;
+    const added: IssueComment = {
+      id: commentName(ms, this.commentN++),
+      at: new Date(ms).toISOString(),
+      kind: comment.kind,
+      actor: comment.actor,
+      ...(comment.attempt !== undefined ? { attempt: comment.attempt } : {}),
+      ...(comment.key !== undefined ? { key: comment.key } : {}),
+      body: comment.body,
+    };
+    let list = this.added.get(issue);
+    if (!list) this.added.set(issue, (list = []));
+    list.push(added);
+    return added;
+  }
+
+  /** The comment time this round used, in epoch ms, or null when it added none. */
+  get roundCommentMs(): number | null {
+    return this.commentMs;
+  }
+
   async mintIssueId(): Promise<string> {
     const taken = await this.takenIds();
     // Three clashes in a row add a character (spec §3).
@@ -158,13 +245,21 @@ export class Draft implements TrackerDraft {
   edits(): Map<string, Uint8Array | null> {
     const edits = new Map<string, Uint8Array | null>();
     for (const record of this.written.values()) edits.set(issueFile(record.id), serializeIssue(record));
+    for (const [issue, comments] of this.added) {
+      for (const { id, ...comment } of comments) edits.set(commentFile(issue, id), serializeComment(comment));
+    }
     return edits;
   }
 }
 
+interface IssueEntry {
+  readonly record: IssueRecord;
+  readonly comments: readonly StoredComment[];
+}
+
 /** Builds snapshots from tracker trees, memoizing every subtree by oid. */
 export class SnapshotLoader {
-  private readonly issuesByTree = new BoundedMap<string, readonly IssueRecord[]>(8_192);
+  private readonly issuesByTree = new BoundedMap<string, readonly IssueEntry[]>(8_192);
   private readonly namesByTree = new BoundedMap<string, readonly string[]>(8_192);
   private readonly records = new BoundedMap<string, IssueRecord>(50_000);
 
@@ -193,9 +288,11 @@ export class SnapshotLoader {
       tip,
       tree,
       markerBytes ? parseMarker(markerBytes.toString('utf8')) : null,
-      new Map(issues.map((record) => [record.id, record])),
+      new Map(issues.map(({ record }) => [record.id, record])),
       settings,
       retired,
+      new Map(issues.map(({ record, comments }) => [record.id, comments])),
+      (oid) => this.objects.blob(oid),
     );
   }
 
@@ -220,13 +317,13 @@ export class SnapshotLoader {
   }
 
   /** Records under `issues/` (depth 0), `<a>` (1), `<b>` (2) or `<id>` (3). */
-  private async issuesUnder(oid: string | null, depth: number): Promise<readonly IssueRecord[]> {
+  private async issuesUnder(oid: string | null, depth: number): Promise<readonly IssueEntry[]> {
     if (!oid) return [];
     const memoKey = `${depth}:${oid}`;
     const cached = this.issuesByTree.get(memoKey);
     if (cached) return cached;
     const entries = await this.objects.tree(oid);
-    let records: readonly IssueRecord[];
+    let records: readonly IssueEntry[];
     if (depth < 3) {
       const children = await Promise.all(
         entries.filter((e) => e.mode === TREE_MODE).map((e) => this.issuesUnder(e.oid, depth + 1)),
@@ -234,10 +331,24 @@ export class SnapshotLoader {
       records = children.flat();
     } else {
       const file = entries.find((e) => e.name === 'issue.md' && e.mode !== TREE_MODE);
-      records = file ? [await this.record(file.oid)] : [];
+      const dir = entries.find((e) => e.name === COMMENTS_DIR && e.mode === TREE_MODE);
+      records = file
+        ? [{ record: await this.record(file.oid), comments: dir ? await this.commentsIn(dir.oid) : [] }]
+        : [];
     }
     this.issuesByTree.set(memoKey, records);
     return records;
+  }
+
+  /** A `comments/` directory's files, in comment order; names only, no blobs read. */
+  private async commentsIn(tree: string): Promise<StoredComment[]> {
+    const comments: StoredComment[] = [];
+    for (const entry of await this.objects.tree(tree)) {
+      const parsed =
+        entry.mode !== TREE_MODE && entry.name.endsWith('.md') ? commentEntry(entry.name.slice(0, -3)) : null;
+      if (parsed) comments.push({ ...parsed, oid: entry.oid });
+    }
+    return comments.sort(byCommentOrder);
   }
 
   private async namesUnder(oid: string, depth: number): Promise<readonly string[]> {

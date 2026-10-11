@@ -4,7 +4,11 @@
 import { GrimoireError, type ErrorBody } from '../errors';
 import { openTracker, type TrackerStore } from '../tracker';
 import { actorOf, type CallContext } from './context';
-import { create, labels, show, type OpDefinition, type OpResults, type SurfacePolicy } from './ops';
+import { create, labels, type OpDefinition, type OpResults, type SurfacePolicy } from './ops';
+import { show } from './show';
+import { comment } from './comment';
+import { list } from './list';
+import { update } from './update';
 import { parseInput } from './schema';
 import { completeUpgradeDetails } from './upgrade';
 
@@ -18,6 +22,10 @@ export type {
   Actor,
 } from './context';
 export type { OpResults, CreateResult, ShowResult, LabelsResult, SurfacePolicy } from './ops';
+export type { UpdateResult, Noop } from './update';
+export type { CommentResult } from './comment';
+export type { ListResult, ListRow } from './list';
+export type { RelatedIssue, ShownComment } from './show';
 export type { Remedy } from './upgrade';
 export type { ErrorBody, ErrorCode } from '../errors';
 
@@ -59,7 +67,7 @@ export interface Core {
   close(): Promise<void>;
 }
 
-const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [show, labels, create];
+const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [show, list, labels, create, update, comment];
 
 function annotationsOf(op: OpDefinition<unknown, unknown>): Record<string, boolean> {
   return op.kind === 'read' ? { readOnlyHint: true } : { destructiveHint: false, openWorldHint: false };
