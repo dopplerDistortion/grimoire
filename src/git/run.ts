@@ -51,6 +51,17 @@ export const NO_HOOKS = path.join(os.devNull, 'grimoire-no-hooks');
  */
 export const GIT_STALL_MS = 5_000;
 
+/**
+ * How long a git may go without a sign of life: a fixed time, or one asked
+ * for each time the watch is (re)armed, so it can shrink as a deadline nears.
+ */
+export type StallLimit = number | (() => number);
+
+/** The stall time `limit` gives now. */
+export function stallOf(limit: StallLimit): number {
+  return typeof limit === 'number' ? limit : limit();
+}
+
 /** BUSY: a local git stopped answering, and was killed. Nothing changed; the next call starts a new git. */
 export class GitStalledError extends GrimoireError {
   constructor(command: string, stallMs: number) {
@@ -90,7 +101,7 @@ export interface GitRun {
 export interface RunGitOptions {
   readonly input?: string | Buffer;
   /** How long git may go without output before it is killed as stuck (GitStalledError); default GIT_STALL_MS. */
-  readonly stallMs?: number;
+  readonly stallMs?: StallLimit;
 }
 
 /**
@@ -105,11 +116,12 @@ export function runGit(cwd: string, args: readonly string[], options: RunGitOpti
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    const stallMs = options.stallMs ?? GIT_STALL_MS;
+    const limit = options.stallMs ?? GIT_STALL_MS;
     let stalled = false;
     let watchdog: NodeJS.Timeout | undefined;
     const alive = () => {
       clearTimeout(watchdog);
+      const stallMs = stallOf(limit);
       watchdog = setTimeout(() => {
         stalled = true;
         killTree(child);

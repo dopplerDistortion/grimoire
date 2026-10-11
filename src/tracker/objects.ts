@@ -8,7 +8,7 @@
 // create objects (spec §4, Read path). A write persists the ones it needs.
 import { GrimoireError } from '../errors';
 import { ObjectReader, type GitObject } from '../git/batch';
-import { GIT_STALL_MS, GitStalledError } from '../git/run';
+import { GIT_STALL_MS, GitStalledError, type StallLimit } from '../git/run';
 import {
   BLOB_MODE,
   decodeCommitHeader,
@@ -153,10 +153,10 @@ export class TrackerObjects extends ObjectSource {
     private readonly objectsDir: string,
     readonly format: ObjectFormat,
     /** How long the reader's git may stay silent before it is killed as stuck. */
-    private readonly stallMs = GIT_STALL_MS,
+    private readonly stall: StallLimit = GIT_STALL_MS,
   ) {
     super();
-    this.reader = new ObjectReader(repoDir, stallMs);
+    this.reader = new ObjectReader(repoDir, stall);
   }
 
   warm(): void {
@@ -195,7 +195,7 @@ export class TrackerObjects extends ObjectSource {
 
   private restartReader(): void {
     const old = this.reader;
-    this.reader = new ObjectReader(this.repoDir, this.stallMs);
+    this.reader = new ObjectReader(this.repoDir, this.stall);
     // After close, the new reader too ends its git once a read is answered.
     if (this.closed) void this.reader.close();
     const closing: Promise<void> = old.close().finally(() => this.retiring.delete(closing));

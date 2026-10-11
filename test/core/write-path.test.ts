@@ -16,11 +16,12 @@
 // and to put a git that stops answering in place of one: a hung git must be
 // killed, and must never hold a write (or the fairness lock) forever.
 import * as childProcess from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { describe, expect, vi } from 'vitest';
 import type { Checkout } from '#harness';
+import { ObjectReader } from '../../src/git/batch';
 import { packedRefsStamp, RefUpdater } from '../../src/git/refs';
 import { MachineLocalStore } from '../../src/machine-local';
 import { openTracker, type WriteSpec } from '../../src/tracker';
@@ -214,12 +215,14 @@ function runningGit(command: RegExp): childProcess.ChildProcess {
 function updaterOver(checkout: Checkout): { updater: RefUpdater; afterNextLook(step: () => unknown): void } {
   const commonDir = path.join(checkout.dir, '.git');
   let interleave: (() => unknown) | null = null;
-  const updater = new RefUpdater(checkout.dir, 'grimoire: test', async () => {
-    const stamp = await packedRefsStamp(commonDir);
-    const step = interleave;
-    interleave = null;
-    await step?.();
-    return stamp;
+  const updater = new RefUpdater({ root: checkout.dir, commonDir }, 'grimoire: test', {
+    packedRefs: async () => {
+      const stamp = await packedRefsStamp(commonDir);
+      const step = interleave;
+      interleave = null;
+      await step?.();
+      return stamp;
+    },
   });
   return { updater, afterNextLook: (step) => void (interleave = step) };
 }
@@ -285,7 +288,7 @@ describe('the ref updater', () => {
     }
   });
 
-  test('an update whose git died holding the ref lock says the ref did not move', async ({ world, grimoire }) => {
+  test('an update whose git died holding the ref lock moves the ref on a new git: the lock went with the old one', async ({ world, grimoire }) => {
     void grimoire; // initializes the tracker
     const { updater, afterNextLook } = updaterOver(world.a);
     const lock = path.join(world.a.dir, '.git', `${TRACKER_REF}.lock`);
@@ -293,13 +296,21 @@ describe('the ref updater', () => {
       const start = (await trackerTip(world.a))!;
       const next = await world.a.git(['commit-tree', `${start}^{tree}`, '-p', start, '-m', 'next']);
       expect(await updater.update(TRACKER_REF, start, start)).toEqual({ moved: true });
-      // The next look is the update's own; the one after is once git has prepared: kill it then.
-      afterNextLook(() => afterNextLook(() => runningGit(/update-ref --stdin/).kill()));
+      // The next look is the update's own; the one after is once git has prepared: kill it then, with no chance to clean up.
+      afterNextLook(() =>
+        afterNextLook(async () => {
+          const git = runningGit(/update-ref --stdin/);
+          const exited = new Promise((resolve) => git.once('close', resolve));
+          git.kill('SIGKILL');
+          await exited;
+        }),
+      );
 
       const update = await updater.update(TRACKER_REF, next, start);
 
-      expect(update.moved).toBe(false);
-      expect(await trackerTip(world.a)).toBe(start);
+      expect(update).toEqual({ moved: true });
+      expect(await trackerTip(world.a)).toBe(next);
+      await expect(stat(lock)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
       await updater.close();
       await rm(lock, { force: true });
@@ -392,40 +403,120 @@ describe('the store after its long-lived gits died', () => {
 
 const realSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn;
 
+// The stand-ins below run as `node -e <script> -- <own args> ::git <git's args>`.
+const ARGS = `
+const at = process.argv.indexOf('::git');
+const own = process.argv.slice(1, at);
+const gitArgs = process.argv.slice(at + 1);
+`;
+
 /**
  * A git that never answers: it starts a child of its own, as git for
  * Windows' launcher does, appends both pids to the file it is given, and
  * both sleep.
  */
-const WEDGED_GIT = `
+const WEDGED_GIT = `${ARGS}
 const { spawn } = require('node:child_process');
 const { appendFileSync } = require('node:fs');
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore', windowsHide: true });
-appendFileSync(process.argv[1], process.pid + '\\n' + child.pid + '\\n');
+appendFileSync(own[0], process.pid + '\\n' + child.pid + '\\n');
 setInterval(() => {}, 1 << 30);
 `;
 
-/** A real git behind a relay that stops passing its answers on once it is told to commit, and never exits. */
-const SILENT_AFTER_COMMIT = `
-const { spawn } = require('node:child_process');
-const git = spawn('git', process.argv.slice(1), { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
+/** A real git behind a relay, which never exits on its own; the scripts that extend it decide what it passes on. */
+const RELAY = `${ARGS}
+const { spawn, spawnSync } = require('node:child_process');
+const git = spawn('git', gitArgs, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
+git.stdin.on('error', () => {});
+/** Kills git with no chance to clean up after itself: SIGKILL, or TerminateProcess on its whole tree on Windows. */
+const killGit = () =>
+  process.platform === 'win32'
+    ? spawnSync('taskkill', ['/pid', String(git.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    : git.kill('SIGKILL');
+const lines = (stream, onLine) => {
+  let rest = '';
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => {
+    rest += chunk;
+    for (let end = rest.indexOf('\\n'); end >= 0; end = rest.indexOf('\\n')) {
+      onLine(rest.slice(0, end + 1));
+      rest = rest.slice(end + 1);
+    }
+  });
+};
+setInterval(() => {}, 1 << 30);
+`;
+
+/** An updater whose answers stop once it is told to commit (git itself goes on and commits). */
+const SILENT_AFTER_COMMIT = `${RELAY}
 let told = false;
-process.stdin.on('data', (chunk) => {
-  if (/^commit$/m.test(chunk.toString())) told = true;
-  git.stdin.write(chunk);
+lines(process.stdin, (line) => {
+  if (line.trim() === 'commit') told = true;
+  git.stdin.write(line);
 });
 git.stdout.on('data', (chunk) => {
   if (!told) process.stdout.write(chunk);
 });
-setInterval(() => {}, 1 << 30);
 `;
 
-/** Runs `script` with node (given `args`, then `--` and git's own arguments) in place of each git `command` matches, until `restore`. */
-function replaceGits(command: RegExp, script: string, args: readonly string[]): { restore(): void } {
-  const replaced = (name: string, gitArgs: readonly string[], options: childProcess.SpawnOptions) =>
-    name === 'git' && command.test(gitArgs.join(' '))
-      ? realSpawn(process.execPath, ['-e', script, ...args, '--', ...gitArgs], options)
-      : realSpawn(name, gitArgs, options);
+/**
+ * SILENT_AFTER_COMMIT, and a process that is no one's child (its parent
+ * exited) holds the relay's stdout open, so killing the relay's tree never
+ * closes it: its pid goes to the file given.
+ */
+const KEEPER = `
+const { spawn } = require('node:child_process');
+const keeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: ['ignore', 'inherit', 'ignore'], detached: true, windowsHide: true });
+require('node:fs').appendFileSync(process.argv[1], keeper.pid + '\\n');
+keeper.unref();
+`;
+const UNKILLABLE_AFTER_COMMIT = `${SILENT_AFTER_COMMIT}
+spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER)}, own[0]], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
+`;
+
+/**
+ * An updater whose git dies holding the ref's lock, as a killed git does:
+ * once git has prepared, it is killed at once, and the relay passes on
+ * `prepare: ok` (own args `forward`) or not (`withhold`), then goes quiet.
+ */
+const DIES_HOLDING_THE_LOCK = `${RELAY}
+lines(process.stdin, (line) => git.stdin.write(line));
+lines(git.stdout, (line) => {
+  if (line.trim() !== 'prepare: ok') return void process.stdout.write(line);
+  killGit();
+  if (own[0] === 'forward') process.stdout.write(line);
+});
+`;
+
+/** An object reader that answers requests for refs, and stops answering at the first request for an object id. */
+const ANSWERS_ONLY_REFS = `${RELAY}
+let stopped = false;
+lines(process.stdin, (line) => {
+  if (!line.startsWith('refs/')) stopped = true;
+  if (!stopped) git.stdin.write(line);
+});
+git.stdout.on('data', (chunk) => process.stdout.write(chunk));
+`;
+
+interface Replacement {
+  /** Matched against git's arguments, joined by spaces. */
+  readonly command: RegExp;
+  readonly script: string;
+  readonly args?: readonly string[];
+  /** Replaces only the first this many gits it matches; every one when unset. */
+  readonly times?: number;
+}
+
+/** Runs each replacement's script with node in place of the gits it matches, until `restore`. */
+function replaceGits(...replacements: Replacement[]): { restore(): void } {
+  const left = replacements.map((replacement) => replacement.times ?? Infinity);
+  const replaced = (name: string, gitArgs: readonly string[], options: childProcess.SpawnOptions) => {
+    const i = name === 'git' ? replacements.findIndex((r, j) => left[j]! > 0 && r.command.test(gitArgs.join(' '))) : -1;
+    if (i < 0) return realSpawn(name, gitArgs, options);
+    left[i]!--;
+    const { script, args = [] } = replacements[i]!;
+    return realSpawn(process.execPath, ['-e', script, '--', ...args, '::git', ...gitArgs], options);
+  };
   vi.mocked(childProcess.spawn).mockImplementation(replaced as unknown as typeof childProcess.spawn);
   return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn) };
 }
@@ -439,9 +530,20 @@ function alive(pid: number): boolean {
   }
 }
 
+/** The pids the stand-ins wrote to `file`. */
+async function pidsIn(file: string): Promise<number[]> {
+  return (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(Number);
+}
+
+/** Kills every process whose pid is in `file` and still runs. */
+async function killPidsIn(file: string): Promise<void> {
+  for (const pid of (await pidsIn(file)).filter(alive)) process.kill(pid);
+}
+
 describe('a local git that stops answering', () => {
-  const BUDGET_MS = 2_000;
-  const STALL_MS = 300;
+  // Every git the store runs here gets STALL_MS: generous for a real one on a busy machine.
+  const BUDGET_MS = 3_000;
+  const STALL_MS = 1_000;
 
   test.for([
     ['the object reader', /cat-file --batch/],
@@ -453,19 +555,18 @@ describe('a local git that stops answering', () => {
       void grimoire; // initializes the tracker
       const before = (await trackerTip(world.a))!;
       const pidFile = path.join(world.root, 'wedged-pids');
-      const wedged = replaceGits(command, WEDGED_GIT, [pidFile]);
+      const wedged = replaceGits({ command, script: WEDGED_GIT, args: [pidFile] });
       const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
-      const pids = async () => (await readFile(pidFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(Number);
       try {
         const started = Date.now();
         const failure: unknown = await store.transact(keyWrite('wedged'), () => ({ result: null })).catch((error: unknown) => error);
         const took = Date.now() - started;
 
         expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
-        expect(took).toBeLessThan(BUDGET_MS + STALL_MS + 1_000);
+        expect(took).toBeLessThan(BUDGET_MS + 500);
         expect(await trackerTip(world.a)).toBe(before);
         // Each wedged git and the child it started (on POSIX only the git itself is killed: its tree is its own).
-        const killed = (await pids()).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
+        const killed = (await pidsIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
         expect(killed.length).toBeGreaterThan(0);
         await vi.waitFor(() => expect(killed.filter(alive)).toEqual([]), { timeout: 5_000 });
 
@@ -475,16 +576,49 @@ describe('a local git that stops answering', () => {
       } finally {
         wedged.restore();
         await store.close();
-        for (const pid of (await pids()).filter(alive)) process.kill(pid);
+        await killPidsIn(pidFile);
       }
     },
   );
 
+  test('a git that stops answering late in the budget, once the write got the fairness lock: BUSY still comes within the budget', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const stallMs = 2_000;
+    const pidFile = path.join(world.root, 'wedged-pids');
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: stallMs });
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const held = await machine.locks.acquire('tracker-write');
+    if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+    let wedged = { restore() {} };
+    try {
+      const started = Date.now();
+      const write = store.transact(keyWrite('late'), () => ({ result: null })).catch((error: unknown) => error);
+      await setTimeout(BUDGET_MS - 1_200);
+      // The clone's config changed while the write waited, so its round reads it again, with a git that hangs.
+      wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile] });
+      await world.a.git(['config', 'grimoire.unrelated', 'changed']);
+      await held.lock.release();
+
+      const failure = await write;
+      const took = Date.now() - started;
+
+      expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
+      expect(took).toBeLessThan(BUDGET_MS + 500);
+    } finally {
+      wedged.restore();
+      await store.close();
+      await killPidsIn(pidFile);
+    }
+  });
+
   test('a ref updater that stops answering once told to commit: the write lands exactly once, and says so', async ({ world, grimoire }) => {
     void grimoire; // initializes the tracker
     const before = (await trackerTip(world.a))!;
-    const silent = replaceGits(/update-ref --stdin/, SILENT_AFTER_COMMIT, []);
-    const store = await openTracker(world.a.dir, { budgetMs: 5_000, gitStallMs: STALL_MS });
+    const silent = replaceGits({ command: /update-ref --stdin/, script: SILENT_AFTER_COMMIT });
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
     try {
       const write = await store.transact(keyWrite('silent'), () => ({ result: null }));
 
@@ -493,6 +627,181 @@ describe('a local git that stops answering', () => {
     } finally {
       silent.restore();
       await store.close();
+    }
+  });
+
+  test('a tracker created by a git that stops answering once it moved the ref: it is created exactly once, and says so', async ({
+    world,
+  }) => {
+    // Clone b has no tracker yet. A one-shot git that wrote the ref and then hangs, or an updater that hangs once told to commit.
+    const silent = replaceGits({ command: /update-ref/, script: SILENT_AFTER_COMMIT });
+    const store = await openTracker(world.b.dir, { gitStallMs: STALL_MS });
+    try {
+      const created = await store.initialize({ author: { name: 'B', email: 'b@example.com' }, actor: { kind: 'human', client: 'cli', nonce: 'init' } });
+
+      expect(created).toEqual({ root: await trackerTip(world.b), created: true });
+      expect(await world.b.git(['rev-list', '--count', TRACKER_REF])).toBe('1');
+    } finally {
+      silent.restore();
+      await store.close();
+    }
+  });
+
+  test('a push that landed while the git recording it in the remote-tracking ref stops answering: the sync says pushed, not BUSY', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const local = (await trackerTip(world.a))!;
+    const tracking = 'refs/remotes/origin/grimoire/tracker';
+    const silent = replaceGits({ command: /update-ref (refs\/remotes\/|--stdin --create-reflog -m grimoire: sync)/, script: SILENT_AFTER_COMMIT });
+    const store = await openTracker(world.a.dir, { gitStallMs: STALL_MS });
+    try {
+      const outcome = await store.sync({ author: { name: 'A', email: 'a@example.com' }, actor: { kind: 'human', nonce: 'n' }, timeoutMs: 30_000 });
+
+      expect(outcome).toMatchObject({ state: 'pushed', local });
+      expect((await world.a.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]).toBe(local);
+      expect(await world.a.git(['rev-parse', tracking])).toBe(local);
+    } finally {
+      silent.restore();
+      await store.close();
+    }
+  });
+
+  test.for([
+    ['once it said it prepared', 'forward'],
+    ['before it could say it prepared', 'withhold'],
+  ] as const)(
+    'a ref updater killed holding the ref’s lock %s: the lock goes with it, and the write lands exactly once',
+    async ([, mode], { world, grimoire }) => {
+      void grimoire; // initializes the tracker
+      const before = (await trackerTip(world.a))!;
+      const dies = replaceGits({ command: /update-ref --stdin/, script: DIES_HOLDING_THE_LOCK, args: [mode], times: 1 });
+      const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+      try {
+        const write = await store.transact(keyWrite('dies'), () => ({ result: null }));
+
+        expect(write.commit).toBe(await trackerTip(world.a));
+        expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
+        await expect(stat(path.join(world.a.dir, '.git', `${TRACKER_REF}.lock`))).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        dies.restore();
+        await store.close();
+      }
+    },
+  );
+
+  test('a ref updater told to commit that outlives being killed: the write fails without promising the ref did not move', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const before = (await trackerTip(world.a))!;
+    const pidFile = path.join(world.root, 'keeper-pids');
+    const unkillable = replaceGits({ command: /update-ref --stdin/, script: UNKILLABLE_AFTER_COMMIT, args: [pidFile], times: 1 });
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    try {
+      const failure: unknown = await store.transact(keyWrite('unkillable'), () => ({ result: null })).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: 'BUSY' });
+      expect((failure as Error).message).toMatch(/whether .* moved is unknown/);
+      // git did commit: a retry replays the write, and nothing is written twice.
+      unkillable.restore();
+      expect(await store.transact(keyWrite('unkillable'), () => ({ result: null }))).toMatchObject({ replayed: true });
+      expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
+    } finally {
+      unkillable.restore();
+      await killPidsIn(pidFile);
+      await store.close();
+    }
+  });
+
+  test('when the git that would tell whether the ref moved stops answering too: the write fails without promising either way', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const pidFile = path.join(world.root, 'wedged-pids');
+    const wedged = replaceGits(
+      { command: /update-ref --stdin/, script: SILENT_AFTER_COMMIT },
+      { command: /for-each-ref --contains/, script: WEDGED_GIT, args: [pidFile] },
+    );
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    try {
+      const failure: unknown = await store.transact(keyWrite('untold'), () => ({ result: null })).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: 'BUSY' });
+      expect((failure as Error).message).toMatch(/could not tell whether/);
+    } finally {
+      wedged.restore();
+      await store.close();
+      await killPidsIn(pidFile);
+    }
+  });
+
+  test('an object reader that stops answering mid-walk ends the read: no other git decides in its place', async ({ world, grimoire }) => {
+    // config.yml names the tracker root, so a read walks back from the tip to it, reading commits.
+    await mkdir(path.join(world.a.dir, '.grimoire'), { recursive: true });
+    const root = await world.a.git(['rev-list', '--max-parents=0', TRACKER_REF]);
+    await writeFile(path.join(world.a.dir, '.grimoire', 'config.yml'), `install_format: 1\ntracker_root: "${root}"\n`);
+    for (const title of ['One', 'Two']) expect(await grimoire.core.call('create', { title }, grimoire.ctx)).toMatchObject({ ok: true });
+    const stops = replaceGits({ command: /cat-file --batch/, script: ANSWERS_ONLY_REFS, times: 1 });
+    const store = await openTracker(world.a.dir, { gitStallMs: STALL_MS });
+    try {
+      forgetStarts();
+      const failure: unknown = await store.read().catch((error: unknown) => error);
+
+      expect(failure).toMatchObject({ code: 'BUSY', message: expect.stringContaining('stopped answering') });
+      expect(started().filter((line) => / (merge-base|rev-list) /.test(line))).toEqual([]);
+      stops.restore();
+      expect((await store.read()).tip).toBe(await trackerTip(world.a));
+    } finally {
+      stops.restore();
+      await store.close();
+    }
+  });
+
+  test('a git that stops answering while the store finds its repository: BUSY, not NO_REPO', async ({ world, grimoire }) => {
+    void grimoire; // initializes the tracker
+    const pidFile = path.join(world.root, 'wedged-pids');
+    const wedged = replaceGits({ command: /rev-parse --path-format/, script: WEDGED_GIT, args: [pidFile] });
+    try {
+      const failure: unknown = await openTracker(world.a.dir, { gitStallMs: STALL_MS }).catch((error: unknown) => error);
+
+      expect(failure).toMatchObject({ code: 'BUSY', retryable: true, message: expect.stringContaining('stopped answering') });
+    } finally {
+      wedged.restore();
+      await killPidsIn(pidFile);
+    }
+  });
+
+  test.for([
+    ['an object reader', /cat-file --batch/],
+    ['a ref updater', /update-ref --stdin/],
+  ] as const)('closing %s whose idle git is stuck kills it within the stall time', async ([what, command], { world, grimoire }) => {
+    void grimoire; // initializes the tracker
+    const pidFile = path.join(world.root, 'wedged-pids');
+    const wedged = replaceGits({ command, script: WEDGED_GIT, args: [pidFile] });
+    const location = { root: world.a.dir, commonDir: path.join(world.a.dir, '.git') };
+    const git =
+      what === 'an object reader'
+        ? new ObjectReader(location.root, STALL_MS)
+        : new RefUpdater(location, 'grimoire: test', { stallMs: STALL_MS });
+    try {
+      await git.warm();
+      await vi.waitFor(async () => expect(await pidsIn(pidFile)).toHaveLength(2), { timeout: 5_000 });
+      const started = Date.now();
+
+      await git.close();
+
+      expect(Date.now() - started).toBeLessThan(STALL_MS + 1_000);
+      const killed = (await pidsIn(pidFile)).filter((_, i) => process.platform === 'win32' || i % 2 === 0);
+      await vi.waitFor(() => expect(killed.filter(alive)).toEqual([]), { timeout: 5_000 });
+    } finally {
+      wedged.restore();
+      await killPidsIn(pidFile);
     }
   });
 });

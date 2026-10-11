@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { stat } from 'node:fs/promises';
+import { readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { cleanGitEnv, GIT_STALL_MS, GitStalledError, killTree, NO_HOOKS, runGit } from './run';
+import { cleanGitEnv, GIT_STALL_MS, GitStalledError, killTree, NO_HOOKS, runGit, stallOf, type StallLimit } from './run';
 
 /**
  * Whether the ref moved. When it didn't, `stderr` is git's reason (a lost
@@ -21,8 +21,12 @@ interface Session {
   onLine: ((line: string) => void) | null;
   onExit: (() => void) | null;
   exited: boolean;
-  /** Killed for answering nothing for the stall time: it is told nothing more. */
-  stalled: boolean;
+  /** Resolves once git has exited and let go of its pipes. */
+  readonly closed: Promise<void>;
+  /** When the updater killed it (it is told nothing more then), or null. */
+  killedAt: number | null;
+  /** The identity of the ref lock git said it holds (`prepare: ok`), while it holds it. */
+  held: { readonly path: string; readonly identity: string } | null;
 }
 
 /** How one transaction on a session ended. */
@@ -38,11 +42,18 @@ type Attempt =
   | { readonly kind: 'lost' }
   /** The process died after it was told to commit: the ref may have moved. */
   | { readonly kind: 'unknown' }
-  /** git answered nothing for the stall time before it was told to commit, and was killed: the ref did not move. */
-  | { readonly kind: 'stalled' };
+  /** git answered nothing for `stallMs` before it was told to commit, and was killed: the ref did not move. */
+  | { readonly kind: 'stalled'; readonly stallMs: number };
 
 /** How many transactions an update may lose (see `Attempt`) before it gives up. */
 const ATTEMPTS = 3;
+
+export interface RefUpdaterOptions {
+  /** The repository's `packedRefsStamp`; by default, taken of the common dir's packed-refs. */
+  readonly packedRefs?: () => Promise<string>;
+  /** How long git may take over a step before it is killed as stuck; default GIT_STALL_MS. */
+  readonly stallMs?: StallLimit;
+}
 
 /**
  * One long-lived `git update-ref --stdin` per repository: each compare-and-set
@@ -61,12 +72,15 @@ const ATTEMPTS = 3;
  * ref (nothing can move it then), the stamp is taken again: when it changed
  * since git started, the transaction is aborted and retried on a new process.
  *
- * git has `stallMs` to answer each step. One that doesn't is killed (with its
- * tree on Windows) and the next update starts a new one. Stuck before it was
- * told to commit, the ref did not move: the update fails with GitStalledError
- * (BUSY). Stuck after, the ref may have moved: a new git is asked whether it
- * did, and only when that can't be told either does the update fail with a
- * plain Error, which promises nothing (ADR 0012).
+ * git has the stall time to answer each step (the check under its lock is
+ * grimoire's own, timed apart). One that doesn't is killed (with its tree on
+ * Windows) and the next update starts a new one. Stuck before it was told to
+ * commit, the ref did not move: the update fails with GitStalledError (BUSY).
+ * Stuck after, the ref may have moved: a new git is asked whether it did, and
+ * only when that can't be told either does the update fail with a plain
+ * Error, which promises nothing (ADR 0012). A killed git leaves its ref lock
+ * behind (a kill skips git's own clean-up), which would refuse every later
+ * update; once that git has exited, the lock it left is removed.
  */
 export class RefUpdater {
   private session: Session | null = null;
@@ -74,14 +88,18 @@ export class RefUpdater {
   /** Sessions whose git is exiting. */
   private readonly ending = new Set<Promise<void>>();
   private closed = false;
+  private readonly packedRefs: () => Promise<string>;
+  private readonly stall: StallLimit;
+  private reftable: Promise<boolean> | null = null;
 
   constructor(
-    private readonly cwd: string,
+    private readonly location: { readonly root: string; readonly commonDir: string },
     private readonly reflogMessage: string,
-    /** The repository's `packedRefsStamp`. */
-    private readonly packedRefs: () => Promise<string>,
-    private readonly stallMs = GIT_STALL_MS,
-  ) {}
+    options: RefUpdaterOptions = {},
+  ) {
+    this.packedRefs = options.packedRefs ?? (() => packedRefsStamp(location.commonDir));
+    this.stall = options.stallMs ?? GIT_STALL_MS;
+  }
 
   /**
    * Moves `ref` from `old` (the zero oid: create it) to `next`, atomically.
@@ -118,16 +136,13 @@ export class RefUpdater {
 
   /**
    * Lets a session's git exit (aborting any open transaction); Node stays
-   * alive until it has. One still running `stallMs` later is killed.
+   * alive until it has. One still running a stall time later is killed.
    */
   private end(session: Session): void {
     if (session.exited) return;
     setActive(session, true);
-    const stuck = setTimeout(() => killTree(session.child), this.stallMs);
-    const exited: Promise<void> = new Promise<void>((resolve) => {
-      if (session.exited) resolve();
-      else session.child.once('close', () => resolve());
-    }).finally(() => {
+    const stuck = setTimeout(() => killTree(session.child), stallOf(this.stall));
+    const exited: Promise<void> = session.closed.finally(() => {
       clearTimeout(stuck);
       this.ending.delete(exited);
     });
@@ -138,11 +153,18 @@ export class RefUpdater {
   private async transact(ref: string, next: string, old: string): Promise<RefUpdate> {
     for (let attempt = 1; ; attempt++) {
       const session = this.ensureSession(await this.packedRefs());
-      let result = await this.attempt(session, ref, next, old);
-      if (result.kind === 'stalled') throw new GitStalledError('update-ref --stdin', this.stallMs);
-      if (result.kind === 'unknown') result = (await this.landed(ref, next)) ? { kind: 'moved' } : { kind: 'lost' };
+      let result: Attempt;
+      try {
+        result = await this.attempt(session, ref, next, old);
+        if (result.kind === 'unknown') result = (await this.landed(ref, next)) ? { kind: 'moved' } : { kind: 'lost' };
+      } catch (error) {
+        await this.releaseLock(session, ref, next);
+        throw error;
+      }
       if (result.kind === 'moved') return { moved: true };
       if (result.kind === 'refused') return { moved: false, stderr: result.stderr };
+      await this.releaseLock(session, ref, next);
+      if (result.kind === 'stalled') throw new GitStalledError('update-ref --stdin', result.stallMs);
       // Lost: start over on a new git (this one's packed-refs can't be trusted, or it is gone).
       if (this.session === session) this.session = null;
       this.end(session);
@@ -152,8 +174,8 @@ export class RefUpdater {
 
   /** Whether `ref` holds `next`, asked of a new git: `next` is new, so only this update can have put it there. */
   private async landed(ref: string, next: string): Promise<boolean> {
-    const run = await runGit(this.cwd, ['for-each-ref', '--contains', next, '--format=%(refname)', ref], {
-      stallMs: this.stallMs,
+    const run = await runGit(this.location.root, ['for-each-ref', '--contains', next, '--format=%(refname)', ref], {
+      stallMs: this.stall,
     }).catch((error: unknown) => {
       // Not BUSY, which would promise that the ref did not move.
       throw new Error(`could not tell whether ${ref} moved to ${next}: ${(error as Error).message}`);
@@ -162,63 +184,130 @@ export class RefUpdater {
     return run.stdout.toString('utf8').trim() === ref;
   }
 
+  /** The lock git takes to update `ref`: the ref's own, or with reftable, the stack's. */
+  private async lockPath(ref: string): Promise<string> {
+    this.reftable ??= stat(path.join(this.location.commonDir, 'reftable')).then(
+      (info) => info.isDirectory(),
+      () => false,
+    );
+    return (await this.reftable)
+      ? path.join(this.location.commonDir, 'reftable', 'tables.list.lock')
+      : path.join(this.location.commonDir, `${ref}.lock`);
+  }
+
+  /**
+   * Removes the ref lock a session's git left when it died or was killed
+   * mid-transaction, once that git has exited: the lock it said it held, if
+   * the same file is still there, or a ref lock that holds `next`, which only
+   * this update writes (git writes the new value into the lock as it
+   * prepares, and renames the lock into place to commit). No other process
+   * can take a lock file while it exists, so either is still that git's. A
+   * git that settled its own transaction, or that outlived being killed,
+   * keeps whatever it holds. So does one killed in the instant between
+   * taking the lock and writing `next` into it: that lock can't be told from
+   * another process's, so later updates meet it as any other ref lock (BUSY,
+   * with `stale_lock` once it is ~30 s old).
+   */
+  private async releaseLock(session: Session, ref: string, next: string): Promise<void> {
+    if (!session.exited) {
+      if (session.killedAt === null) return;
+      if (!(await exitWithin(session, session.killedAt + stallOf(this.stall) - Date.now()))) return;
+    }
+    const lock = await this.lockPath(ref);
+    const ours =
+      (session.held?.path === lock && (await identity(lock)) === session.held.identity) ||
+      (await readFile(lock, 'utf8').catch(() => '')).trim() === next;
+    session.held = null;
+    // Retried: on Windows a scanner may still have the file open for a moment.
+    if (ours) await rm(lock, { force: true, maxRetries: 5, retryDelay: 20 }).catch(() => {});
+  }
+
+  /**
+   * Under git's lock: notes the lock's identity, and tells whether packed-refs
+   * is unchanged since git started; false when that takes the stall time.
+   */
+  private async check(session: Session, ref: string): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), stallOf(this.stall))));
+    const checked = (async () => {
+      const lock = await this.lockPath(ref);
+      const [packedRefs, held] = await Promise.all([this.packedRefs().catch(() => 'unreadable'), identity(lock)]);
+      if (held !== null) session.held = { path: lock, identity: held };
+      return packedRefs === session.packedRefs;
+    })();
+    try {
+      return await Promise.race([checked, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** One transaction: commits only if packed-refs is unchanged since git started, checked under the ref's lock. */
   private attempt(session: Session, ref: string, next: string, old: string): Promise<Attempt> {
     return new Promise((resolve, reject) => {
       let told: 'prepare' | 'checking' | 'commit' | 'abort' = 'prepare';
       let watchdog: NodeJS.Timeout | undefined;
-      const finish = (result: Attempt) => {
+      const settle = () => {
         clearTimeout(watchdog);
         session.onLine = null;
         session.onExit = null;
         setActive(session, false);
+      };
+      const finish = (result: Attempt) => {
+        settle();
         resolve(result);
       };
       const fail = (error: Error) => {
-        clearTimeout(watchdog);
-        session.onLine = null;
-        session.onExit = null;
+        settle();
         reject(error);
       };
-      // git has `stallMs` to answer each step, or it is killed.
+      const kill = () => {
+        session.killedAt = Date.now();
+        if (this.session === session) this.session = null;
+        killTree(session.child);
+      };
+      // git has the stall time to answer each step, or it is killed.
       const watch = () => {
         clearTimeout(watchdog);
+        const stallMs = stallOf(this.stall);
         watchdog = setTimeout(() => {
-          session.stalled = true;
-          if (this.session === session) this.session = null;
-          killTree(session.child);
-          if (told !== 'commit') return finish({ kind: 'stalled' });
+          kill();
+          if (told !== 'commit') return finish({ kind: 'stalled', stallMs });
           // Its exit says `unknown`, and whether the ref moved is found out then, unless it never exits.
           watchdog = setTimeout(
             () => fail(new Error(`git update-ref --stdin stopped answering once told to commit, and outlived being killed: whether ${ref} moved is unknown`)),
-            this.stallMs,
+            stallMs,
           );
-        }, this.stallMs);
+        }, stallMs);
       };
       const unexpected = (line: string) => {
-        killTree(session.child);
+        kill();
         if (told === 'commit') return; // its exit says `unknown`: whether the ref moved is found out
         fail(new Error(`git update-ref --stdin answered ${JSON.stringify(line)}`));
       };
       session.stderr.length = 0;
       session.onLine = (line) => {
-        watch();
-        if (line === 'start: ok' && told === 'prepare') return;
+        if (line === 'start: ok' && told === 'prepare') return watch();
         if (line === 'prepare: ok' && told === 'prepare') {
-          // git holds the ref's lock now: no one else can move it.
+          // git holds the ref's lock now (no one else can move it), and waits: the check is grimoire's to time, not git's.
           told = 'checking';
-          void this.packedRefs()
-            .catch(() => 'unreadable')
-            .then((packedRefs) => {
-              if (session.exited || session.stalled) return;
-              told = packedRefs === session.packedRefs ? 'commit' : 'abort';
-              watch();
-              session.child.stdin.write(`${told}\n`);
-            });
+          clearTimeout(watchdog);
+          void this.check(session, ref).then((unchanged) => {
+            if (session.exited || session.killedAt !== null) return;
+            told = unchanged ? 'commit' : 'abort';
+            watch();
+            session.child.stdin.write(`${told}\n`);
+          });
           return;
         }
-        if (line === 'commit: ok' && told === 'commit') return finish({ kind: 'moved' });
-        if (line === 'abort: ok' && told === 'abort') return finish({ kind: 'lost' });
+        if (line === 'commit: ok' && told === 'commit') {
+          session.held = null;
+          return finish({ kind: 'moved' });
+        }
+        if (line === 'abort: ok' && told === 'abort') {
+          session.held = null;
+          return finish({ kind: 'lost' });
+        }
         unexpected(line);
       };
       session.onExit = () => {
@@ -240,8 +329,9 @@ export class RefUpdater {
     const child = spawn(
       'git',
       ['-c', `core.hooksPath=${NO_HOOKS}`, 'update-ref', '--stdin', '--create-reflog', '-m', this.reflogMessage],
-      { cwd: this.cwd, env: cleanGitEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+      { cwd: this.location.root, env: cleanGitEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
     );
+    let closed!: () => void;
     const session: Session = {
       child,
       packedRefs,
@@ -250,7 +340,9 @@ export class RefUpdater {
       onLine: null,
       onExit: null,
       exited: false,
-      stalled: false,
+      closed: new Promise<void>((resolve) => (closed = resolve)),
+      killedAt: null,
+      held: null,
     };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -270,6 +362,7 @@ export class RefUpdater {
       session.exited = true;
       if (error) session.stderr.push(Buffer.from(error.message));
       session.onExit?.();
+      closed();
     };
     child.on('error', exit);
     child.on('close', () => exit());
@@ -277,6 +370,24 @@ export class RefUpdater {
     setActive(session, false);
     return session;
   }
+}
+
+/** Whether the session's git exits within `ms`. */
+async function exitWithin(session: Session, ms: number): Promise<boolean> {
+  if (session.exited) return true;
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, ms))));
+  try {
+    return await Promise.race([session.closed.then(() => true), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A file's identity (inode or file index, size, mtime and birth time), or null when there is none. */
+async function identity(file: string): Promise<string | null> {
+  const info = await stat(file, { bigint: true }).catch(() => null);
+  return info ? `${info.ino}:${info.size}:${info.mtimeNs}:${info.birthtimeNs}` : null;
 }
 
 /** Keeps Node alive for a session only while a transaction is in flight. */

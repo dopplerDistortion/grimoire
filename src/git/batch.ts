@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { cleanGitEnv, GIT_STALL_MS, GitStalledError, killTree, NO_HOOKS } from './run';
+import { cleanGitEnv, GIT_STALL_MS, GitStalledError, killTree, NO_HOOKS, stallOf, type StallLimit } from './run';
 
 export interface GitObject {
   /** The object's oid: what the requested name resolved to. */
@@ -31,8 +31,8 @@ interface Batch {
  * ends it. A read after `close()` still gets its answer, from a process that
  * ends once its reads are answered. A crashed process fails its pending reads
  * and is respawned on the next read. So is a stuck one: when git says nothing
- * for `stallMs` while reads wait, it is killed (with its tree on Windows) and
- * they fail with GitStalledError (BUSY).
+ * for the stall time while reads wait, it is killed (with its tree on
+ * Windows) and they fail with GitStalledError (BUSY).
  */
 export class ObjectReader {
   private batch: Batch | null = null;
@@ -40,7 +40,7 @@ export class ObjectReader {
 
   constructor(
     private readonly cwd: string,
-    private readonly stallMs = GIT_STALL_MS,
+    private readonly stall: StallLimit = GIT_STALL_MS,
   ) {}
 
   /** Reads the object `name` (an oid or a full ref name) names, or null when there is none. */
@@ -63,18 +63,19 @@ export class ObjectReader {
     this.closed = true;
     const batch = this.batch;
     this.batch = null;
-    if (batch) await end(batch, this.stallMs);
+    if (batch) await end(batch, stallOf(this.stall));
   }
 
-  /** (Re)arms the watchdog: git has `stallMs` to say something about the reads that wait, or it is killed. */
+  /** (Re)arms the watchdog: git has the stall time to say something about the reads that wait, or it is killed. */
   private watch(batch: Batch): void {
     clearTimeout(batch.watchdog);
+    const stallMs = stallOf(this.stall);
     batch.watchdog = setTimeout(() => {
       if (this.batch === batch) this.batch = null;
       killTree(batch.child);
-      const error = new GitStalledError('cat-file --batch', this.stallMs);
+      const error = new GitStalledError('cat-file --batch', stallMs);
       for (const request of batch.pending.splice(0)) request.reject(error);
-    }, this.stallMs);
+    }, stallMs);
   }
 
   private ensureBatch(): Batch {
@@ -134,7 +135,7 @@ export class ObjectReader {
     setActive(batch, false);
     if (this.closed && this.batch === batch) {
       this.batch = null;
-      void end(batch, this.stallMs);
+      void end(batch, stallOf(this.stall));
     }
   }
 }

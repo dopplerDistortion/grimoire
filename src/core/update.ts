@@ -164,15 +164,16 @@ export const update = define({
         { add: 'labels_add', remove: 'labels_remove' },
         noops,
       );
+      // A parent or blocker is the record it names: a bare id written before
+      // a collision and the id its forwarding record names are one record.
+      const named = namedIn(draft);
       let nextParent = current.parent;
       if (parent !== undefined) {
         const target = parent === null ? null : draft.resolveWrite(parent, 'parent');
-        if (target === current.parent) noops.push({ field: 'parent', reason: 'unchanged' });
+        const same = target === null || current.parent === null ? target === current.parent : named(target) === named(current.parent);
+        if (same) noops.push({ field: 'parent', reason: 'unchanged' });
         else nextParent = target;
       }
-      // A blocker is the record it names: a bare id written before a
-      // collision and the id its forwarding record names are one blocker.
-      const named = namedIn(draft);
       const blockers = blockersAdd.map((blocker, i) => draft.resolveWrite(blocker, `blocked_by_add[${i}]`));
       const adding = new Set(blockers.map(named));
       const alsoAdded: Record<string, string> = {};
