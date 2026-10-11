@@ -1,5 +1,6 @@
 // The registry's result types, and the tracer slice's create and labels (spec §8).
 import { parseWriteRef, sortedUnique } from '../tracker';
+import type { ClaimResult, EndResult } from './attempts';
 import type { CommentResult } from './comment';
 import type { ListResult } from './list';
 import { define, oneLine, writer } from './op';
@@ -104,4 +105,7 @@ export interface OpResults {
   update: UpdateResult;
   comment: CommentResult;
   list: ListResult;
+  claim: ClaimResult;
+  release: EndResult;
+  close: EndResult;
 }

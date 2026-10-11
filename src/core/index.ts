@@ -9,6 +9,8 @@ import { show } from './show';
 import { comment } from './comment';
 import { list } from './list';
 import { update } from './update';
+import { claim, close, release } from './attempts';
+import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
 import { completeUpgradeDetails } from './upgrade';
 
@@ -49,6 +51,8 @@ export interface CoreOptions {
   readonly randomIdSuffix?: (length: number) => string;
   /** How long one write may keep retrying before BUSY (default ~10 s). */
   readonly writeBudgetMs?: number;
+  /** The secret scanner for debriefs (default: the bundled rules). */
+  readonly scanner?: SecretScanner;
 }
 
 export interface Core {
@@ -67,15 +71,30 @@ export interface Core {
   close(): Promise<void>;
 }
 
-const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [show, list, labels, create, update, comment];
+const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
+  show,
+  list,
+  labels,
+  create,
+  update,
+  comment,
+  claim,
+  release,
+  close,
+];
 
 function annotationsOf(op: OpDefinition<unknown, unknown>): Record<string, boolean> {
-  return op.kind === 'read' ? { readOnlyHint: true } : { destructiveHint: false, openWorldHint: false };
+  if (op.kind === 'read') return { readOnlyHint: true };
+  // Only the ending ops replay on their own arguments; the rest need an idempotency key (spec §8).
+  return op.replay === 'attempt-and-reason'
+    ? { destructiveHint: false, openWorldHint: false, idempotentHint: true }
+    : { destructiveHint: false, openWorldHint: false };
 }
 
 export function createCore(options: CoreOptions = {}): Core {
   const ops = new Map(REGISTRY.map((op) => [op.name, op]));
   const trackers = new Map<string, Promise<TrackerStore>>();
+  const scanner = options.scanner ?? createScanner(bundledRules);
 
   const trackerFor = (root: string): Promise<TrackerStore> => {
     let tracker = trackers.get(root);
@@ -108,7 +127,7 @@ export function createCore(options: CoreOptions = {}): Core {
         if (!op) throw new GrimoireError('INVALID', `there is no operation named ${name}`, { fields: { op: 'unknown' } });
         const parsed = parseInput(op.input, input);
         tracker = await trackerFor(ctx.repo.root);
-        const result = await op.run(parsed, { ctx, tracker, actor: actorOf(ctx) });
+        const result = await op.run(parsed, { ctx, tracker, actor: actorOf(ctx), scanner });
         return { ok: true, result } as never;
       } catch (error) {
         if (!(error instanceof GrimoireError)) throw error;

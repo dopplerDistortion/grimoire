@@ -1,9 +1,11 @@
 // Shared setup for the core-operations seam (spec Testing Decisions, seam 1):
 // a git world whose clone a holds an initialized tracker, a core, and call contexts.
 import { rm } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import * as esbuild from 'esbuild';
 import path from 'node:path';
 import { expect } from 'vitest';
-import { gitTest, type Checkout, type Clone } from '#harness';
+import { gitTest, makeTempDir, removeDir, type Checkout, type Clone } from '#harness';
 import { createCore, type CallContext, type Core, type CoreOptions } from '../../src/core';
 import { openTracker } from '../../src/tracker';
 
@@ -145,3 +147,23 @@ export const coreTest = gitTest.extend('grimoire', async ({ world }, { onCleanup
   const grimoire: Grimoire = { core: makeCore(), ctx: agentContext(world.a), makeCore };
   return grimoire;
 });
+
+/**
+ * Bundles `call-process.ts` into a temp dir, for tests that run core calls in
+ * separate processes. Returns the script's path and a cleanup.
+ */
+export async function bundleCallProcess(): Promise<{ script: string; cleanup: () => Promise<void> }> {
+  const dir = await makeTempDir('grimoire-caller-');
+  const script = path.join(dir, 'call-process.mjs');
+  await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('./call-process.ts', import.meta.url))],
+    outfile: script,
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node22',
+    define: { __GRIMOIRE_VERSION__: JSON.stringify('0.0.0-test') },
+    logLevel: 'silent',
+  });
+  return { script, cleanup: () => removeDir(dir) };
+}

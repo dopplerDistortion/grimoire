@@ -2,11 +2,13 @@
 // and its newest comments, cut under the result budget with a cursor that
 // continues a long body, then pages to older comments.
 import { invalid } from '../errors';
-import { issueRevision, type IssueComment, type IssueLink, type TrackerView } from '../tracker';
+import { issueRevision, type AttemptRecord, type IssueComment, type IssueLink, type TrackerView } from '../tracker';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
+import { listedOpenAttempt, type ListedOpenAttempt } from './attempts';
 import { derivations, type RelationState } from './derive';
 import { dashboardPort, localLink } from './local-link';
 import { define, oneLine } from './op';
+import { staleCutoff } from './stale';
 import { s } from './schema';
 
 export interface RelatedIssue {
@@ -52,6 +54,14 @@ export interface ShowResult {
   /** Sub-issues, by (seq, id). */
   children: RelatedIssue[];
   blockers: RelatedIssue[];
+  /** The person holding the open attempt, or null. */
+  assignee: string | null;
+  /** Open attempts (two only after a cross-clone fold). */
+  open_attempts: ListedOpenAttempt[];
+  /** Ended attempts with their outcomes, oldest first (the oldest are left out when the ~24 KB cut needs room). */
+  past_attempts: PastAttempt[];
+  /** The assignee of the attempt that ended last, or null. */
+  last_assignee: string | null;
   /** Claimable: open, unclaimed, unconflicted, unblocked and with no open sub-issue. */
   ready: boolean;
   conflict: null;
@@ -62,6 +72,45 @@ export interface ShowResult {
   cursor: string | null;
   /** True when the ~24 KB cut left something out of this result. */
   truncated?: true;
+}
+
+/** An ended attempt, as `show` lists it. */
+export interface PastAttempt {
+  attempt: string;
+  assignee: string;
+  /** How it opened: claim, assign or unclaimed-close. */
+  opened: string;
+  since: string;
+  /** How it ended: done, canceled, release, release-abandoned, reassign or superseded. */
+  ended: string;
+  ended_at: string;
+  /** The person who ended it. */
+  ended_by: string;
+  /** `agent` when an agent of the assignee made any of its binding writes, else `human`. */
+  worker_kind: string;
+  /** The latest verdict, or null when none was recorded. */
+  outcome: { verdict: string; reason: string; set_by: string; at: string } | null;
+  /** The id of its debrief comment, or null. */
+  debrief: string | null;
+}
+
+function pastAttempt(record: AttemptRecord): PastAttempt {
+  const end = record.end!;
+  const endedBy = end.ended_by.person;
+  return {
+    attempt: record.id,
+    assignee: record.start.assignee,
+    opened: record.start.opened,
+    since: record.start.at,
+    ended: end.ended,
+    ended_at: end.at,
+    ended_by: typeof endedBy === 'string' ? endedBy : '',
+    worker_kind: end.worker_kind,
+    outcome: record.outcome
+      ? { verdict: record.outcome.verdict, reason: record.outcome.reason, set_by: record.outcome.set_by, at: record.outcome.at }
+      : null,
+    debrief: end.debrief,
+  };
 }
 
 type Position = { body: number } | { before: string | null };
@@ -106,15 +155,21 @@ export const show = define({
     ),
     cursor: s.optional(s.string({ ...oneLine, description: 'a cursor from an earlier show of this issue' })),
   }),
-  async run(input, { tracker }): Promise<ShowResult> {
+  async run(input, { ctx, tracker }): Promise<ShowResult> {
     const view = await tracker.read();
     const id = view.resolveRead(input.ref, 'ref');
     const record = view.issue(id)!;
     const revision = issueRevision(record);
     const position = input.cursor === undefined ? { body: 0 } : readCursor(input.cursor, id, revision);
-    const derived = derivations(view);
+    const staleBefore = await staleCutoff(tracker.location.commonDir, tracker.now());
+    const derived = derivations(view, staleBefore);
     const facts = derived.of(id);
     const entries = view.comments(id);
+    const ended = view.attempts(id).filter((a) => a.end !== null);
+    const lastEnded = ended.reduce<AttemptRecord | undefined>(
+      (last, a) => (!last || a.end!.at > last.end!.at || (a.end!.at === last.end!.at && a.id > last.id) ? a : last),
+      undefined,
+    );
     const port = await dashboardPort(tracker.location.commonDir);
 
     const result: ShowResult = {
@@ -134,6 +189,10 @@ export const show = define({
       local_link: localLink(port, id),
       children: facts.children.map((kid) => related(view, kid.id, derived.state(kid.id))),
       blockers: record.blocked_by.map((b) => related(view, b, derived.state(b))),
+      assignee: facts.assignees[0] ?? null,
+      open_attempts: facts.openAttempts.map((a) => listedOpenAttempt(a, ctx.person.email, staleBefore)),
+      past_attempts: ended.map(pastAttempt),
+      last_assignee: lastEnded?.start.assignee ?? null,
       ready: facts.ready,
       conflict: facts.conflict,
       comment_count: entries.length,
@@ -143,6 +202,10 @@ export const show = define({
     const cursorRoom = encodeCursor('show', { i: id, r: revision, b: Number.MAX_SAFE_INTEGER }).length + 2;
     const fixed = () => jsonBytes({ ...result, truncated: true }) + cursorRoom;
     // Only a vast number of relations can fill the budget on their own; keep the first ones.
+    while (fixed() > RESULT_BUDGET && result.past_attempts.length > 0) {
+      result.past_attempts.shift();
+      result.truncated = true;
+    }
     while (fixed() > RESULT_BUDGET && (result.children.length > 0 || result.blockers.length > 0)) {
       if (result.children.length >= result.blockers.length) result.children.pop();
       else result.blockers.pop();

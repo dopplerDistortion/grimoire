@@ -65,6 +65,8 @@ export interface TrackerStore {
    * when its `format` marker is outside this release's range.
    */
   read(): Promise<TrackerView>;
+  /** The store's clock: the instant reads judge staleness by. */
+  now(): Date;
   /**
    * Runs a write as compare-and-set rounds. Each round looks up the
    * idempotency key, checks the marker, re-runs `body` on a fresh draft, and
@@ -149,6 +151,10 @@ class GitTrackerStore implements TrackerStore {
 
   close(): Promise<void> {
     return this.objects.close();
+  }
+
+  now(): Date {
+    return this.clock();
   }
 
   async read(): Promise<TrackerView> {

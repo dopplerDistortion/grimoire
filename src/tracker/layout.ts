@@ -40,3 +40,24 @@ export function commentFile(issue: string, comment: string): string {
 export function keyFile(month: string, keyHash: string): string {
   return `${KEYS_DIR}/${month}/${keyHash.slice(0, 2)}/${keyHash}.json`;
 }
+
+export const ATTEMPTS_DIR = 'attempts';
+export const OUTCOMES_DIR = 'outcomes';
+export const ACTIVITY_DIR = 'activity';
+
+/** `attempts/<a>/<b>/<issue-id>/<attempt-id>`: one attempt's directory, sharded by its issue. */
+export function attemptDir(issue: string, attempt: string): string {
+  const [a, b] = shardOf(issue);
+  return `${ATTEMPTS_DIR}/${a}/${b}/${issue}/${attempt}`;
+}
+
+/** `attempts/<a>/<b>/<issue-id>/<attempt-id>/activity/<entry>.md` */
+export function activityFile(issue: string, attempt: string, entry: string): string {
+  return `${attemptDir(issue, attempt)}/${ACTIVITY_DIR}/${entry}.md`;
+}
+
+/** `outcomes/<a>/<b>/<issue-id>/<attempt-id>.md` */
+export function outcomeFile(issue: string, attempt: string): string {
+  const [a, b] = shardOf(issue);
+  return `${OUTCOMES_DIR}/${a}/${b}/${issue}/${attempt}.md`;
+}

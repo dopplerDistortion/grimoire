@@ -1,5 +1,6 @@
 // What every operation in the registry is made of (spec §2.1).
 import { GrimoireError } from '../errors';
+import type { SecretScanner } from '../scanner';
 import type { TrackerStore } from '../tracker';
 import type { Actor, CallContext } from './context';
 import type { Schema } from './schema';
@@ -11,6 +12,8 @@ export interface OpEnv {
   readonly ctx: CallContext;
   readonly tracker: TrackerStore;
   readonly actor: Actor;
+  /** The secret scanner agent-authored text goes through before it is written (debriefs). */
+  readonly scanner: SecretScanner;
 }
 
 export interface OpDefinition<I, R> {
@@ -19,7 +22,7 @@ export interface OpDefinition<I, R> {
   readonly kind: 'read' | 'write';
   readonly policy: SurfacePolicy;
   /** How a retried call replays (spec §8, Replays). */
-  readonly replay: 'none' | 'idempotency-key';
+  readonly replay: 'none' | 'idempotency-key' | 'attempt-and-reason';
   readonly input: Schema<I, false>;
   run(input: I, env: OpEnv): Promise<R>;
 }
