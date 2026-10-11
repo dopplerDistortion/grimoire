@@ -792,29 +792,41 @@ describe('a local git that stops answering', () => {
     }
   });
 
-  test('a ref updater killed holding the ref’s lock with under a second of the budget left after it: the write still lands on a new git', async ({
+  test('a git that stops answering with under a second of the budget left after it: the write still lands on a new git', async ({
     world,
     grimoire,
   }) => {
     void grimoire; // initializes the tracker
     const before = (await trackerTip(world.a))!;
-    const dies = replaceGits({ command: /update-ref --stdin/, script: DIES_HOLDING_THE_LOCK, args: ['withhold'], times: 1 });
+    const pidFile = path.join(world.root, 'wedged-pids');
     const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
     const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
     const held = await machine.locks.acquire('tracker-write');
     if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
+    let wedged = { restore() {} };
     try {
-      const write = store.transact(keyWrite('dies late'), () => ({ result: null }));
-      // The round starts once the lock is let go; its updater is killed a stall time later, with under a second left.
-      await setTimeout(BUDGET_MS - STALL_MS - 1_000);
+      const startedAt = Date.now();
+      const write = store.transact(keyWrite('late retry'), () => ({ result: null }));
+      // Once the write waits for the lock (no process has started for 300 ms), the clone's config
+      // changes, so its round reads it again, with a git that hangs; the next one answers.
+      for (let seen = -1; seen !== started().length; ) {
+        seen = started().length;
+        await setTimeout(300);
+      }
+      wedged = replaceGits({ command: /config -z --get-regexp/, script: WEDGED_GIT, args: [pidFile], times: 1 });
+      await world.a.git(['config', 'grimoire.unrelated', 'changed']);
+      // The round starts once the lock is let go; its git is killed a stall time later, with under a second left.
+      await setTimeout(Math.max(0, startedAt + BUDGET_MS - STALL_MS - 1_000 - Date.now()));
       await held.lock.release();
 
       expect((await write).commit).toBe(await trackerTip(world.a));
       expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
+      expect(await pidsIn(pidFile)).not.toEqual([]);
     } finally {
-      dies.restore();
+      wedged.restore();
       await held.lock.release();
       await store.close();
+      await killPidsIn(pidFile);
     }
   });
 
