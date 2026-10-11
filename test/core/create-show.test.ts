@@ -70,6 +70,14 @@ describe('create and show', () => {
         body,
         revision: expect.stringMatching(/^[0-9a-f]{64}$/),
         link: id,
+        local_link: expect.stringMatching(new RegExp(`^http://127\\.0\\.0\\.1:47\\d{3}/issues/${id}$`)),
+        children: [],
+        blockers: [],
+        ready: true,
+        conflict: null,
+        comment_count: 0,
+        comments: [],
+        cursor: null,
       },
     });
   });

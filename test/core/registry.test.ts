@@ -7,7 +7,7 @@ describe('the op registry', () => {
     try {
       const byName = Object.fromEntries(core.ops.map((op) => [op.name, op]));
 
-      expect(Object.keys(byName).sort()).toEqual(['create', 'labels', 'show']);
+      expect(Object.keys(byName).sort()).toEqual(['comment', 'create', 'labels', 'list', 'show', 'update']);
       expect(byName.show).toMatchObject({
         kind: 'read',
         policy: 'agent',
@@ -34,6 +34,16 @@ describe('the op registry', () => {
         },
       });
       expect(byName.create!.annotations).not.toHaveProperty('idempotentHint');
+      expect(byName.list).toMatchObject({ kind: 'read', policy: 'agent', annotations: { readOnlyHint: true } });
+      for (const name of ['update', 'comment']) {
+        expect(byName[name]).toMatchObject({
+          kind: 'write',
+          policy: 'agent',
+          annotations: { destructiveHint: false, openWorldHint: false },
+          inputSchema: { type: 'object', required: name === 'update' ? ['id'] : ['id', 'body'], additionalProperties: false },
+        });
+        expect(byName[name]!.annotations).not.toHaveProperty('idempotentHint');
+      }
     } finally {
       await core.close();
     }

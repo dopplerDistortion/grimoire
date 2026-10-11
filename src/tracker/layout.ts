@@ -19,9 +19,21 @@ export const DELETED_DIR = 'deleted';
 export const FORWARDS_DIR = 'forwards';
 export const KEYS_DIR = 'keys';
 
-export function issueFile(id: string): string {
+/** `issues/<a>/<b>/<id>`: everything one issue owns. */
+export function issueDir(id: string): string {
   const [a, b] = shardOf(id);
-  return `${ISSUES_DIR}/${a}/${b}/${id}/issue.md`;
+  return `${ISSUES_DIR}/${a}/${b}/${id}`;
+}
+
+export function issueFile(id: string): string {
+  return `${issueDir(id)}/issue.md`;
+}
+
+export const COMMENTS_DIR = 'comments';
+
+/** `issues/<a>/<b>/<id>/comments/<comment id>.md` */
+export function commentFile(issue: string, comment: string): string {
+  return `${issueDir(issue)}/${COMMENTS_DIR}/${comment}.md`;
 }
 
 /** `keys/<yyyy-mm>/<h2>/<sha256>.json` */

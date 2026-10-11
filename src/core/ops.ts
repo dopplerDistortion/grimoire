@@ -1,43 +1,14 @@
-// The issue operations of the tracer slice: create, show, labels (spec §8).
-import { GrimoireError } from '../errors';
-import { issueRevision, parseWriteRef, sortedUnique, type IssueLink, type TrackerStore } from '../tracker';
-import type { Actor, CallContext } from './context';
-import { s, type Schema } from './schema';
+// The registry's result types, and the tracer slice's create and labels (spec §8).
+import { parseWriteRef, sortedUnique } from '../tracker';
+import type { CommentResult } from './comment';
+import type { ListResult } from './list';
+import { define, oneLine, writer } from './op';
+import { s } from './schema';
+import type { ShowResult } from './show';
+import type { UpdateResult } from './update';
 
-/** Who may call an op from which surface (spec §2.1, §7). */
-export type SurfacePolicy = 'agent' | 'human-only' | 'human-read' | 'internal';
-
-export interface OpEnv {
-  readonly ctx: CallContext;
-  readonly tracker: TrackerStore;
-  readonly actor: Actor;
-}
-
-export interface OpDefinition<I, R> {
-  readonly name: string;
-  readonly description: string;
-  readonly kind: 'read' | 'write';
-  readonly policy: SurfacePolicy;
-  /** How a retried call replays (spec §8, Replays). */
-  readonly replay: 'none' | 'idempotency-key';
-  readonly input: Schema<I, false>;
-  run(input: I, env: OpEnv): Promise<R>;
-}
-
-function define<I, R>(op: OpDefinition<I, R>): OpDefinition<I, R> {
-  return op;
-}
-
-/** The person a write is made by: author, committer and `created_by`. */
-function writer(ctx: CallContext): { name: string; email: string } {
-  const { name, email } = ctx.person;
-  if (!email) {
-    throw new GrimoireError('NO_GIT_IDENTITY', `git user.email is not set in ${ctx.repo.root}`, { name, email });
-  }
-  return { name: name ?? email, email };
-}
-
-const oneLine = { nonBlank: true, singleLine: true } as const;
+export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
+export type { ShowResult } from './show';
 
 export interface CreateResult {
   id: string;
@@ -102,55 +73,6 @@ export const create = define({
   },
 });
 
-export interface ShowResult {
-  id: string;
-  seq: number;
-  title: string;
-  status: string;
-  labels: readonly string[];
-  parent: string | null;
-  blocked_by: readonly string[];
-  links: readonly IssueLink[];
-  created_at: string;
-  created_by: string;
-  updated_at: string;
-  /** The body, byte for byte as written. */
-  body: string;
-  /** Opaque; changes exactly when the title, status, labels, relations, links or body change. */
-  revision: string;
-  link: string;
-}
-
-export const show = define({
-  name: 'show',
-  description: 'Show one issue: a full id, a unique prefix of 3+ characters, or a link.',
-  kind: 'read',
-  policy: 'agent',
-  replay: 'none',
-  input: s.object({ ref: s.string(oneLine) }),
-  async run(input, { tracker }): Promise<ShowResult> {
-    const view = await tracker.read();
-    const id = view.resolveRead(input.ref, 'ref');
-    const record = view.issue(id)!;
-    return {
-      id: record.id,
-      seq: record.seq,
-      title: record.title,
-      status: record.status,
-      labels: [...record.labels],
-      parent: record.parent,
-      blocked_by: [...record.blocked_by],
-      links: record.links.map((link) => ({ ...link })),
-      created_at: record.created_at,
-      created_by: record.created_by,
-      updated_at: record.updated_at,
-      body: record.body,
-      revision: issueRevision(record),
-      link: view.link(id),
-    };
-  },
-});
-
 export interface LabelsResult {
   /** Every label on a live issue, with how many issues carry it, by name. */
   labels: { name: string; count: number }[];
@@ -179,4 +101,7 @@ export interface OpResults {
   create: CreateResult;
   show: ShowResult;
   labels: LabelsResult;
+  update: UpdateResult;
+  comment: CommentResult;
+  list: ListResult;
 }

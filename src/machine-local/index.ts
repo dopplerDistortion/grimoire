@@ -26,9 +26,9 @@ export {
 } from './processes';
 export {
   MachineMarkerFile,
-  MachineUpgradeRequiredError,
   MACHINE_FORMAT_RANGE,
   V1_MACHINE_MARKER,
   type MachineMarker,
 } from './marker';
 export { Caches, type CacheOptions } from './caches';
+export { cloneId, defaultDashboardPort, START_LOCK, type StartLockData } from './clone';

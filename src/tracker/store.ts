@@ -132,6 +132,8 @@ class GitTrackerStore implements TrackerStore {
   private readonly randomSuffix: (length: number) => string;
   private readonly budgetMs: number;
   private remoteConfig: { stamp: string; value: string | null } | null = null;
+  /** The latest comment time this store wrote: comment times never go back within a process. */
+  private commentMs = 0;
 
   constructor(
     readonly location: RepoLocation,
@@ -189,7 +191,7 @@ class GitTrackerStore implements TrackerStore {
         if (replay) return { result: replay.result as R, commit: null, replayed: true };
       }
       checkTrackerMarker(snapshot.marker);
-      const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix);
+      const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs);
       const outcome = await body(draft);
       const edits = draft.edits();
       if (spec.idempotency) {
@@ -208,7 +210,10 @@ class GitTrackerStore implements TrackerStore {
         message,
       });
       const move = await this.moveRef(tips.local, commit, message.split('\n', 1)[0]!);
-      if (move.moved) return { result: outcome.result, commit, replayed: false };
+      if (move.moved) {
+        this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
+        return { result: outcome.result, commit, replayed: false };
+      }
       if (move.staleLock) {
         throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
       }

@@ -2,12 +2,12 @@
 // (bundled by child-process.ts). argv[2] is a JSON action; the child prints
 // one JSON line with its result.
 import { setTimeout as sleep } from 'node:timers/promises';
-import { locateMachineLocalStore } from '../../src/machine-local';
+import { locateMachineLocalStore, type Json } from '../../src/machine-local';
 
 type Action =
   | { action: 'race-lease'; from: string; name: string; ttlMs: number; goAt: number }
   | { action: 'hold-lease'; from: string; name: string; ttlMs: number }
-  | { action: 'hold-lock'; from: string; name: string }
+  | { action: 'hold-lock'; from: string; name: string; data?: { [key: string]: Json } }
   | { action: 'count'; from: string; kind: string; key: string; times: number }
   | {
       action: 'register';
@@ -56,7 +56,7 @@ async function main(action: Action): Promise<void> {
       return;
     }
     case 'hold-lock': {
-      const result = await store.locks.acquire(action.name);
+      const result = await store.locks.acquire(action.name, action.data ? { data: action.data } : {});
       print({ status: result.status });
       stayAlive();
       return;
