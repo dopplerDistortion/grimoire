@@ -358,52 +358,87 @@ describe('the excerpt mode', () => {
   });
 });
 
+/** The main line's key, and a good earlier cut of it reaching `reach` (as a sweep leaves one waiting with the open attempt). */
+function storedCut(reach: { at: string; ref: string }): { key: string; bytes: string } {
+  const key = sessionKey({ client: 'claude-code', session: CLAUDE_SESSION, context: 'main', nonce: 'nonce-claude' });
+  const bytes = [
+    '---',
+    'client: "claude-code"',
+    'client_version: "2.1.296"',
+    'reader_version: 1',
+    `session: "${CLAUDE_SESSION}"`,
+    'context: "main"',
+    'source: "hint"',
+    'window_start: {"at":"2026-10-11T03:27:15.900Z","ref":"a"}',
+    `window_end: ${JSON.stringify(reach)}`,
+    'steps: 1',
+    'steps_kept: 1',
+    'characters: 10',
+    'excerpt: "cut"',
+    'excerpt_notes: []',
+    'facts: "scanned"',
+    'skills_read: []',
+    'commits: []',
+    `reach: ${JSON.stringify(reach)}`,
+    'cut_at: "2026-10-11T03:27:17.000Z"',
+    'roots: []',
+    '---',
+    'user:\n | an earlier excerpt\n',
+  ].join('\n');
+  return { key, bytes };
+}
+
 describe('a stored record', () => {
+  /** Claims as `claimCall`, stores an earlier cut reaching `reach`, closes; returns the record the seal left. */
+  async function sealedOver(
+    capture: { makeCore: (extra?: CoreOptions) => Core; at: (iso: string) => void },
+    base: CallContext,
+    checkout: Checkout,
+    reach: { at: string; ref: string },
+    options: { claimCall?: string; core?: CoreOptions } = {},
+  ): Promise<{ key: string; record: StoredRecord }> {
+    const core = capture.makeCore(options.core);
+    const id = await created(core, base, 'Stored');
+    const attempt = await claimed(core, base, id, options.claimCall);
+    const stored = storedCut(reach);
+    await commitToTracker(checkout, { [`${attemptDir(id, attempt)}/sessions/${stored.key}.md`]: stored.bytes });
+    capture.at('2026-10-11T03:27:30.000Z');
+    const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(base, 'toolu_close'));
+    expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+    const records = await sessionRecords(checkout, id, attempt);
+    expect(records).toHaveLength(1);
+    return { key: stored.key, record: records[0]! };
+  }
+
   test('a later cut that fails (unreadable) never replaces a good stored record: the seal keeps it, noted source: pending', async ({
     world,
     grimoire,
     capture,
   }) => {
-    const core = capture.makeCore();
-    const id = await created(core, grimoire.ctx, 'Kept');
-    // A call the transcript doesn't hold, made inside its parsed range: the cut can't trust the reader.
-    const attempt = await claimed(core, grimoire.ctx, id, 'toolu_never_written');
-    // An earlier, good cut of the same context, waiting with the open attempt (as a sweep leaves it).
-    const key = sessionKey({ client: 'claude-code', session: CLAUDE_SESSION, context: 'main', nonce: 'nonce-claude' });
-    const good = [
-      '---',
-      'client: "claude-code"',
-      'client_version: "2.1.296"',
-      'reader_version: 1',
-      `session: "${CLAUDE_SESSION}"`,
-      'context: "main"',
-      'source: "hint"',
-      'window_start: {"at":"2026-10-11T03:27:15.900Z","ref":"a"}',
-      'window_end: {"at":"2026-10-11T03:27:16.000Z","ref":"b"}',
-      'steps: 1',
-      'steps_kept: 1',
-      'characters: 10',
-      'excerpt: "cut"',
-      'excerpt_notes: []',
-      'facts: "scanned"',
-      'skills_read: []',
-      'commits: []',
-      'reach: {"at":"2026-10-11T03:27:16.000Z","ref":"b"}',
-      'cut_at: "2026-10-11T03:27:17.000Z"',
-      'roots: []',
-      '---',
-      'user:\n | an earlier excerpt\n',
-    ].join('\n');
-    await commitToTracker(world.a, { [`${attemptDir(id, attempt)}/sessions/${key}.md`]: good });
-    capture.at('2026-10-11T03:27:30.000Z');
+    // A claim call the transcript doesn't hold, made inside its parsed range: the cut can't trust the reader.
+    const { key, record } = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:16.000Z', ref: 'b' }, { claimCall: 'toolu_never_written' });
 
-    const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+    expect(record.name).toBe(`${key}.md`);
+    expect(record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['source: pending'], reach: { at: '2026-10-11T03:27:16.000Z', ref: 'b' } });
+    expect(record.body).toBe('user:\n | an earlier excerpt\n');
+  });
 
-    expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
-    const [record] = await sessionRecords(world.a, id, attempt);
-    expect(record!.name).toBe(`${key}.md`);
-    expect(record!.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['source: pending'], reach: { at: '2026-10-11T03:27:16.000Z', ref: 'b' } });
-    expect(record!.body).toBe('user:\n | an earlier excerpt\n');
+  test('nor does one that reached further but lost its excerpt (unscanned)', async ({ world, grimoire, capture }) => {
+    const { record } = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:16.000Z', ref: 'b' }, { core: { scanner: createScanner([]) } });
+
+    expect(record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['source: pending'] });
+    expect(record.body).toBe('user:\n | an earlier excerpt\n');
+  });
+
+  test('a good cut reaching strictly further replaces it; one reaching no further leaves it as it was', async ({ world, grimoire, capture }) => {
+    const further = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:16.000Z', ref: 'b' });
+    // The cut's last step is the main line's final assistant text, at 03:27:22.041 or before.
+    const level = await sealedOver(capture, grimoire.ctx, world.a, { at: '2026-10-11T03:27:59.000Z', ref: 'z' });
+
+    expect(further.record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['tail_unflushed'] });
+    expect(further.record.body).toContain('tool Agent');
+    expect(level.record.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: [], reach: { at: '2026-10-11T03:27:59.000Z', ref: 'z' } });
+    expect(level.record.body).toBe('user:\n | an earlier excerpt\n');
   });
 });
 

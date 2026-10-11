@@ -368,8 +368,6 @@ async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
     const plan = planEnd(draft, request, me, ctx, actor);
     if (plan.replay) return { result: plan.replay };
     const { id, issue, parentEdit } = plan;
-    // The attempt the cut was made for: one another clone ended and this round sees open again can't be.
-    const cutFor = checked.record?.id ?? null;
     const now = draft.now.toISOString();
     const record =
       plan.record ??
@@ -389,7 +387,8 @@ async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
     const debrief = request.debrief
       ? draft.addComment(id, { actor: by, kind: 'debrief', body: renderDebrief(request.debrief, scanner), ...named }).id
       : null;
-    if ((plan.record?.id ?? null) === cutFor) sealed = { handle, keys: await sealCaptures(draft, handle, capture) };
+    // The round names the attempt the cut was made for (another one open now would be ATTEMPT_OPEN, or NOT_ASSIGNEE).
+    sealed = { handle, keys: await sealCaptures(draft, handle, capture) };
 
     const superseded = !issue || issue.status !== 'open';
     const ended = superseded ? 'superseded' : ending;
@@ -419,7 +418,7 @@ async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
     return { result, issue: id, ...named };
   });
   const done = sealed as { handle: string; keys: string[] } | null;
-  if (done && !write.replayed) await afterSeal(env, done.handle, capture, done.keys, write.commit);
+  if (done) await afterSeal(env, done.handle, capture, done.keys, write.commit);
   return write.result;
 }
 

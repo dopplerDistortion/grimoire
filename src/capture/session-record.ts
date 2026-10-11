@@ -147,11 +147,15 @@ export function parseSessionRecord(bytes: Buffer): SessionRecord {
   };
 }
 
-/** Whether a record came from a cut that succeeded: its window was found, and nothing went wrong with its excerpt. */
+/**
+ * Whether a record came from a cut that succeeded: it reached somewhere, and
+ * nothing went wrong with its excerpt (cut, or none by the mode) or its facts
+ * (scanned, or a facts-only record's events).
+ */
 export function cutSucceeded(record: Pick<SessionRecord, 'excerpt' | 'facts' | 'reach'>): boolean {
   if (record.reach === null) return false;
   if (record.excerpt === 'cut') return true;
-  return record.excerpt === 'off' && (record.facts === 'scanned' || record.facts === 'events_only');
+  return (record.excerpt === 'off' || record.excerpt === 'no_transcript') && (record.facts === 'scanned' || record.facts === 'events_only');
 }
 
 /** Whether `fresh` may replace `stored` (spec §14): it succeeded, and it reaches strictly further. */

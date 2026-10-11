@@ -1044,7 +1044,7 @@ export class SnapshotLoader {
     const sessionsDir = entries.find((e) => e.name === SESSIONS_DIR && e.mode === TREE_MODE);
     const sessions = new Map<string, string>();
     for (const entry of sessionsDir ? await this.objects.tree(sessionsDir.oid) : []) {
-      const key = entry.name.replace(/.md$/, '');
+      const key = entry.name.replace(/\.md$/, '');
       if (entry.mode !== TREE_MODE && entry.name.endsWith('.md') && SESSION_KEY_PATTERN.test(key)) sessions.set(key, entry.oid);
     }
     return { id, issue, start, end, activity, setAside, sessions };
