@@ -1,6 +1,7 @@
-// The installer's runtime half (spec §2 module 9, §11): the frozen bootstrap
-// and client entries, the launcher, the version copies, the join records and
-// the shell shim. `init`, `uninstall` and `leave` build on these.
+// The installer (spec §2 module 9, §11, §12): the frozen bootstrap and client
+// entries, the launcher, the version copies, the join records and the shell
+// shim; and `init` with what it writes in a checkout: config.yml, the
+// manifest and the pointer files. `uninstall` and `leave` build on these.
 export {
   BOOTSTRAP,
   MCP_ENTRY_ARGS,
@@ -47,3 +48,9 @@ export {
 export { compareSemver, isStrictSemver } from './semver';
 export { SHIM_PATH, shimText } from './shim';
 export { registeredWorktrees, worktreePins, type ClonePins, type Registry, type WorktreePin } from './worktrees';
+export { CONFIG_PATH, INSTALL_FORMAT, readInstallConfig, serializeInstallConfig, type AdapterDecision, type CheckoutInstall, type InstallConfig } from './config';
+export { ENTRY_KINDS, MANIFEST_PATH, readManifest, type ClientName, type EntryKind, type Manifest, type ManifestEntry } from './manifest';
+export { CODEX_ENV_VARS, codexHookHash, desiredEntries, type DesiredEntry, type PointerOptions } from './pointers';
+export { applyFiles, planFiles, type EntryAction, type FilePlan, type PlannedEntry } from './writer';
+export { disclosureLines, runInit, type InitFlags, type InitOptions, type InitReport, type Prompter } from './init';
+export { runningPackage } from './source';

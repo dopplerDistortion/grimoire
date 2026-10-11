@@ -8,11 +8,12 @@ import { packedRefsStamp, RefUpdater } from '../git/refs';
 import { runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
-import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, TRACKER_REF } from './layout';
+import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, SETTINGS_FILE, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
 import { foldCommits } from './fold';
 import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
 import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
+import { serializeSettings, settingLine } from './settings';
 import { syncTracker, type SyncOutcome, type SyncSpec, type TrackerRefs } from './sync';
 import { Draft, SnapshotLoader, type Snapshot, type TrackerDraft, type TrackerView } from './view';
 
@@ -86,10 +87,12 @@ export interface TrackerStore {
   ): Promise<WriteResult<R>>;
   /**
    * Creates the tracker ref as an orphan history holding the v1 `format`
-   * marker, unless a local or remote-tracking tracker exists already. Returns
-   * the root commit.
+   * marker (and the seed settings, set by the author), unless a local or
+   * remote-tracking tracker exists already. Returns the root commit. With
+   * `replace` it mints a new root even then, moving the local tracker ref to
+   * it (`init --new-tracker`, the only way the tracker root changes).
    */
-  initialize(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ root: string; created: boolean }>;
+  initialize(spec: Omit<WriteSpec, 'op' | 'idempotency'>, options?: InitializeOptions): Promise<{ root: string; created: boolean }>;
   /**
    * Commits the fold on its own (`Grimoire-Op: fold`) when the local and the
    * remote-tracking tracker diverged: the merged view, with both tips as
@@ -108,6 +111,13 @@ export interface TrackerStore {
   sync(spec: SyncSpec): Promise<SyncOutcome>;
   /** Stops the store's git process. */
   close(): Promise<void>;
+}
+
+export interface InitializeOptions {
+  /** Store settings the root commit holds, each set by the author at the commit's time. */
+  readonly settings?: ReadonlyMap<string, unknown>;
+  /** Mint a new root even when a tracker exists, moving the local ref to it. */
+  readonly replace?: boolean;
 }
 
 export const DEFAULT_BUDGET_MS = 10_000;
@@ -339,22 +349,25 @@ class GitTrackerStore implements TrackerStore {
     }
   }
 
-  async initialize(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ root: string; created: boolean }> {
+  async initialize(spec: Omit<WriteSpec, 'op' | 'idempotency'>, options: InitializeOptions = {}): Promise<{ root: string; created: boolean }> {
     const existing = async () => {
       const tips = await this.resolveTips();
       const tip = tips.local ?? tips.remote;
       return tip ? { root: await this.rootOf(tip), created: false } : null;
     };
-    const found = await existing();
+    const found = options.replace ? null : await existing();
     if (found) return found;
     const now = this.clock();
-    const tree = await this.objects.editTree(
-      null,
-      new Map([
-        [FORMAT_FILE, Buffer.from(serializeMarker(V1_MARKER), 'utf8')],
-        [GITATTRIBUTES_FILE, Buffer.from(GITATTRIBUTES, 'utf8')],
-      ]),
-    );
+    const files = new Map<string, Buffer>([
+      [FORMAT_FILE, Buffer.from(serializeMarker(V1_MARKER), 'utf8')],
+      [GITATTRIBUTES_FILE, Buffer.from(GITATTRIBUTES, 'utf8')],
+    ]);
+    if (options.settings && options.settings.size > 0) {
+      const at = now.toISOString();
+      const lines = new Map([...options.settings].map(([key, value]) => [key, settingLine({ value, at, by: spec.author.email })]));
+      files.set(SETTINGS_FILE, serializeSettings(lines));
+    }
+    const tree = await this.objects.editTree(null, files);
     const message = this.message({ ...spec, op: 'init' });
     const commit = await this.objects.writeCommit({
       tree: tree!,
@@ -363,7 +376,7 @@ class GitTrackerStore implements TrackerStore {
       committer: { ...spec.author, when: now },
       message,
     });
-    const move = await this.createRef(commit, message.split('\n', 1)[0]!);
+    const move = await this.createRef(commit, message.split('\n', 1)[0]!, options.replace === true);
     if (move.moved) return { root: commit, created: true };
     const raced = await existing();
     if (raced) return raced;
@@ -648,8 +661,12 @@ class GitTrackerStore implements TrackerStore {
     return this.failedMove(update.stderr);
   }
 
-  /** Creates the tracker ref with a process of its own, so its reflog entry carries `subject`. */
-  private async createRef(commit: string, subject: string): Promise<RefMove> {
+  /**
+   * Creates the tracker ref with a process of its own, so its reflog entry
+   * carries `subject`; `replace` moves an existing one (its old tip stays in
+   * the reflog).
+   */
+  private async createRef(commit: string, subject: string, replace = false): Promise<RefMove> {
     const run = await runGit(this.location.root, [
       'update-ref',
       '--create-reflog',
@@ -657,7 +674,7 @@ class GitTrackerStore implements TrackerStore {
       subject,
       TRACKER_REF,
       commit,
-      zeroOid(this.location.objectFormat),
+      ...(replace ? [] : [zeroOid(this.location.objectFormat)]),
     ]);
     return run.code === 0 ? { moved: true } : this.failedMove(run.stderr);
   }

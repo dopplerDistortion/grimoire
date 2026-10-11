@@ -174,7 +174,7 @@ function syncingOnSeal(tracker: TrackerStore, requestSync: (commit: string) => v
       if (write.commit && write.sealed) requestSync(write.commit);
       return write;
     },
-    initialize: (spec) => tracker.initialize(spec),
+    initialize: (spec, options) => tracker.initialize(spec, options),
     fold: (spec) => tracker.fold(spec),
     sync: (spec) => tracker.sync(spec),
     close: () => tracker.close(),

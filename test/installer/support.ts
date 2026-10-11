@@ -133,3 +133,18 @@ export async function packGrimoire(version: string): Promise<{ tarball: string; 
     throw error;
   }
 }
+
+/**
+ * Installs a packed tarball the way `npx` installs a package: `npm install`
+ * into a fresh prefix, which records npm's integrity for it in
+ * `node_modules/.package-lock.json`. Returns the package's bin.
+ */
+export function npxInstall(tarball: string, prefix: string): string {
+  const result = spawnSync(
+    process.execPath,
+    [npmCli(), 'install', '--offline', '--no-audit', '--no-fund', '--ignore-scripts', '--loglevel=error', tarball],
+    { cwd: prefix, encoding: 'utf8', windowsHide: true, timeout: 120_000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  return path.join(prefix, 'node_modules', '@goksening', 'grimoire', 'dist', 'grimoire.mjs');
+}
