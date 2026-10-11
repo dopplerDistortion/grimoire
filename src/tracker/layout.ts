@@ -17,6 +17,7 @@ export const GITATTRIBUTES = '* -text\n';
 export const ISSUES_DIR = 'issues';
 export const DELETED_DIR = 'deleted';
 export const FORWARDS_DIR = 'forwards';
+export const PURGES_DIR = 'purges';
 export const KEYS_DIR = 'keys';
 
 /** `issues/<a>/<b>/<id>`: everything one issue owns. */
@@ -44,6 +45,7 @@ export function keyFile(month: string, keyHash: string): string {
 export const ATTEMPTS_DIR = 'attempts';
 export const OUTCOMES_DIR = 'outcomes';
 export const ACTIVITY_DIR = 'activity';
+export const SESSIONS_DIR = 'sessions';
 
 /** `attempts/<a>/<b>/<issue-id>/<attempt-id>`: one attempt's directory, sharded by its issue. */
 export function attemptDir(issue: string, attempt: string): string {
@@ -60,4 +62,11 @@ export function activityFile(issue: string, attempt: string, entry: string): str
 export function outcomeFile(issue: string, attempt: string): string {
   const [a, b] = shardOf(issue);
   return `${OUTCOMES_DIR}/${a}/${b}/${issue}/${attempt}.md`;
+}
+
+export const CONFLICTS_DIR = 'conflicts';
+
+/** `issues/<a>/<b>/<id>/conflicts/<hash>.md` */
+export function conflictFile(issue: string, name: string): string {
+  return `${issueDir(issue)}/${CONFLICTS_DIR}/${name}.md`;
 }

@@ -4,7 +4,7 @@ import { GrimoireError, invalid } from '../errors';
 import { parseWriteRef, type IssueRecord, type TrackerView } from '../tracker';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import type { CallContext } from './context';
-import { derivations, type Derivations } from './derive';
+import { derivations, type Derivations, type IssueConflict } from './derive';
 import { listedOpenAttempt, type ListedOpenAttempt } from './attempts';
 import { define, oneLine } from './op';
 import { staleCutoff } from './stale';
@@ -27,7 +27,8 @@ export interface ListRow {
   ready: boolean;
   /** Open attempts (two only after a cross-clone fold). */
   open_attempts: ListedOpenAttempt[];
-  conflict: null;
+  /** The fold conflict, or null: `{fields, theirs, base}`. */
+  conflict: IssueConflict | null;
   comment_count: number;
   last_comment_at: string | null;
   created_at: string;

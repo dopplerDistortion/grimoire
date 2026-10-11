@@ -87,6 +87,8 @@ export interface AttemptRecord {
   readonly outcome: AttemptOutcome | null;
   /** Writes on the issue during the attempt, oldest first. */
   readonly activity: readonly ActivityEntry[];
+  /** Other seals of this attempt a fold set aside (two clones ended it differently): the attempt is in conflict. */
+  readonly setAside: readonly AttemptEnd[];
 }
 
 /** A fresh `at-` handle: 6 crypto-random Crockford characters. */

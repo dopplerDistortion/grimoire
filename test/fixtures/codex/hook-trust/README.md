@@ -8,9 +8,10 @@ Captured under a scripted model, though no model turn was involved. Shared
 provenance and sanitizing are in `../README.md`.
 
 **How the files were made.**
-- `hooks/list` responses came from `codex app-server` over stdio, captured
-  verbatim by `test/spikes/codex-mcp-hooks-transcripts/hooks/hooks-rpc.mjs`. A
-  newline was added.
+- `hooks/list` responses came from `codex app-server` over stdio. They are not
+  Codex's bytes: `test/spikes/codex-mcp-hooks-transcripts/hooks/hooks-rpc.mjs`
+  parsed each response and wrote it back with `JSON.stringify`, plus a newline.
+  Content and key order are Codex's.
 - Trust was written the way the TUI's `/hooks` screen does it:
   `config/batchWrite` on `hooks.state` with `trusted_hash = currentHash`.
 
@@ -24,7 +25,9 @@ provenance and sanitizing are in `../README.md`.
 | File | What it shows |
 | -- | -- |
 | `project-config.toml` | The input: the project config the listings were taken from (written by the spike's `mkrepo.mjs`, not by Codex). |
-| `project-config-group-inserted.toml`, `project-config-timeout-changed.toml` | The two edited inputs. |
+| `project-config-group-inserted.toml`, `project-config-timeout-changed.toml` | The two edited inputs, edited by hand from `project-config.toml`. |
+| `project-config-mixed-groups.toml` | Fix pass, repo `C:\gok130\repos\p4m` (`mkrepo.mjs --dashdash --mixed-before`): a `[[hooks.PreToolUse]]` group (matcher `Bash`), a `[[hooks.SessionStart]]` group with two handlers, then grimoire's group. |
+| `hooks-list-mixed-groups.json` | Its listing for a fresh user: keys `…:pre_tool_use:0:0`, `…:session_start:0:0`, `…:session_start:0:1` and grimoire's `…:session_start:1:0`. The group index counts only that event's groups, the last number is the handler index, and `displayOrder` (0–3) is just a global count. Grimoire's hash differs from the other listings because this command has `--`. |
 | `hooks-list-untrusted.json` | A fresh `CODEX_HOME` (a new user): key `<abs path>\.codex\config.toml:session_start:0:0`, `trustStatus: "untrusted"`, `currentHash: sha256:907a8003…`. |
 | `hooks-list-trusted.json` | The same, after the trust write: `"trusted"`. |
 | `user-config-hooks-state.toml` | The `[hooks.state]` table Codex wrote into that user's `config.toml`. |

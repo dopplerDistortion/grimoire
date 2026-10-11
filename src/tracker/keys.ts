@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { GrimoireError } from '../errors';
 import { keyFile, KEYS_DIR } from './layout';
 import { canonicalJson } from './lines';
-import type { TrackerObjects } from './objects';
+import type { ObjectSource } from './objects';
 
 export const KEY_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -53,7 +53,7 @@ function liveMonths(now: Date): string[] {
  * for another op or another fingerprint.
  */
 export async function lookupKey(
-  objects: TrackerObjects,
+  objects: ObjectSource,
   root: string,
   op: string,
   idempotency: Idempotency,
@@ -82,7 +82,7 @@ export async function lookupKey(
  * directory whose keys have all expired.
  */
 export async function keyEdits(
-  objects: TrackerObjects,
+  objects: ObjectSource,
   root: string,
   op: string,
   idempotency: Idempotency,
