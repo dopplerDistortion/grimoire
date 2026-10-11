@@ -39,6 +39,8 @@ export interface McpDeps {
   readonly spawnEnvId?: string;
   /** Told about every tools/call as it starts, so the process can let running calls finish before it exits. */
   readonly track?: (call: Promise<unknown>) => void;
+  /** Told the connecting client once a request names it (tools/list or tools/call): the process record notes it. */
+  readonly onClient?: (client: ClientInfo) => void;
 }
 
 /** Connection facts the server keeps from its spawn env: ids only (spec §8, §14). */
@@ -54,7 +56,8 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
       { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
     );
 
-    server.setRequestHandler('tools/list', async () => {
+    server.setRequestHandler('tools/list', async (_request, extra) => {
+      noteClient(clientOf(extra.mcpReq.envelope as Record<string, unknown> | undefined));
       const core = await deps.core();
       // Only agent ops are ever offered, and only those the registry marks as MCP tools (spec §7, §8).
       const tools: Tool[] = core.ops
@@ -77,6 +80,14 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
       return typeof version === 'string' ? { name, version } : { name };
     };
 
+    let clientNoted = false;
+    /** Hands the connecting client to `deps.onClient` the first time a request names one. */
+    const noteClient = (client: ClientInfo | null): void => {
+      if (clientNoted || client === null || !deps.onClient) return;
+      clientNoted = true;
+      deps.onClient(client);
+    };
+
     /** Runs one call; `notices` collects what the result must also say, errors included. */
     const callTool = async (
       request: CallToolRequest,
@@ -86,6 +97,8 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
       const { name } = request.params;
       // Before anything validates the arguments: take the reserved key out (spec §8, T2).
       const { input, hint } = takeHint(request.params.arguments);
+      const client = clientOf(extra.mcpReq.envelope as Record<string, unknown> | undefined);
+      noteClient(client);
       const core = await deps.core();
       const op = core.ops.find((candidate) => candidate.name === name);
       if (op?.policy === 'human-only' || op?.policy === 'human-read') {
@@ -104,7 +117,7 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
         surface: 'mcp',
         repo: { root, pin: config?.pin ?? null, installFormat: config?.installFormat ?? null },
         person: await readPerson(root),
-        client: clientOf(extra.mcpReq.envelope as Record<string, unknown> | undefined),
+        client,
         evidence: deps.spawnEnvId ? { spawnEnvId: deps.spawnEnvId } : {},
         mcp: { era, hint, meta: metaIds(extra.mcpReq._meta) },
         nonce: deps.nonce,
