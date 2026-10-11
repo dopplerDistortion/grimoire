@@ -196,6 +196,21 @@ export class Held {
   }
 }
 
+/**
+ * The names of the slots under `root` that have ever been taken, read from
+ * their current holders (a slot's folder name may be a hash of its name). A
+ * slot whose holder can't be read yet is left out: it lapses on its own.
+ */
+export async function slotNames(root: string): Promise<string[]> {
+  const names: string[] = [];
+  for (const dir of (await readdir(root).catch(() => [] as string[])).sort()) {
+    const state = await new Slot(root, dir).current().catch(() => null);
+    const name = state?.holder?.name;
+    if (typeof name === 'string' && name !== '' && new Slot(root, name).dir === path.join(root, dir)) names.push(name);
+  }
+  return names;
+}
+
 /** A held slot whose file isn't readable yet is reported with a placeholder holder. */
 export function holderOf(state: SlotState): Holder {
   return (

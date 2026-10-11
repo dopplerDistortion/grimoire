@@ -324,6 +324,13 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
   };
 }
 
+/** The runtime verbs that aren't core ops (spec §10 Runtime): each has its own `--help`. */
+const RUNTIME_VERBS = [
+  { verb: 'init', kind: 'write', policy: 'human-only', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
+  { verb: 'status', kind: 'read', policy: 'agent', description: 'What to know about this checkout now: sync, refreshed pointer files, Node, stale claims, the excerpt mode, the Codex hook. Writes nothing.' },
+  { verb: 'doctor', kind: 'read', policy: 'agent', description: 'A report on the store and the install; --fix makes the single-answer repairs (content pointer files, stale locks).' },
+] as const;
+
 /** `grimoire --help`: every verb, the input and output rules and the exit codes. */
 export function globalHelp(ops: readonly OpDescriptor[]): Record<string, unknown> {
   return {
@@ -333,7 +340,7 @@ export function globalHelp(ops: readonly OpDescriptor[]): Record<string, unknown
     repo: 'the host repo is the first directory at or above the cwd (or --from <dir>) that holds .git',
     output: 'stdout is always exactly one JSON object: the result, or {"error": {code, message, retryable, details}}',
     exit_codes: { 0: 'success', 1: 'stdout carries an error object', 2: 'usage error', 3: 'grimoire isn’t set up on this machine' },
-    verbs: ops.map((op) => ({ verb: verbOf(op), op: op.name, kind: op.kind, policy: op.policy, description: op.description })),
+    verbs: [...ops.map((op) => ({ verb: verbOf(op), op: op.name, kind: op.kind, policy: op.policy, description: op.description })), ...RUNTIME_VERBS],
     help: 'grimoire <verb> --help prints a verb’s input schema and flags',
   };
 }
