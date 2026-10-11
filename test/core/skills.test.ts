@@ -419,3 +419,49 @@ describe('what agents get: skill_list and skill_read', () => {
     expect(parts.join('')).toBe(long);
   });
 });
+
+describe('the ledger shared with quarantine', () => {
+  test('quarantine marks and clears in knowledge/ledger/ are never a skill, and no skill derivation reads them', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const page = 'flaky-port-binding';
+    const v1 = await edit(core, ctx, { name: 'release-notes', text: NOTES_V1, base: null });
+    const v1Records = (await world.a.git(['ls-tree', '--name-only', `${(await trackerTip(world.a))!}:knowledge/ledger`])).split('\n');
+    const created = await core.call(
+      'wiki_edit',
+      { slug: page, title: 'Flaky port binding', kind: 'failure', summary: 'Tests fail when two servers race for one port.', body: 'Bind to port 0.\n', base: null },
+      terminal(ctx),
+    );
+    const marks = [
+      await core.call('quarantine', { page, reason: 'cites a poisoned trace' }, terminal(ctx)),
+      await core.call('unquarantine', { page, reason: 'trace was fine' }, terminal(ctx)),
+      await core.call('quarantine', { page, reason: 'poisoned after all' }, terminal(ctx)),
+    ];
+    const beforeV2 = (await trackerTip(world.a))!;
+
+    const listed = await core.call('skill_list', {}, ctx);
+    const read = await core.call('skill_read', { name: 'release-notes' }, ctx);
+    const shown = await core.call('skill_show', {}, terminal(ctx));
+    const pageAsSkill = await core.call('skill_show', { name: page }, terminal(ctx));
+    const v2 = await edit(core, ctx, { name: 'release-notes', text: NOTES_V2, base: v1.version });
+    const wiki = await core.call('wiki_list', {}, terminal(ctx));
+
+    expect(created.ok).toBe(true);
+    expect(marks.map((m) => m.ok && m.result.changed)).toEqual([true, true, true]);
+    // One directory for both: the skill edit's record and the three quarantine records.
+    expect((await world.a.git(['ls-tree', '--name-only', `${beforeV2}:knowledge/ledger`])).split('\n')).toHaveLength(4);
+    expect(listed).toEqual({
+      ok: true,
+      result: { skills: [{ name: 'release-notes', description: 'Write a release note for a change. Use when the user asks to record a change in the notes.' }] },
+    });
+    expect(read).toMatchObject({ ok: true, result: { name: 'release-notes', version: v1.version, text: NOTES_V1 } });
+    expect(shown).toMatchObject({ ok: true, result: { active: 1, over_cap: false } });
+    expect(shown.ok && shown.result.skills.map((s) => [s.name, s.status, s.current])).toEqual([['release-notes', 'active', v1.version]]);
+    expect(pageAsSkill).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+    // The next skill change follows the skill's own record only: no quarantine record is one of its heads.
+    expect(v2).toMatchObject({ version: versionOf(NOTES_V2), from: v1.version, changed: true });
+    const v2Record = await world.a.git(['diff-tree', '-r', '--name-only', beforeV2, (await trackerTip(world.a))!, '--', 'knowledge/ledger']);
+    expect(await trackerFile(world.a, (await trackerTip(world.a))!, v2Record)).toContain(`\nafter: ["${v1Records[0]!.slice(0, -3)}"]\n`);
+    // And the skill records quarantine nothing: the page's open mark still holds.
+    expect(wiki.ok && wiki.result.pages.map((p) => [p.slug, p.quarantined])).toEqual([[page, true]]);
+  });
+});

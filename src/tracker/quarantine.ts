@@ -5,17 +5,15 @@
 // `knowledge/ledger/<sha256>.md`, the sha256 of their own bytes, in the
 // ledger's line format and key names (`kind`, `from`/`to`, `saw`, `basis`,
 // `surface`, `actor`, `by`, `at`). The ledger's other kinds (skill decisions
-// and changes) share the directory and are read as nothing here. Records only
-// accumulate, so two clones' ledgers fold by union, and whether a target is
-// quarantined (a mark no clear names) is derived on read, never stored.
+// and changes) share the directory and its listing (the tracker view's
+// `ledgerFiles`) and are read as nothing here. Records only accumulate, so two
+// clones' ledgers fold by union, and whether a target is quarantined (a mark no
+// clear names) is derived on read, never stored.
 import { createHash } from 'node:crypto';
-import { TREE_MODE } from '../git/objects';
+import { ledgerFile } from './layout';
 import { formatLine, lineValue, parseLines } from './lines';
-import type { FileEdit, ObjectSource } from './objects';
+import type { FileEdit } from './objects';
 import { sortedUnique } from './record';
-
-/** The ledger's directory (the skill ledger's records live here too). */
-const LEDGER = 'knowledge/ledger';
 
 export type QuarantineAction = 'quarantine-mark' | 'quarantine-clear';
 
@@ -116,14 +114,13 @@ export class QuarantineReader implements QuarantineView {
   private loaded: Promise<readonly QuarantineRecord[]> | null = null;
 
   constructor(
-    private readonly source: ObjectSource,
-    private readonly rootTree: string,
+    /** The ledger's files as stored, by id: the tracker view's `ledgerFiles`, the listing the skill ledger reads too. */
+    private readonly ledgerFiles: () => Promise<ReadonlyMap<string, Buffer>>,
   ) {}
 
   records(): Promise<readonly QuarantineRecord[]> {
     return (this.loaded ??= (async () => {
-      const files = (await this.source.dirAt(this.rootTree, LEDGER)).filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'));
-      const records = await Promise.all(files.map(async (e) => parse(e.name.slice(0, -3), await this.source.blob(e.oid))));
+      const records = [...(await this.ledgerFiles())].map(([id, bytes]) => parse(id, bytes));
       return records.filter((r): r is QuarantineRecord => r !== null).sort(byAt);
     })());
   }
@@ -156,6 +153,6 @@ export class QuarantineDraftState implements QuarantineDraft {
   }
 
   fileEdits(): Map<string, FileEdit> {
-    return new Map(this.added.map(({ bytes, record }) => [`${LEDGER}/${record.id}.md`, bytes]));
+    return new Map(this.added.map(({ bytes, record }) => [ledgerFile(record.id), bytes]));
   }
 }

@@ -291,7 +291,7 @@ export class Snapshot implements TrackerView {
     this.ids = new Set(parts.records.keys());
     for (const list of parts.attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
     this.wiki = new WikiReader(parts.source, parts.rootTree);
-    this.quarantine = new QuarantineReader(parts.source, parts.rootTree);
+    this.quarantine = new QuarantineReader(() => this.ledgerFiles());
   }
 
   issue(id: string): IssueRecord | undefined {
