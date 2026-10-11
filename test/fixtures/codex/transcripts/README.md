@@ -34,3 +34,14 @@ The repo had grimoire's SessionStart hook block, run with `--dangerously-bypass-
 | `truncation/` | Codex's own cut, gpt-5.5: a raw MCP server's `huge` tool returning 30,000, 45,000, 60,000 and 120,000 bytes, then `fail` (`isError` with `structuredContent`) and `textonly`. The first two are whole. The other two keep 48,000 characters, head and tail, around Codex's first-pass mark (`…3020 tokens truncated…`, `…18013 tokens truncated…`). What the model received instead is in `../model-input/truncation.jsonl`. |
 | `truncation-unknown-model/` | The 30,000-byte result under `-m unknown-model-x`, a slug missing from Codex's catalog: 12,000 characters kept, mark `…18188 chars truncated…` (the exact count). Then an `exec_command` printing `CODEX_SESSION_ID`, `CODEX_THREAD_ID` and `CODEX_VERSION`. The model's copy is in `../model-input/truncation-unknown-model.jsonl`. |
 | `archived-zstd/` | A short paginated session (`tool_search`, an MCP `echo`, `git log`), in `before-archive/` as it was, and in `archived_sessions/` after `thread/archive` (moved, same name), back-dated 9 days and compressed by the app-server's `rollout/compress` RPC. Both are Codex's bytes, unchanged: the `.zst` is Codex's own zstd frame, and it decodes to exactly the `before-archive/` file. |
+
+## Spike F (GOK-131)
+
+Captured under a scripted model. Each folder's README has its run and
+provenance.
+
+| Folder | What it shows |
+| -- | -- |
+| `skill-stub-read/` | B2 (no `.agents/` at thread start) and P2: one app-server thread, three turns. Turn 1's skills listing lacks the stubs that the SessionStart hook and a turn-1 command wrote. Turn 2 opens with a new full `<skills_instructions>` listing them (plus a `world_state` `host_skills` update), then reads the stub and the copy (`CommandExecution` `parsed_cmd` `{type: "read", path}`). An in-place description edit is never re-listed, because the root created mid-session is not watched. |
+| `skill-roots/` | B2 in depth, three rollouts. With `.agents/skills/` present at thread start, a change is listed from the first turn after Codex's file watcher delivers it (at once, or after up to 10 s in a burst). Without it, the new root is listed once and never re-read. |
+| `chore-role/` | P5: a root thread spawning the `grimoire-chores` role (`.codex/agents/grimoire-chores.toml`) with `fork_context: false`, and the child's rollout: `agent_role: "grimoire-chores"` in `session_meta`, the role's developer instructions, no skills listing, `exec_command` refused, `apply_patch` still working, `chore_start` over MCP. |
