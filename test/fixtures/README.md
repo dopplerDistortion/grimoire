@@ -32,6 +32,11 @@ endings are never converted on checkout.
 - `claude-code/transcripts/…`, `codex/transcripts/…`
 - `claude-code/hook-payloads/…`, `codex/hook-payloads/…`
 - `claude-code/meta/…`, `codex/meta/…` (`_meta` shapes, per MCP era)
+- `claude-code/mcp/<session>/…`, `codex/mcp/<session>/…` (raw MCP stdio
+  traffic: `c2s.jsonl` as the client sent it, `s2c.jsonl` as the server
+  answered; the `_meta` shapes on real requests live here too)
+- `mcp-sdk-client/mcp/<session>/…` (the MCP TypeScript SDK's own client, for
+  the generic-client cases no agent client produces)
 
 ## Loading
 
