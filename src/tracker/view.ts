@@ -68,6 +68,8 @@ export interface TrackerView {
   resolveWrite(ref: string, field?: string): string;
   /** `link_base` + the record's path, or the bare id when no `link_base` is set (spec §3, Links). */
   link(id: string): string;
+  /** A store setting's value from `settings.yml`, or undefined when it isn't set. */
+  setting(key: string): unknown;
   /** The issue's comments, oldest first, from their file names (no bodies read). */
   comments(id: string): readonly CommentEntry[];
   /** One comment of the issue, read in full. */
@@ -228,6 +230,10 @@ export class Snapshot implements TrackerView {
     return typeof base === 'string' && base !== '' ? base + issueFile(id) : id;
   }
 
+  setting(key: string): unknown {
+    return this.settings.get(key);
+  }
+
   comments(id: string): readonly CommentEntry[] {
     return this.commentFiles.get(id) ?? [];
   }
@@ -320,6 +326,10 @@ export class Draft implements TrackerDraft {
 
   link(id: string): string {
     return this.base.link(id);
+  }
+
+  setting(key: string): unknown {
+    return this.base.setting(key);
   }
 
   comments(id: string): readonly CommentEntry[] {

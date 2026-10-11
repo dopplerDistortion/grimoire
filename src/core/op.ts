@@ -14,6 +14,13 @@ export interface OpEnv {
   readonly actor: Actor;
   /** The secret scanner agent-authored text goes through before it is written (debriefs). */
   readonly scanner: SecretScanner;
+  /**
+   * Asks for the automatic sync after a write that triggers one (spec §4,
+   * Sync: attempt-ending writes, session-record attachments, accepted chore
+   * submits, knowledge decisions), naming the commit it made. It runs after
+   * the call answers and never fails or delays it.
+   */
+  readonly requestSync: (commit: string) => void;
 }
 
 export interface OpDefinition<I, R> {

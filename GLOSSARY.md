@@ -42,6 +42,14 @@ _Avoid_: Database, cache, data dir, dotfolder
 The git branch on which grimoire alone commits a host repo's issues, attempts, traces, outcomes and its whole knowledge layer, wiki and evolved-skill texts included; it is never checked out or merged into code, and clones exchange it by ordinary git fetch and push.
 _Avoid_: Sync branch, data branch, issues branch, ledger
 
+**Sync**:
+Grimoire's exchange of the tracker branch with a clone's remote by plain git: fetch the remote's tracker branch, fold it into the local one, and push the result, so that teammates see it after an ordinary `git fetch`; it runs on its own after the writes that matter, never holding one up, and a person can always run it by hand.
+_Avoid_: Replicate, upload, publish
+
+**Sync-pending marker**:
+A machine-local note that one local tip of the tracker branch still has to reach the remote, set before a sync tries and cleared only once the remote holds that tip or a later one, so that a sync that fails or dies is tried again.
+_Avoid_: Dirty flag, outbox, queue
+
 **Pointer file**:
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config

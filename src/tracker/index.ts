@@ -10,7 +10,11 @@ export {
   type WriteOutcome,
   type WriteResult,
   type Person,
+  TRACKER_ROOT_KEY,
+  namedTrackerRoot,
 } from './store';
+export type { SyncOutcome, SyncSpec, SyncFailure } from './sync';
+export { stripUserinfo, type SyncFailureClass } from './remote';
 export type { TrackerView, TrackerDraft, NewComment, NewAttempt, NewEnd, NewOutcome } from './view';
 export type { IssueComment, CommentEntry } from './comment';
 export type { IssueRecord, IssueLink } from './record';

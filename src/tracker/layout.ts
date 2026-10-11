@@ -3,6 +3,8 @@
 import { shardOf } from './ids';
 
 export const TRACKER_REF = 'refs/grimoire/tracker';
+/** The tracker's branch on a remote: what fetch and push name in their explicit refspecs (spec §3, Refs). */
+export const TRACKER_BRANCH = 'refs/heads/grimoire/tracker';
 /** The remote-tracking ref of `remote`'s `grimoire/tracker` branch. */
 export function remoteTrackerRef(remote: string): string {
   return `refs/remotes/${remote}/grimoire/tracker`;

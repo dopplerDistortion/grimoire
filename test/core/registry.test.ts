@@ -16,8 +16,13 @@ describe('the op registry', () => {
         'list',
         'release',
         'show',
+        'sync',
+        'sync_status',
         'update',
       ]);
+      // Runtime verbs: the CLI and the dashboard reach them; MCP never lists them (spec §8, §10).
+      expect(byName.sync).toMatchObject({ kind: 'write', policy: 'internal', inputSchema: { type: 'object', additionalProperties: false } });
+      expect(byName.sync_status).toMatchObject({ kind: 'read', policy: 'internal', annotations: { readOnlyHint: true } });
       expect(byName.show).toMatchObject({
         kind: 'read',
         policy: 'agent',

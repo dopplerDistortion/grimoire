@@ -254,7 +254,7 @@ function bindingActors(record: AttemptRecord): Readonly<Record<string, unknown>>
  * Ending your own open handle always works; on an issue that is no longer
  * open it seals as `superseded`.
  */
-async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }: OpEnv): Promise<EndResult> {
+async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner, requestSync }: OpEnv): Promise<EndResult> {
   const author = writer(ctx);
   const me = author.email;
   const by = recordedActor(me, actor);
@@ -369,6 +369,8 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     };
     return { result, issue: id, ...named };
   });
+  // Every attempt-ending write syncs in the background (spec §4); a replay wrote nothing.
+  if (write.commit) requestSync(write.commit);
   return write.result;
 }
 

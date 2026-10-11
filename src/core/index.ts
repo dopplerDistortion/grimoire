@@ -13,6 +13,7 @@ import { claim, close, release } from './attempts';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
 import { completeUpgradeDetails } from './upgrade';
+import { autoSync as runAutoSync, markSyncPending, sync, syncRequestOf, syncStatus, type AutoSyncRequest } from './sync';
 
 export type {
   CallContext,
@@ -30,6 +31,9 @@ export type { ListResult, ListRow } from './list';
 export type { RelatedIssue, ShownComment } from './show';
 export type { IssueConflict } from './derive';
 export type { Remedy } from './upgrade';
+export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
+export { AUTO_SYNC_SETTING, autoSync, markSyncPending, syncNow, syncRequestOf } from './sync';
+export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
 export type { ErrorBody, ErrorCode } from '../errors';
 
 export type Outcome<R> = { ok: true; result: R } | { ok: false; error: ErrorBody };
@@ -54,6 +58,16 @@ export interface CoreOptions {
   readonly writeBudgetMs?: number;
   /** The secret scanner for debriefs (default: the bundled rules). */
   readonly scanner?: SecretScanner;
+  /**
+   * How the automatic sync runs after the writes that trigger it (spec §4,
+   * Where it runs):
+   * - `in-process` (default): long-lived processes (`grimoire mcp`,
+   *   `start`) sync here, after the call answers;
+   * - a function: called after the sync-pending marker is set, for example
+   *   the CLI's spawn of a detached `grimoire sync --background`;
+   * - `off`: neither marks nor syncs (tests, tools that must stay offline).
+   */
+  readonly autoSync?: 'in-process' | 'off' | ((request: AutoSyncRequest) => void | Promise<void>);
 }
 
 export interface Core {
@@ -68,7 +82,7 @@ export interface Core {
     input: unknown,
     ctx: CallContext,
   ): Promise<Outcome<N extends keyof OpResults ? OpResults[N] : unknown>>;
-  /** Releases the git processes the core holds open. */
+  /** Waits for the background syncs this core started, then releases the git processes it holds open. */
   close(): Promise<void>;
 }
 
@@ -82,6 +96,8 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   claim,
   release,
   close,
+  sync,
+  syncStatus,
 ];
 
 function annotationsOf(op: OpDefinition<unknown, unknown>): Record<string, boolean> {
@@ -96,6 +112,53 @@ export function createCore(options: CoreOptions = {}): Core {
   const ops = new Map(REGISTRY.map((op) => [op.name, op]));
   const trackers = new Map<string, Promise<TrackerStore>>();
   const scanner = options.scanner ?? createScanner(bundledRules);
+  const autoSyncMode = options.autoSync ?? 'in-process';
+  /** Background work started after a call answered: close() waits for it. */
+  const background = new Set<Promise<void>>();
+  /** Per clone: an in-process sync is running, and whether another write asked for one meanwhile. */
+  const lanes = new Map<string, { again: boolean }>();
+
+  const later = (task: () => Promise<void>): void => {
+    const run: Promise<void> = new Promise<void>((resolve) => setImmediate(resolve))
+      .then(task)
+      .catch(() => {})
+      .finally(() => background.delete(run));
+    background.add(run);
+  };
+
+  /** Runs `task` for clone `key`, coalescing requests that arrive while one runs into one more run. */
+  const inLane = async (key: string, task: () => Promise<unknown>): Promise<void> => {
+    const running = lanes.get(key);
+    if (running) {
+      running.again = true;
+      return;
+    }
+    const lane = { again: false };
+    lanes.set(key, lane);
+    try {
+      do {
+        lane.again = false;
+        await task().catch(() => {});
+      } while (lane.again);
+    } finally {
+      lanes.delete(key);
+    }
+  };
+
+  /** After a triggering write: set the sync-pending marker, then sync (spec §4); after the call answers. */
+  const afterWrite = (tracker: TrackerStore, tip: string, ctx: CallContext): void => {
+    if (autoSyncMode === 'off') return;
+    later(async () => {
+      const { commonDir } = tracker.location;
+      await markSyncPending(commonDir, tip).catch(() => {});
+      if (typeof autoSyncMode === 'function') {
+        await autoSyncMode({ root: ctx.repo.root, commonDir, tip, ctx });
+        return;
+      }
+      const request = syncRequestOf(ctx, actorOf(ctx));
+      await inLane(commonDir, () => runAutoSync(tracker, request));
+    });
+  };
 
   const trackerFor = (root: string): Promise<TrackerStore> => {
     let tracker = trackers.get(root);
@@ -127,8 +190,18 @@ export function createCore(options: CoreOptions = {}): Core {
         const op = ops.get(name);
         if (!op) throw new GrimoireError('INVALID', `there is no operation named ${name}`, { fields: { op: 'unknown' } });
         const parsed = parseInput(op.input, input);
-        tracker = await trackerFor(ctx.repo.root);
-        const result = await op.run(parsed, { ctx, tracker, actor: actorOf(ctx), scanner });
+        const opened = await trackerFor(ctx.repo.root);
+        tracker = opened;
+        const syncTips: string[] = [];
+        const result = await op.run(parsed, {
+          ctx,
+          tracker: opened,
+          actor: actorOf(ctx),
+          scanner,
+          requestSync: (commit) => void syncTips.push(commit),
+        });
+        const syncTip = syncTips.at(-1);
+        if (syncTip !== undefined) afterWrite(opened, syncTip, ctx);
         return { ok: true, result } as never;
       } catch (error) {
         if (!(error instanceof GrimoireError)) throw error;
@@ -141,6 +214,7 @@ export function createCore(options: CoreOptions = {}): Core {
     },
 
     async close() {
+      while (background.size > 0) await Promise.all([...background]);
       const open = [...trackers.values()];
       trackers.clear();
       await Promise.all(open.map(async (tracker) => (await tracker.catch(() => null))?.close()));

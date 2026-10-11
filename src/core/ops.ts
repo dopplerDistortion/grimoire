@@ -7,6 +7,7 @@ import { define, oneLine, writer } from './op';
 import { s } from './schema';
 import type { ShowResult } from './show';
 import type { UpdateResult } from './update';
+import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -108,4 +109,6 @@ export interface OpResults {
   claim: ClaimResult;
   release: EndResult;
   close: EndResult;
+  sync: SyncResult;
+  sync_status: SyncStatusResult;
 }
