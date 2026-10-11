@@ -1,0 +1,4 @@
+[mcp_servers.extra]
+command = "node"
+args = ["@KIT@/extra-mcp.mjs"]
+env = { EXTRA_CAPTURE_DIR = "@R@/cap-extra" }
