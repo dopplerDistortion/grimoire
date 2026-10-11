@@ -1,0 +1,9 @@
+{
+  "loggedIn": true,
+  "authMethod": "api_key_helper",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "C:\\Users\\USER\\AppData\\Local\\Temp\\grimoire-cfg-helper-d68s6s\\projects",
+  "configDirectory": "C:\\Users\\USER\\AppData\\Local\\Temp\\grimoire-cfg-helper-d68s6s",
+  "apiKeySource": "apiKeyHelper"
+}
