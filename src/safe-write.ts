@@ -4,10 +4,50 @@
 // written through; the write itself is a compare-and-swap through a temp file
 // in the target's own folder, a re-check, and a rename retried on EPERM and
 // EBUSY (Windows sharing violations).
+//
+// Only text that round-trips is ever rewritten: a file whose bytes aren't
+// UTF-8 (UTF-16 with or without a BOM, an ANSI code page) would come back
+// with the person's own text replaced, so it is left alone, and the
+// compare-and-swap compares bytes, never decoded text.
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { readTextIfExists, retryTransient } from './machine-local';
+import { retryTransient } from './machine-local';
+
+/** A checkout file as text: absent, UTF-8 text that encodes back to the very same bytes, or not text. */
+export type CheckoutText = { readonly state: 'absent' } | { readonly state: 'text'; readonly text: string } | { readonly state: 'not-text' };
+
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** The text of `bytes` when they are UTF-8 text (a UTF-8 BOM kept) with no NUL; null when not. */
+export function textOfBytes(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  let text: string;
+  try {
+    text = strictUtf8.decode(bytes);
+  } catch {
+    return null;
+  }
+  return Buffer.from(text, 'utf8').equals(bytes) ? text : null;
+}
+
+async function readBytesIfExists(file: string): Promise<Buffer | undefined> {
+  try {
+    return await retryTransient(() => readFile(file));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+    throw error;
+  }
+}
+
+/** Reads a file of the checkout as text a safe write may replace (see CheckoutText). */
+export async function readCheckoutText(file: string): Promise<CheckoutText> {
+  const bytes = await readBytesIfExists(file);
+  if (bytes === undefined) return { state: 'absent' };
+  const text = textOfBytes(bytes);
+  return text === null ? { state: 'not-text' } : { state: 'text', text };
+}
 
 /** Why a safe write left a file alone. */
 export type SafeWriteSkip =
@@ -53,11 +93,12 @@ function tempPathFor(file: string): string {
 }
 
 /**
- * Writes `after` to `root/relative` only if it still holds `before` (null: it
- * must not exist), never through a link. Folders on the way are created. The
- * new bytes go to a temp file beside the target first; the path and the old
- * bytes are re-checked; then the temp file is renamed over the target.
- * Returns null when written, else why it was left alone.
+ * Writes `after` to `root/relative` only if it still holds exactly the UTF-8
+ * bytes of `before` (null: it must not exist), never through a link. Folders
+ * on the way are created. The new bytes go to a temp file beside the target
+ * first; the path and the old bytes are re-checked; then the temp file is
+ * renamed over the target. Returns null when written, else why it was left
+ * alone. A failure leaves no temp file behind.
  */
 export async function safeWrite(root: string, relative: string, before: string | null, after: string): Promise<SafeWriteSkip | null> {
   const linked = await linkedComponent(root, relative);
@@ -68,23 +109,24 @@ export async function safeWrite(root: string, relative: string, before: string |
   const temp = tempPathFor(file);
   const handle = await open(temp, 'wx');
   try {
-    await handle.writeFile(after, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
+    try {
+      await handle.writeFile(after, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     // The re-check, as close to the rename as it can be.
     const relinked = await linkedComponent(root, relative);
     if (relinked !== null) return await dropped(temp, { reason: 'link', at: relinked });
     const info = await lstat(file).catch(() => null);
     if (info && !info.isFile()) return await dropped(temp, { reason: 'not-a-file' });
-    const now = info ? ((await readTextIfExists(file)) ?? null) : null;
-    if (now !== before) return await dropped(temp, { reason: 'changed' });
+    const now = info ? await readBytesIfExists(file) : undefined;
+    const same = before === null ? now === undefined : now !== undefined && now.equals(Buffer.from(before, 'utf8'));
+    if (!same) return await dropped(temp, { reason: 'changed' });
     await retryTransient(() => rename(temp, file));
     return null;
   } catch (error) {
-    await unlink(temp).catch(() => {});
+    await retryTransient(() => unlink(temp)).catch(() => {});
     throw error;
   }
 }

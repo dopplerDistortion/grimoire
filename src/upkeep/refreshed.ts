@@ -24,10 +24,14 @@ export function refreshNotice(count: number, worktree: string | null): string {
   return `grimoire refreshed ${files}${worktree ? ` in ${worktree}` : ''}: commit ${count === 1 ? 'it' : 'them'}`;
 }
 
-/** Of `paths`, those git still sees as changed or untracked in `worktree`. */
+/**
+ * Of `paths`, those git still sees as changed or untracked in `worktree`.
+ * Read-only: `--no-optional-locks` keeps git from refreshing the index, so it
+ * never takes index.lock from under the person's own `git add` or commit.
+ */
 async function uncommitted(worktree: string, paths: readonly string[]): Promise<string[]> {
   if (paths.length === 0) return [];
-  const run = await runGit(worktree, ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths]);
+  const run = await runGit(worktree, ['--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths]);
   if (run.code !== 0) return [...paths];
   const changed = new Set(
     run.stdout

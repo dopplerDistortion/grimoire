@@ -268,18 +268,28 @@ describe('upkeep in init', () => {
     expect(said).toMatch(/grimoire refreshed 1 pointer file in .*feature: commit it/);
   });
 
-  gitTest('init waits for upkeep (or doctor --fix) holding this worktree before it writes the checkout', async ({ world }) => {
+  gitTest('init waits for upkeep (or doctor --fix) holding this worktree before it writes the checkout, recorded as running its version', async ({ world }) => {
     const root = world.a.dir;
     const store = new MachineLocalStore(path.join(root, '.git'));
     const held = await store.leases.acquire(await worktreeLeaseName(root), { ttlMs: 60_000 });
     if (held.status !== 'acquired') throw new Error('lease not taken');
-    setTimeout(() => void held.lease.release(), 1_500);
 
-    const started = Date.now();
-    const { report } = await initIn(root);
+    let settled = false;
+    const running = initIn(root).finally(() => (settled = true));
+    // From before it installs its copy until config.yml pins it, init's process record keeps that copy from any pruner.
+    await expect.poll(async () => (await store.processes.live({ role: 'init' })).map((record) => [record.pin, record.worktree]), { timeout: 20_000 }).toEqual([
+      [VERSION, root],
+    ]);
+    // Well past what init takes on its own, it still waits, and has written nothing.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(settled).toBe(false);
+    expect(existsSync(path.join(root, '.grimoire', 'config.yml'))).toBe(false);
+    expect(existsSync(path.join(root, '.claude', 'rules', 'grimoire.md'))).toBe(false);
+    await held.lease.release();
+    const { report } = await running;
 
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1_400);
     expect(report.written).toContain('.grimoire/config.yml');
+    expect(await store.processes.live({ role: 'init' })).toEqual([]);
   });
 });
 

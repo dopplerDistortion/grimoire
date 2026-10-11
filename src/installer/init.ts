@@ -610,11 +610,6 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     if (!/^y(es)?$/i.test(answer?.trim() ?? '')) throw canceled('the consent');
   }
 
-  // The (live store, worktree) lease upkeep's per-worktree part and doctor --fix share: held through step 6.
-  const worktreeLease = await holdWorktreeLease(store, root);
-  if (!worktreeLease) {
-    throw new GrimoireError('BUSY', `another grimoire process keeps working on ${root} (upkeep, doctor --fix or init); nothing changed, so run init again in a moment`, {});
-  }
   const writeAll = async () => {
     // 4. The tracker.
     if (remote.save && remote.name !== null) await saveRemote(root, remote.name);
@@ -685,16 +680,29 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     }
     return { copy, launched, joinWrite, written, skipped };
   };
+  // From before its copy is installed until config.yml pins it, this process
+  // counts as running `version`: no other process's pruning (every server's
+  // upkeep prunes) takes that copy in between.
+  const registration = await store.processes.register({ role: 'init', client: null, worktree: root, pin: version, pathSource: null }).catch(() => null);
   let wrote: Awaited<ReturnType<typeof writeAll>>;
+  let upkeep: UpkeepReport;
   try {
-    wrote = await writeAll();
+    // The (live store, worktree) lease upkeep's per-worktree part and doctor --fix share: held through step 6.
+    const worktreeLease = await holdWorktreeLease(store, root);
+    if (!worktreeLease) {
+      throw new GrimoireError('BUSY', `another grimoire process keeps working on ${root} (upkeep, doctor --fix or init); nothing changed, so run init again in a moment`, {});
+    }
+    try {
+      wrote = await writeAll();
+    } finally {
+      await worktreeLease.release().catch(() => {});
+    }
+    // 7. Upkeep, every part now: it keeps the copy this init runs, whatever config.yml says.
+    upkeep = await runUpkeep({ root, version, surface: 'cli', nonce: o.nonce, force: true });
   } finally {
-    await worktreeLease.release().catch(() => {});
+    await registration?.unregister().catch(() => {});
   }
   const { copy, launched, joinWrite, written, skipped } = wrote;
-
-  // 7. Upkeep, every part now: it keeps the copy this init runs, whatever config.yml says.
-  const upkeep = await runUpkeep({ root, version, surface: 'cli', nonce: o.nonce, force: true });
   const pruneRun = upkeep.runs.find((run) => run.part === 'prune-copies' && run.status === 'ran');
   const removed = (pruneRun?.result as { removed?: unknown } | undefined)?.removed;
   const pruned = Array.isArray(removed) ? removed.filter((version): version is string => typeof version === 'string') : [];

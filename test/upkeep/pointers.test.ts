@@ -3,14 +3,15 @@
 // rewritten and reported as "grimoire refreshed N pointer files: commit them";
 // permission-bearing entries never are. Seam 1: upkeep driven directly
 // against real checkouts.
-import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { gitTest } from '#harness';
 import { SHIM_PATH } from '../../src/installer';
 import { ADAPTER_DOC, adapterBlockBody, instructionRulesText } from '../../src/installer/texts';
 import { MachineLocalStore } from '../../src/machine-local';
-import { POINTER_REFRESH_RECORDS, refreshedPointerFiles, runUpkeep } from '../../src/upkeep';
+import { POINTER_REFRESH_RECORDS, pointerRefresh, refreshedPointerFiles, runUpkeep, worktreeKey } from '../../src/upkeep';
+import { VERSION } from '../../src/version';
 import { installed, read } from './support';
 
 describe('content pointer-file refresh', () => {
@@ -45,6 +46,27 @@ describe('content pointer-file refresh', () => {
     // The next pass drops the record too.
     await runUpkeep({ root, force: true });
     expect(await store.records.list(POINTER_REFRESH_RECORDS)).toEqual([]);
+  });
+
+  gitTest('reading the refreshed files never writes the index, so a git add or commit running then can’t meet index.lock', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    await world.a.git(['add', '-A']);
+    await world.a.git(['commit', '--quiet', '-m', 'install grimoire']);
+    const rules = path.join(root, '.claude/rules/grimoire.md');
+    await writeFile(rules, 'staged edit\n');
+    await world.a.git(['add', rules]);
+    // Same bytes as the index, other times: a plain `git status` would refresh the index and write it.
+    const later = new Date(Date.now() + 60_000);
+    await utimes(rules, later, later);
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    await store.records.write(POINTER_REFRESH_RECORDS, await worktreeKey(root), { worktree: root, paths: ['.claude/rules/grimoire.md'], at: Date.now() });
+    const index = path.join(root, '.git', 'index');
+    const before = { bytes: await readFile(index), mtime: (await stat(index)).mtimeMs };
+
+    expect(await refreshedPointerFiles(store, root)).toMatchObject({ paths: ['.claude/rules/grimoire.md'] });
+
+    expect({ bytes: await readFile(index), mtime: (await stat(index)).mtimeMs }).toEqual(before);
   });
 
   gitTest('a refreshed file that ends up as committed is nothing to commit', async ({ world }) => {
@@ -129,6 +151,62 @@ describe('content pointer-file refresh', () => {
     expect(await readFile(elsewhere, 'utf8')).toBe('somebody else’s file\n');
     expect((await lstat(path.join(root, '.claude/rules/grimoire.md'))).isSymbolicLink()).toBe(true);
     expect(report.notices).toContainEqual(expect.stringMatching(/^grimoire left \.claude\/rules\/grimoire\.md alone: .*symlink/));
+  });
+
+  gitTest('a write that fails leaves the files already refreshed reported and recorded', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    await writeFile(path.join(root, '.claude/rules/grimoire.md'), 'drifted\n');
+    // The adapter doc's folder is now a file: its write fails after the rules file was refreshed.
+    await rm(path.join(root, 'docs/agents'), { recursive: true });
+    await writeFile(path.join(root, 'docs/agents'), 'not a folder\n');
+    const store = new MachineLocalStore(path.join(root, '.git'));
+
+    const report = await runUpkeep({ root });
+
+    expect(await read(root, '.claude/rules/grimoire.md')).toBe(instructionRulesText());
+    const run = report.runs.find((entry) => entry.part === 'pointer-refresh');
+    expect(run).toMatchObject({ status: 'ran', result: { refreshed: ['.claude/rules/grimoire.md'], skipped: [{ path: ADAPTER_DOC }] } });
+    expect(report.notices).toContain('grimoire refreshed 1 pointer file: commit it');
+    expect(report.notices).toContainEqual(expect.stringMatching(/^grimoire left docs\/agents\/issue-tracker\.md alone: /));
+    expect(await refreshedPointerFiles(store, root)).toMatchObject({ paths: ['.claude/rules/grimoire.md'] });
+  });
+
+  gitTest('files already rewritten are reported even when their record can’t be written', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    await writeFile(path.join(root, '.claude/rules/grimoire.md'), 'drifted\n');
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    // Records refuse writes under a machine marker this release can't run against.
+    await mkdir(store.dir, { recursive: true });
+    await writeFile(path.join(store.dir, 'format'), 'format: 2\ncompat: 2\nrequires: "2.0.0"\n');
+
+    const outcome = await pointerRefresh.run({ store, root, worktree: root, own: true, version: VERSION, context: () => Promise.reject(new Error('unused')) });
+
+    expect(await read(root, '.claude/rules/grimoire.md')).toBe(instructionRulesText());
+    expect(outcome.notices).toEqual(['grimoire refreshed 1 pointer file: commit it']);
+    expect(outcome.result).toMatchObject({ refreshed: ['.claude/rules/grimoire.md'], record: expect.stringContaining('newer grimoire') });
+  });
+
+  gitTest('a file that isn’t UTF-8 text is left byte for byte and reported, never rewritten', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    // AGENTS.md re-saved as UTF-16LE with a BOM (Windows PowerShell 5.1's `>`), with notes of the person's own.
+    const agents = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`# Règles: soyez précis\n\n${await read(root, 'AGENTS.md')}`.replace('## grimoire', '## grimoire (edited)'), 'utf16le')]);
+    await writeFile(path.join(root, 'AGENTS.md'), agents);
+    // The rules file re-saved in an ANSI code page (Set-Content's default), and drifted.
+    const rules = Buffer.from('# grimoire\n\nRègles à moi\n', 'latin1');
+    await writeFile(path.join(root, '.claude/rules/grimoire.md'), rules);
+
+    const report = await runUpkeep({ root });
+
+    expect(await readFile(path.join(root, 'AGENTS.md'))).toEqual(agents);
+    expect(await readFile(path.join(root, '.claude/rules/grimoire.md'))).toEqual(rules);
+    const run = report.runs.find((entry) => entry.part === 'pointer-refresh');
+    expect(run?.result).toMatchObject({ refreshed: [] });
+    expect(report.notices.filter((line) => line.includes('refreshed'))).toEqual([]);
+    expect(report.notices).toContain('grimoire left AGENTS.md alone: AGENTS.md is not UTF-8 text');
+    expect(report.notices).toContain('grimoire left .claude/rules/grimoire.md alone: .claude/rules/grimoire.md is not UTF-8 text');
   });
 
   gitTest('never touches a permission-bearing entry, a hook, the server entry or run.cjs, even when they drifted', async ({ world }) => {

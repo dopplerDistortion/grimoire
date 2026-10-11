@@ -95,15 +95,24 @@ function skipWhy(relative: string, skip: SafeWriteSkip): string {
   }
 }
 
-/** Rewrites every drifted content entry of `root` with the shipped text, through safe writes. Never writes the manifest. */
+/**
+ * Rewrites every drifted content entry of `root` with the shipped text,
+ * through safe writes. Never writes the manifest. A write that fails is
+ * skipped with its error, and the rest still go: what was refreshed is
+ * always returned, so it is always reported.
+ */
 export async function refreshContentPointers(root: string): Promise<ContentRefresh> {
   const plan = await planContentRefresh(root);
   const refreshed: string[] = [];
   const skipped = [...plan.skipped];
   for (const write of plan.writes) {
-    const skip = await safeWrite(root, write.path, write.before, write.after);
-    if (skip === null) refreshed.push(write.path);
-    else skipped.push({ path: write.path, why: skipWhy(write.path, skip) });
+    try {
+      const skip = await safeWrite(root, write.path, write.before, write.after);
+      if (skip === null) refreshed.push(write.path);
+      else skipped.push({ path: write.path, why: skipWhy(write.path, skip) });
+    } catch (error) {
+      skipped.push({ path: write.path, why: `grimoire couldn't write it (${error instanceof Error ? error.message : String(error)})` });
+    }
   }
   return { refreshed, skipped };
 }

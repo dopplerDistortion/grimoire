@@ -19,10 +19,14 @@ export const pointerRefresh: UpkeepPart = {
   async run({ store, worktree, own }) {
     const root = worktree!;
     const { refreshed, skipped } = await refreshContentPointers(root);
-    await noteRefreshed(store, root, refreshed);
     const where = own ? null : root;
+    const result: { [key: string]: Json } = { refreshed, skipped: skipped.map((entry) => ({ path: entry.path, why: entry.why })) };
+    // Files already rewritten are reported whatever happens to the record of them.
+    await noteRefreshed(store, root, refreshed).catch((error: unknown) => {
+      result.record = error instanceof Error ? error.message : String(error);
+    });
     return {
-      result: { refreshed, skipped: skipped.map((entry) => ({ path: entry.path, why: entry.why })) },
+      result,
       notices: [
         ...(refreshed.length > 0 ? [refreshNotice(refreshed.length, where)] : []),
         ...skipped.map((entry) => `grimoire left ${entry.path}${where ? ` in ${where}` : ''} alone: ${entry.why}`),

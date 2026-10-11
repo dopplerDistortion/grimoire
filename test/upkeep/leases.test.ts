@@ -31,6 +31,11 @@ async function passesTogether(root: string, count: number): Promise<UpkeepReport
   });
 }
 
+/** Each part's status in one pass, by name: parts later releases add don't change what a test asserts. */
+function byPart(report: UpkeepReport): Record<string, PartRun['status']> {
+  return Object.fromEntries(report.runs.map((run) => [run.part, run.status]));
+}
+
 function statusesOf(reports: readonly UpkeepReport[], part: string): PartRun['status'][] {
   return reports.flatMap((report) => report.runs.filter((run) => run.part === part).map((run) => run.status)).sort();
 }
@@ -61,20 +66,12 @@ describe('leases and throttles', () => {
 
     const soon = await runUpkeep({ root });
 
-    expect(soon.runs.map((run) => [run.part, run.status])).toEqual([
-      ['pending-sync', 'throttled'],
-      ['prune-copies', 'throttled'],
-      ['pointer-refresh', 'throttled'],
-    ]);
+    expect(byPart(soon)).toMatchObject({ 'pending-sync': 'throttled', 'prune-copies': 'throttled', 'pointer-refresh': 'throttled' });
     expect(await read(root, '.claude/rules/grimoire.md')).toBe('drifted\n');
 
     const forced = await runUpkeep({ root, force: true });
 
-    expect(forced.runs.map((run) => [run.part, run.status])).toEqual([
-      ['pending-sync', 'ran'],
-      ['prune-copies', 'ran'],
-      ['pointer-refresh', 'ran'],
-    ]);
+    expect(byPart(forced)).toMatchObject({ 'pending-sync': 'ran', 'prune-copies': 'ran', 'pointer-refresh': 'ran' });
     expect(await read(root, '.claude/rules/grimoire.md')).toBe(instructionRulesText());
   });
 
@@ -90,16 +87,8 @@ describe('leases and throttles', () => {
     const report = await runUpkeep({ root, force: true });
 
     expect(Date.now() - started).toBeLessThan(5_000);
-    expect(report.runs.map((run) => [run.part, run.status])).toEqual([
-      ['pending-sync', 'ran'],
-      ['prune-copies', 'held'],
-      ['pointer-refresh', 'held'],
-    ]);
+    expect(byPart(report)).toMatchObject({ 'pending-sync': 'ran', 'prune-copies': 'held', 'pointer-refresh': 'held' });
     for (const lease of [worktree, prune]) if (lease.status === 'acquired') await lease.lease.release();
-    expect((await runUpkeep({ root })).runs.map((run) => [run.part, run.status])).toEqual([
-      ['pending-sync', 'throttled'],
-      ['prune-copies', 'ran'],
-      ['pointer-refresh', 'ran'],
-    ]);
+    expect(byPart(await runUpkeep({ root }))).toMatchObject({ 'pending-sync': 'throttled', 'prune-copies': 'ran', 'pointer-refresh': 'ran' });
   });
 });

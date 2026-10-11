@@ -15,7 +15,7 @@
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import { readTextIfExists } from '../machine-local';
-import { linkedComponent, safeWrite } from '../safe-write';
+import { linkedComponent, readCheckoutText, safeWrite } from '../safe-write';
 import {
   MANIFEST_PATH,
   canonicalJson,
@@ -440,7 +440,13 @@ export async function planFiles(root: string, desired: readonly DesiredEntry[], 
       refuse(`${relative} is not a file`);
       continue;
     }
-    const current = (await readTextIfExists(file)) ?? null;
+    // Only text that round-trips is rewritten: anything else would come back with the person's text replaced.
+    const read = await readCheckoutText(file);
+    if (read.state === 'not-text') {
+      refuse(`${relative} is not UTF-8 text`);
+      continue;
+    }
+    const current = read.state === 'text' ? read.text : null;
     const prior = (entry: DesiredEntry) => priors.get(entryIdentity(describe(entry)));
     let after: string | null = null;
     const first = entries[0]!;

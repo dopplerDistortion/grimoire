@@ -13,8 +13,10 @@
 //   worktree unless forced (a decision triggers it).
 // - Skips: a worktree mid-merge, rebase, cherry-pick, revert or bisect; one
 //   that pins another version; one whose upgrade-in-progress record names
-//   another pin (with the finish-or-discard line). Clone-wide parts carry on
-//   through all of these while the machine marker is readable.
+//   another pin (with the finish-or-discard line), each checked again under
+//   the lease. Clone-wide parts carry on through all of these while the
+//   machine marker is readable; the per-worktree part, which records what it
+//   did, needs it too.
 //
 // Nothing here throws: a failing part is reported, and the next part runs.
 import { randomBytes } from 'node:crypto';
@@ -243,17 +245,18 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
       each('skipped', 'stopped');
       continue;
     }
-    const config = await readCheckoutConfig(worktree).catch(() => undefined);
-    // Pin-less, or unreadable: nothing of this release lives there.
-    if (!config?.pin) continue;
-    if (config.pin !== version) {
-      each('skipped', 'pin');
-      continue;
-    }
-    const upgrade = await upgradeInProgress(store, worktree).catch(() => null);
-    if (upgrade && upgrade.to !== version) {
-      notices.push(upgradeSkipNotice(worktree, upgrade.to));
-      each('skipped', 'upgrade');
+    /** Whether the worktree is to be left alone now (reported, except a pin-less one). */
+    const leaveAlone = async (): Promise<boolean> => {
+      const gate = await worktreeGate(store, worktree, version);
+      if (gate === null) return false;
+      if (gate.skip === 'upgrade') notices.push(upgradeSkipNotice(worktree, gate.to));
+      if (gate.skip !== 'pin-less') each('skipped', gate.skip);
+      return true;
+    };
+    if (await leaveAlone()) continue;
+    // Its work is recorded in records, which the machine marker governs.
+    if (markers !== null) {
+      for (const part of worktreeParts) report({ part: part.name, worktree, status: 'skipped', why: 'markers', error: markers });
       continue;
     }
     const key = await worktreeLeaseName(worktree);
@@ -271,7 +274,9 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
         each('throttled');
         continue;
       }
-      // Checked under the lease, right before the work.
+      // Checked again under the lease, right before the work: the pin may have
+      // moved (a switch, a merge, an upgrade's config.yml) or an upgrade begun.
+      if (await leaveAlone()) continue;
       const operation = await operationInProgress(worktree);
       if (operation) {
         each('skipped', operation);
@@ -290,6 +295,20 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
     }
   }
   return { runs, notices };
+}
+
+/** Why the per-worktree part leaves a worktree alone, before and again under its lease. */
+type WorktreeGate = { readonly skip: 'pin-less' } | { readonly skip: 'pin' } | { readonly skip: 'upgrade'; readonly to: string };
+
+/** Null when the per-worktree part may work on `worktree` in a process running `version`. */
+async function worktreeGate(store: MachineLocalStore, worktree: string, version: string): Promise<WorktreeGate | null> {
+  const config = await readCheckoutConfig(worktree).catch(() => undefined);
+  // Pin-less, or unreadable: nothing of this release lives there.
+  if (!config?.pin) return { skip: 'pin-less' };
+  if (config.pin !== version) return { skip: 'pin' };
+  const upgrade = await upgradeInProgress(store, worktree).catch(() => null);
+  if (upgrade && upgrade.to !== version) return { skip: 'upgrade', to: upgrade.to };
+  return null;
 }
 
 async function acquire(store: MachineLocalStore, name: string, ttlMs: number): Promise<Lease | null> {
