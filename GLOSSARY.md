@@ -217,5 +217,5 @@ A human's forward change that makes an earlier skill version of an evolved skill
 _Avoid_: Rollback, revert
 
 **Skill ledger**:
-The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, and every change to an evolved skill.
+The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, every change to an evolved skill, and every quarantine mark and clear.
 _Avoid_: Skill impact, changelog, audit log, history

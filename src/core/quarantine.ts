@@ -22,6 +22,9 @@ export interface QuarantineResult {
   record?: string;
 }
 
+/** A ledger record's versions for a page it leaves as it is: from and to are both the version the actor saw. */
+const unchanged = (version: string) => ({ from: version, to: version, saw: [version] });
+
 async function pageVersionOf(view: TrackerView, slug: string): Promise<string> {
   const page = await view.wiki.page(slug);
   if (!page) throw new GrimoireError('NOT_FOUND', `there is no wiki page ${slug}`, { slug });
@@ -45,14 +48,15 @@ export const quarantine = define({
       const saw = await pageVersionOf(draft, slug);
       if ((await quarantinedPages(draft)).has(slug)) return { result: { page: slug, quarantined: true, changed: false } };
       const mark = draft.quarantine.add({
-        record: 'quarantine-mark',
+        kind: 'quarantine-mark',
         target: { page: slug },
         clears: [],
         reason: input.reason.trim(),
-        actor: recordedActor(author.email, actor),
+        ...unchanged(saw),
         basis: BASIS,
         surface: ctx.surface,
-        saw,
+        actor: recordedActor(author.email, actor),
+        by: author.email,
       });
       return { result: { page: slug, quarantined: true, changed: true, record: mark.id } };
     });
@@ -80,14 +84,15 @@ export const unquarantine = define({
       const marks = (await quarantinedPages(draft)).get(slug) ?? [];
       if (marks.length === 0) return { result: { page: slug, quarantined: false, changed: false } };
       const clear = draft.quarantine.add({
-        record: 'quarantine-clear',
+        kind: 'quarantine-clear',
         target: { page: slug },
         clears: marks.map((mark) => mark.id),
         reason: (input.reason ?? '').trim(),
-        actor: recordedActor(author.email, actor),
+        ...unchanged(saw),
         basis: BASIS,
         surface: ctx.surface,
-        saw,
+        actor: recordedActor(author.email, actor),
+        by: author.email,
       });
       return { result: { page: slug, quarantined: false, changed: true, record: clear.id } };
     });

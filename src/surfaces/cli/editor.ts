@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { access, mkdtemp, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { invalid } from '../../errors';
 import { runGit } from '../../git/run';
 
 export interface EditWorkspace {
@@ -32,10 +33,15 @@ async function worktrees(root: string): Promise<string[]> {
 /** A fresh temp directory for one edit, checked to lie outside every worktree of the repo at `root`. */
 export async function editWorkspace(root: string): Promise<EditWorkspace> {
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'grimoire-edit-')));
-  const remove = () => rm(dir, { recursive: true, force: true });
+  // Retries the transient Windows failures (EBUSY, EPERM) an editor or a virus scanner still holding a file causes.
+  const remove = () => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   if ((await worktrees(root)).some((tree) => inside(dir, tree))) {
     await remove();
-    throw new Error(`the temp directory ${dir} lies inside a worktree; point TMPDIR (TEMP on Windows) elsewhere`);
+    const temp = path.dirname(dir);
+    throw invalid(
+      { temp_dir: `${temp} lies inside a worktree of this repo` },
+      `the temp directory ${temp} lies inside a worktree of this repo, so the text would land in a checkout; point TMPDIR (TEMP and TMP on Windows) outside the repo and run it again`,
+    );
   }
   return { dir, remove };
 }
@@ -72,14 +78,22 @@ export async function openGitEditor(file: string, root: string): Promise<void> {
   const editor = await editorCommand(root);
   if (editor === ':') return;
   const shell = await gitShell(root);
-  const child = shell
-    ? spawn(shell, ['-c', `${editor} "$@"`, editor, file], { stdio: 'inherit' })
-    : spawn(`${editor} "${file}"`, { stdio: 'inherit', shell: true });
-  await new Promise<void>((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', (code, signal) => {
-      if (code === 0) resolve();
-      else reject(new Error(`the editor (${editor}) exited with ${code ?? signal}`));
+  // Ctrl-C while the editor is open is the editor's to handle: like git,
+  // grimoire ignores SIGINT until the editor closes, so it lives on to clean up.
+  const ignore = () => {};
+  process.on('SIGINT', ignore);
+  try {
+    const child = shell
+      ? spawn(shell, ['-c', `${editor} "$@"`, editor, file], { stdio: 'inherit' })
+      : spawn(`${editor} "${file}"`, { stdio: 'inherit', shell: true });
+    await new Promise<void>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (code, signal) => {
+        if (code === 0) resolve();
+        else reject(new Error(`the editor (${editor}) exited with ${code ?? signal}`));
+      });
     });
-  });
+  } finally {
+    process.off('SIGINT', ignore);
+  }
 }

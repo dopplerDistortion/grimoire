@@ -1,5 +1,6 @@
 // The wiki on the tracker (spec §17): pages, their derived index and log, the
 // human edit, its guards, folds across two clones, and page quarantine.
+import { createHash } from 'node:crypto';
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import type { GitWorld } from '#harness';
@@ -402,6 +403,25 @@ describe('wiki folds across two clones', () => {
     }
 
     const tip = (await trackerTip(world.a))!;
+    // The set-aside side, as the fold committed it: named by the sha256 of its bytes, under the page's slug.
+    const conflicts = (await world.a.git(['ls-tree', '-r', '--name-only', tip, 'knowledge/wiki/conflicts/'])).split('\n');
+    expect(conflicts).toEqual([expect.stringMatching(/^knowledge\/wiki\/conflicts\/flaky-port-binding\/[0-9a-f]{64}\.md$/)]);
+    const side = await trackerFile(world.a, tip, conflicts[0]!);
+    expect(conflicts[0]).toBe(`knowledge/wiki/conflicts/flaky-port-binding/${createHash('sha256').update(side).digest('hex')}.md`);
+    expect(side).toBe(
+      [
+        '---',
+        'slug: "flaky-port-binding"',
+        'fields: ["body"]',
+        'sources: []',
+        `at: "${T1.toISOString()}"`,
+        '---',
+        'Bind to port 0.',
+        'Read the port back from the log.',
+        'Pass it to the client.',
+        '',
+      ].join('\n'),
+    );
     expect(await trackerFile(world.a, tip, 'knowledge/wiki/index.md')).toContain(
       `- [Flaky port binding](pages/flaky-port-binding.md) (failure, conflicted): ${PAGE.summary}`,
     );
@@ -513,6 +533,47 @@ describe('what a newer release wrote', () => {
   });
 });
 
+describe('what a newer release wrote, across two clones', () => {
+  test('a fold keeps page keys this release doesn’t know and an index a newer release generated, in either fold order', async ({
+    world,
+    grimoire,
+  }) => {
+    await commitToTracker(world.a, { [PAGE_FILE]: pageRecord({ body: LINES, sources: ['at-aaaaaa'], updated_at: T0 }) });
+    await bothClones(world);
+    const newerIndex = '---\ngenerated-by: "99.0.0"\n---\n# A newer index\n';
+    // Clone a runs a newer release: it writes a page key this release doesn't know, and its own index.
+    await commitToTracker(world.a, {
+      [PAGE_FILE]: pageRecord({ body: LINES, sources: ['at-aaaaaa'], updated_at: T1 }).replace('---\nBind', 'confidence: 0.8\n---\nBind'),
+      'knowledge/wiki/index.md': newerIndex,
+    });
+    // Clone b, on this release, edits the page's body.
+    const bob = terminal(agentContext(world.b));
+    const onB = await show(grimoire.core, bob);
+    await edit(grimoire.makeCore({ clock: () => T2 }), bob, { slug: PAGE.slug, base: onB.base, body: `${LINES}Close it after.\n` });
+    await fetchTrackerFrom(world.a, world.b);
+    await fetchTrackerFrom(world.b, world.a);
+
+    for (const [checkout, identity] of [
+      [world.a, world.a.identity],
+      [world.b, world.b.identity],
+    ] as const) {
+      const store = await openTracker(checkout.dir);
+      try {
+        await store.fold({ author: { ...identity }, actor: { kind: 'human', client: 'cli', nonce: 'fold' } });
+      } finally {
+        await store.close();
+      }
+    }
+
+    const [tipA, tipB] = [(await trackerTip(world.a))!, (await trackerTip(world.b))!];
+    expect(await world.a.git(['rev-parse', `${tipA}^{tree}`])).toBe(await world.b.git(['rev-parse', `${tipB}^{tree}`]));
+    const page = await trackerFile(world.a, tipA, PAGE_FILE);
+    expect(page).toContain(`\nconfidence: 0.8\n---\n${LINES}Close it after.\n`);
+    expect(await trackerFile(world.a, tipA, 'knowledge/wiki/index.md')).toBe(newerIndex);
+    expect(await trackerFile(world.a, tipA, 'knowledge/wiki/log.md')).toContain('bob@example.com updated');
+  });
+});
+
 describe('never rolled back', () => {
   test('rebasing, resetting or abandoning a code branch leaves every page unchanged', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
@@ -562,26 +623,49 @@ describe('page quarantine', () => {
     expect(shown.ok && [shown.result.quarantined, shown.result.base]).toEqual([false, created.base]);
     const markId = marked.ok ? marked.result.record! : '';
     const clearId = cleared.ok ? cleared.result.record! : '';
-    expect(await world.a.git(['diff-tree', '-r', '--name-only', before, markTip])).toBe(`knowledge/quarantine/${markId}.md`);
-    expect(await world.a.git(['diff-tree', '-r', '--name-only', markTip, clearTip])).toBe(`knowledge/quarantine/${clearId}.md`);
-    expect(await trackerFile(world.a, markTip, `knowledge/quarantine/${markId}.md`)).toBe(
+    // Ledger records (spec §18 record kinds: quarantine mark and clear), in the skill ledger's shape.
+    expect(await world.a.git(['diff-tree', '-r', '--name-only', before, markTip])).toBe(`knowledge/ledger/${markId}.md`);
+    expect(await world.a.git(['diff-tree', '-r', '--name-only', markTip, clearTip])).toBe(`knowledge/ledger/${clearId}.md`);
+    const mark = await trackerFile(world.a, markTip, `knowledge/ledger/${markId}.md`);
+    expect(mark).toBe(
       [
         '---',
-        'record: "quarantine-mark"',
+        'kind: "quarantine-mark"',
         'target: {"page":"flaky-port-binding"}',
         'clears: []',
         'reason: "cites a poisoned trace"',
-        'actor: {"person":"alice@example.com","kind":"human","client":"cli","nonce":"nonce-1"}',
+        `from: "${created.base}"`,
+        `to: "${created.base}"`,
+        `saw: ["${created.base}"]`,
         'basis: "human review"',
         'surface: "cli"',
-        `saw: "${created.base}"`,
+        'actor: {"person":"alice@example.com","kind":"human","client":"cli","nonce":"nonce-1"}',
+        'by: "alice@example.com"',
         `at: "${T0.toISOString()}"`,
         '---',
         '',
       ].join('\n'),
     );
-    expect(await trackerFile(world.a, clearTip, `knowledge/quarantine/${clearId}.md`)).toContain(`clears: ["${markId}"]`);
+    expect(createHash('sha256').update(mark).digest('hex')).toBe(markId);
+    expect(await trackerFile(world.a, clearTip, `knowledge/ledger/${clearId}.md`)).toContain(`kind: "quarantine-clear"\ntarget: {"page":"flaky-port-binding"}\nclears: ["${markId}"]\nreason: "trace was fine"\n`);
     expect(await world.a.git(['log', '-1', '--format=%s', markTip])).toBe('grimoire: quarantine');
+  });
+
+  test('the ledger’s other records, and a file not named by the sha256 of its bytes, quarantine nothing', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    await edit(core, terminal(ctx), { ...PAGE, base: null });
+    const skillDecision = '---\nkind: "accept"\nskill: "flaky-ports"\nproposal: "pr-1"\nfrom: null\nto: "abc"\nafter: []\nsaw: []\nbasis: "human review"\nsurface: "cli"\nactor: {}\nby: "alice@example.com"\nclone: ""\nat: "2026-01-01T00:00:00.000Z"\n---\n';
+    const forged = `---\nkind: "quarantine-mark"\ntarget: {"page":"${PAGE.slug}"}\nclears: []\nreason: "hand-written"\nfrom: null\nto: null\nsaw: []\nbasis: "human review"\nsurface: "cli"\nactor: {}\nby: "mallory@example.com"\nat: "2026-01-01T00:00:00.000Z"\n---\n`;
+    await commitToTracker(world.a, {
+      [`knowledge/ledger/${createHash('sha256').update(skillDecision).digest('hex')}.md`]: skillDecision,
+      [`knowledge/ledger/${'0'.repeat(64)}.md`]: forged,
+    });
+
+    const listed = await core.call('wiki_list', {}, terminal(ctx));
+    const marked = await core.call('quarantine', { page: PAGE.slug, reason: 'cites a poisoned trace' }, terminal(ctx));
+
+    expect(listed.ok && listed.result.pages.map((page) => page.quarantined)).toEqual([false]);
+    expect(marked).toMatchObject({ ok: true, result: { quarantined: true, changed: true } });
   });
 
   test('quarantine is human-only, needs a reason and an existing page', async ({ world, grimoire }) => {

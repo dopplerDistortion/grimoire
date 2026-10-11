@@ -1,28 +1,29 @@
-// `grimoire wiki list`, `wiki show <slug>` (human-read) and `wiki edit <slug>`
-// (human-only), spec §17 and §10. `wiki edit` is the one interactive verb: it
-// edits a temp copy of the page outside every worktree in the person's git
-// editor, checks the base (redo on the current text, replace with
-// confirmation, or discard), shows the diff, takes the slug as the typed
-// confirmation, and commits through the core's `wiki_edit`, which secret-scans
-// the text and applies the size limits. Prompts and the diff go to stderr; stdout
-// carries exactly one JSON object.
-import { randomBytes } from 'node:crypto';
+// `grimoire wiki edit <slug>` (human-only, spec §17 and §10): the one
+// interactive wiki verb. Its editor session edits a temp copy of the page
+// outside every worktree in the person's git editor, checks the base (redo on
+// the current text, replace with confirmation, or discard), shows the diff,
+// takes the slug as the typed confirmation, and commits through the core's
+// `wiki_edit`, which secret-scans the text and applies the size limits.
+// Prompts and the diff go to the terminal (stderr); the caller prints the one
+// JSON result on stdout. The CLI's dispatcher runs the session for `wiki edit`
+// at a terminal instead of calling `wiki_edit` itself:
+//
+//   wikiEditSession(slug, { core, ctx, terminal: terminalOn(io), edit: (file) => openGitEditor(file, ctx.repo.root) })
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createInterface } from 'node:readline/promises';
+import { createInterface } from 'node:readline';
 import type { CallContext, Core, ErrorBody, Outcome, WikiEditResult, WikiShowResult } from '../../core';
-import { findHostRoot, readCheckoutConfig, readPerson } from '../../core/host';
 import { checkSurface } from '../../core/op';
 import { GrimoireError } from '../../errors';
 import { runGit } from '../../git/run';
-import { editWorkspace, openGitEditor } from './editor';
+import { editWorkspace, type EditWorkspace } from './editor';
 
 /** Where the session talks to the person. */
 export interface Terminal {
   /** Shows text (never on stdout, which carries the one JSON result). */
   say(text: string): void;
-  /** Asks a question and returns the answer line. */
-  ask(question: string): Promise<string>;
+  /** Asks a question and returns the answer line, or null when the person closed the prompt (Ctrl-C, Ctrl-D). */
+  ask(question: string): Promise<string | null>;
 }
 
 export interface WikiEditDeps {
@@ -31,6 +32,8 @@ export interface WikiEditDeps {
   readonly terminal: Terminal;
   /** Opens the person's editor on `file`; resolves when they close it, rejects when the editor fails. */
   readonly edit: (file: string) => Promise<void>;
+  /** Makes the temp directory the page is edited in (default: `editWorkspace`, outside every worktree). */
+  readonly workspace?: (root: string) => Promise<EditWorkspace>;
 }
 
 /** What `wiki edit` ends with: the core's result, or a draft the person discarded. */
@@ -157,7 +160,12 @@ export async function wikiEditSession(slug: string, deps: WikiEditDeps): Promise
   let loaded = await load();
   if (!loaded.ok) return loaded;
   let page = loaded.result;
-  const workspace = await editWorkspace(ctx.repo.root);
+  let workspace: EditWorkspace;
+  try {
+    workspace = await (deps.workspace ?? editWorkspace)(ctx.repo.root);
+  } catch (error) {
+    return { ok: false, error: errorOf(error) };
+  }
   try {
     const file = path.join(workspace.dir, `${slug}.md`);
     let opening = compose(slug, page, null);
@@ -205,7 +213,7 @@ export async function wikiEditSession(slug: string, deps: WikiEditDeps): Promise
         if (!loaded.ok) return loaded;
         const current = loaded.result;
         terminal.say(`The page ${slug} changed since you opened it.`);
-        const choice = await choose(terminal, '[r] redo your edit on the current text, [p] replace the page with your draft, or [d] discard it? ', ['r', 'p', 'd']);
+        const choice = await choose(terminal, '[r] redo your edit on the current text, [p] replace the page with your draft, or [d] discard it? ', { r: 'redo', p: 'replace', d: 'discard' }, 'd');
         if (choice === 'd') return discarded(slug);
         if (choice === 'r') {
           page = current;
@@ -219,93 +227,76 @@ export async function wikiEditSession(slug: string, deps: WikiEditDeps): Promise
       }
     }
   } finally {
-    await workspace.remove();
+    // Best effort: the outcome stands (a commit may have landed), whatever the cleanup meets.
+    await workspace.remove().catch((error: unknown) => {
+      const why = error instanceof Error ? error.message : String(error);
+      terminal.say(`Grimoire couldn't remove the temp copy of the page at ${workspace.dir} (${why}); delete it yourself.`);
+    });
   }
 }
 
 /** The typed confirmation: the slug, exactly. */
 async function confirmed(terminal: Terminal, slug: string, what: string): Promise<boolean> {
   const answer = await terminal.ask(`Type "${slug}" ${what} (anything else discards it): `);
-  if (answer.trim() === slug) return true;
+  if (answer?.trim() === slug) return true;
   terminal.say('Discarded: nothing was committed.');
   return false;
 }
 
-async function choose<C extends string>(terminal: Terminal, question: string, choices: readonly C[]): Promise<C> {
+/**
+ * Asks until one of `choices` is answered, by its letter or its whole word
+ * (`r` or `redo`); a closed prompt (Ctrl-C, Ctrl-D) answers `closed`.
+ */
+async function choose<C extends string>(terminal: Terminal, question: string, choices: Readonly<Record<C, string>>, closed: NoInfer<C>): Promise<C> {
   for (;;) {
-    const answer = (await terminal.ask(question)).trim().toLowerCase();
-    const choice = choices.find((c) => c === answer || answer.startsWith(c));
+    const line = await terminal.ask(question);
+    if (line === null) return closed;
+    const answer = line.trim().toLowerCase();
+    const choice = (Object.keys(choices) as C[]).find((letter) => answer === letter || answer === choices[letter]);
     if (choice) return choice;
   }
 }
 
 async function again(terminal: Terminal): Promise<boolean> {
-  return (await choose(terminal, '[e] edit the draft again, or [d] discard it? ', ['e', 'd'])) === 'e';
+  return (await choose(terminal, '[e] edit the draft again, or [d] discard it? ', { e: 'edit', d: 'discard' }, 'd')) === 'e';
 }
 
 // ---------------------------------------------------------------------------
-// The verb
+// The terminal
 
-/** Agent marker variables (spec §7): any of them set makes a CLI caller an agent. */
-const AGENT_MARKERS = ['AI_AGENT', 'CLAUDE_CODE_CHILD_SESSION', 'CODEX_CI', 'CODEX_THREAD_ID'] as const;
-
-async function cliContext(): Promise<CallContext> {
-  const root = await findHostRoot(process.cwd());
-  const [config, person] = await Promise.all([readCheckoutConfig(root), readPerson(root)]);
-  return {
-    surface: 'cli',
-    repo: { root, pin: config?.pin ?? null, installFormat: config?.installFormat ?? null },
-    person,
-    client: null,
-    evidence: { agentMarkers: AGENT_MARKERS.filter((name) => (process.env[name] ?? '') !== '') },
-    tty: process.stdin.isTTY === true && process.stdout.isTTY === true,
-    nonce: randomBytes(8).toString('hex'),
-  };
+export interface TerminalIo {
+  readonly stdin: NodeJS.ReadableStream;
+  readonly stderr: NodeJS.WritableStream;
+  /** Line editing, with Ctrl-C read as a key (default: when both streams are TTYs). */
+  readonly terminal?: boolean;
 }
 
-/** Prompts on stderr, one line read from stdin per question. */
-const consoleTerminal: Terminal = {
-  say: (text) => void process.stderr.write(text.endsWith('\n') ? text : `${text}\n`),
-  ask: async (question) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    try {
-      return await rl.question(question);
-    } finally {
-      rl.close();
-    }
-  },
-};
-
-/** `grimoire wiki <list | show <slug> | edit <slug>>`: prints one JSON object; returns the exit code. */
-export async function runWiki(argv: readonly string[]): Promise<number> {
-  const [verb, slug, ...rest] = argv;
-  const usage = verb === 'list' ? slug !== undefined : verb === 'show' || verb === 'edit' ? slug === undefined || rest.length > 0 : true;
-  if (usage) {
-    process.stderr.write('usage: grimoire wiki list | wiki show <slug> | wiki edit <slug>\n');
-    return 2;
-  }
-  const { createCore, spawnedAutoSync } = await import('../../core');
-  // A CLI write hands its automatic sync to a detached `grimoire sync --background` (spec §4);
-  // until that child finishes (or if it can't run), the sync-pending marker stands.
-  const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [process.argv[1] ?? '', 'sync', '--background'] }) });
-  let outcome: Outcome<unknown>;
-  try {
-    const ctx = await cliContext();
-    outcome =
-      verb === 'list'
-        ? await core.call('wiki_list', {}, ctx)
-        : verb === 'show'
-          ? await core.call('wiki_show', { slug }, ctx)
-          : await wikiEditSession(slug!, { core, ctx, terminal: consoleTerminal, edit: (file) => openGitEditor(file, ctx.repo.root) });
-  } catch (error) {
-    // A GrimoireError before the core (NO_REPO) is an answer; anything else is a bug (ADR 0012).
-    outcome =
-      error instanceof GrimoireError
-        ? { ok: false, error: error.toBody() }
-        : { ok: false, error: { code: 'INTERNAL', message: `grimoire failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`, retryable: false, details: {} } };
-  } finally {
-    await core.close();
-  }
-  process.stdout.write(`${JSON.stringify(outcome.ok ? outcome.result : { error: outcome.error })}\n`);
-  return outcome.ok ? 0 : 1;
+/**
+ * The person's terminal: text and prompts on stderr, one line read from stdin
+ * per question. Each question opens its own reader and closes it on the
+ * answer, so stdin is the editor's alone while it runs. Ctrl-C, or the input
+ * closing (Ctrl-D), answers null rather than leaving the question pending.
+ */
+export function terminalOn(io: TerminalIo): Terminal {
+  const tty = io.terminal ?? ((io.stdin as { isTTY?: boolean }).isTTY === true && (io.stderr as { isTTY?: boolean }).isTTY === true);
+  return {
+    say: (text) => void io.stderr.write(text.endsWith('\n') ? text : `${text}\n`),
+    ask: (question) =>
+      new Promise((resolve) => {
+        const rl = createInterface({ input: io.stdin, output: io.stderr, terminal: tty });
+        let answered = false;
+        const finish = (answer: string | null) => {
+          if (answered) return;
+          answered = true;
+          rl.close();
+          resolve(answer);
+        };
+        rl.once('SIGINT', () => {
+          io.stderr.write('\n');
+          finish(null);
+        });
+        rl.once('close', () => finish(null));
+        rl.question(question, (answer) => finish(answer));
+      }),
+  };
 }

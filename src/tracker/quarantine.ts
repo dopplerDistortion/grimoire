@@ -1,17 +1,21 @@
-// Quarantine records (spec §3 Layout `knowledge/quarantine/`, §18 ledger record
-// kinds: quarantine mark and clear). A human's mark keeps a pattern page (or a
-// trace) out of chores and evidence without editing or purging it; a clear
-// names the marks it lifts. Each record is write-once and content-addressed:
-// `knowledge/quarantine/<sha256>.md`, the sha256 of its own bytes. Records
-// only accumulate, so two clones' records fold by union, and whether a target
-// is quarantined (a mark no clear names) is derived on read, never stored.
+// Quarantine records (spec §18, The skill ledger: record kinds include
+// quarantine mark and clear). A human's mark keeps a pattern page (or a trace)
+// out of chores and evidence without editing or purging it; a clear names the
+// marks it lifts. Both are ledger records: write-once and content-addressed at
+// `knowledge/ledger/<sha256>.md`, the sha256 of their own bytes, in the
+// ledger's line format and key names (`kind`, `from`/`to`, `saw`, `basis`,
+// `surface`, `actor`, `by`, `at`). The ledger's other kinds (skill decisions
+// and changes) share the directory and are read as nothing here. Records only
+// accumulate, so two clones' ledgers fold by union, and whether a target is
+// quarantined (a mark no clear names) is derived on read, never stored.
 import { createHash } from 'node:crypto';
 import { TREE_MODE } from '../git/objects';
 import { formatLine, lineValue, parseLines } from './lines';
 import type { FileEdit, ObjectSource } from './objects';
 import { sortedUnique } from './record';
 
-export const QUARANTINE_DIR = 'knowledge/quarantine';
+/** The ledger's directory (the skill ledger's records live here too). */
+const LEDGER = 'knowledge/ledger';
 
 export type QuarantineAction = 'quarantine-mark' | 'quarantine-clear';
 
@@ -19,35 +23,45 @@ export interface QuarantineRecord {
   /** The record's name: the sha256 of its bytes. */
   readonly id: string;
   /** The ledger record kind. */
-  readonly record: QuarantineAction;
+  readonly kind: QuarantineAction;
   /** What it marks or clears: `{page: <slug>}` (a trace's target comes with trace quarantine). */
   readonly target: Readonly<Record<string, string>>;
   /** A clear's lifted marks, sorted (empty for a mark). */
   readonly clears: readonly string[];
   readonly reason: string;
-  /** The recorded actor: the person plus how they made it. */
-  readonly actor: Readonly<Record<string, unknown>>;
+  /** The target's version before and after: a quarantine never changes it, so both are the version the actor saw. */
+  readonly from: string | null;
+  readonly to: string | null;
+  /** The versions of the target the actor was shown. */
+  readonly saw: readonly string[];
   /** Why the actor may: `human review` in v1. */
   readonly basis: string;
   /** The surface it was made on: `cli` or `dashboard`. */
   readonly surface: string;
-  /** The version of the target the actor saw (a page's version), or null. */
-  readonly saw: string | null;
+  /** The recorded actor: the person plus how they made it. */
+  readonly actor: Readonly<Record<string, unknown>>;
+  /** The person (an email). */
+  readonly by: string;
   readonly at: string;
 }
 
 export type NewQuarantineRecord = Omit<QuarantineRecord, 'id' | 'at'>;
 
+const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+
 function serialize(record: Omit<QuarantineRecord, 'id'>): Buffer {
   const lines = [
-    formatLine('record', record.record),
+    formatLine('kind', record.kind),
     formatLine('target', record.target),
     formatLine('clears', sortedUnique(record.clears)),
     formatLine('reason', record.reason),
-    formatLine('actor', record.actor),
+    formatLine('from', record.from),
+    formatLine('to', record.to),
+    formatLine('saw', [...record.saw]),
     formatLine('basis', record.basis),
     formatLine('surface', record.surface),
-    formatLine('saw', record.saw),
+    formatLine('actor', record.actor),
+    formatLine('by', record.by),
     formatLine('at', record.at),
   ];
   return Buffer.from(`---\n${lines.join('\n')}\n---\n`, 'utf8');
@@ -56,28 +70,35 @@ function serialize(record: Omit<QuarantineRecord, 'id'>): Buffer {
 const object = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 const str = (value: unknown) => (typeof value === 'string' ? value : '');
+const strOrNull = (value: unknown) => (typeof value === 'string' && value !== '' ? value : null);
+const strings = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []);
 
+/**
+ * A quarantine record, or null for anything else in the ledger: another kind,
+ * or a file whose bytes don't hash to its name (not grimoire's write-once record).
+ */
 function parse(id: string, bytes: Buffer): QuarantineRecord | null {
+  if (sha256(bytes) !== id) return null;
   const text = bytes.toString('utf8');
   const close = text.startsWith('---\n') ? text.indexOf('\n---\n', 3) : -1;
   const values = new Map<string, unknown>();
   for (const { key, raw } of close < 0 ? [] : parseLines(text.slice(4, close))) values.set(key, lineValue(raw));
-  const record = values.get('record');
-  // A record kind this release doesn't know is kept on the tracker, but read as nothing.
-  if (record !== 'quarantine-mark' && record !== 'quarantine-clear') return null;
+  const kind = values.get('kind');
+  if (kind !== 'quarantine-mark' && kind !== 'quarantine-clear') return null;
   const target = Object.fromEntries(Object.entries(object(values.get('target'))).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
-  const clears = values.get('clears');
-  const saw = values.get('saw');
   return {
     id,
-    record,
+    kind,
     target,
-    clears: sortedUnique(Array.isArray(clears) ? clears.filter((c): c is string => typeof c === 'string') : []),
+    clears: sortedUnique(strings(values.get('clears'))),
     reason: str(values.get('reason')),
-    actor: object(values.get('actor')),
+    from: strOrNull(values.get('from')),
+    to: strOrNull(values.get('to')),
+    saw: strings(values.get('saw')),
     basis: str(values.get('basis')),
     surface: str(values.get('surface')),
-    saw: typeof saw === 'string' ? saw : null,
+    actor: object(values.get('actor')),
+    by: str(values.get('by')),
     at: str(values.get('at')),
   };
 }
@@ -90,7 +111,7 @@ export interface QuarantineView {
   records(): Promise<readonly QuarantineRecord[]>;
 }
 
-/** The quarantine records of one tracker tree, read once on first use. */
+/** The quarantine records in one tracker tree's ledger, read once on first use. */
 export class QuarantineReader implements QuarantineView {
   private loaded: Promise<readonly QuarantineRecord[]> | null = null;
 
@@ -101,7 +122,7 @@ export class QuarantineReader implements QuarantineView {
 
   records(): Promise<readonly QuarantineRecord[]> {
     return (this.loaded ??= (async () => {
-      const files = (await this.source.dirAt(this.rootTree, QUARANTINE_DIR)).filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'));
+      const files = (await this.source.dirAt(this.rootTree, LEDGER)).filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md'));
       const records = await Promise.all(files.map(async (e) => parse(e.name.slice(0, -3), await this.source.blob(e.oid))));
       return records.filter((r): r is QuarantineRecord => r !== null).sort(byAt);
     })());
@@ -129,12 +150,12 @@ export class QuarantineDraftState implements QuarantineDraft {
   add(record: NewQuarantineRecord): QuarantineRecord {
     const at = this.now.toISOString();
     const bytes = serialize({ ...record, at });
-    const added: QuarantineRecord = { ...record, clears: sortedUnique(record.clears), id: createHash('sha256').update(bytes).digest('hex'), at };
+    const added: QuarantineRecord = { ...record, clears: sortedUnique(record.clears), id: sha256(bytes), at };
     this.added.push({ bytes, record: added });
     return added;
   }
 
   fileEdits(): Map<string, FileEdit> {
-    return new Map(this.added.map(({ bytes, record }) => [`${QUARANTINE_DIR}/${record.id}.md`, bytes]));
+    return new Map(this.added.map(({ bytes, record }) => [`${LEDGER}/${record.id}.md`, bytes]));
   }
 }

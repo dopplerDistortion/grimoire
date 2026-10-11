@@ -86,8 +86,8 @@ export function checkPageWrite(
 
 /** The marks still in force: those no clear lifts. */
 function activeMarks(records: readonly QuarantineRecord[]): QuarantineRecord[] {
-  const cleared = new Set(records.flatMap((record) => (record.record === 'quarantine-clear' ? record.clears : [])));
-  return records.filter((record) => record.record === 'quarantine-mark' && !cleared.has(record.id));
+  const cleared = new Set(records.flatMap((record) => (record.kind === 'quarantine-clear' ? record.clears : [])));
+  return records.filter((record) => record.kind === 'quarantine-mark' && !cleared.has(record.id));
 }
 
 /** The quarantined pages, each with the marks that keep it so, oldest first. */
