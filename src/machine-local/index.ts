@@ -31,4 +31,4 @@ export {
   type MachineMarker,
 } from './marker';
 export { Caches, type CacheOptions } from './caches';
-export { cloneId, defaultDashboardPort, START_LOCK, type StartLockData } from './clone';
+export { cloneId, cloneTag, defaultDashboardPort, START_LOCK, type StartLockData } from './clone';

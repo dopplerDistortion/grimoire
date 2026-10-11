@@ -6,6 +6,11 @@
 // The walk takes a whole subtree wherever only one side changed it, so its cost
 // follows the size of the concurrent change, not of the tracker. Where both
 // sides changed a path, the rule for that path's kind of record decides.
+//
+// Skill ledger records and skill versions (`knowledge/ledger/`,
+// `knowledge/skill-versions/`) need no rule here: each is write-once and named
+// by the sha256 of its bytes, so two clones' files fold to their union. Skill
+// forks are resolved on read, from the ledger alone (src/knowledge/derive.ts).
 import { BLOB_MODE, TREE_MODE, type TreeEntry } from '../git/objects';
 import { conflictName } from './conflict';
 import { deleteConflict, foldEnd, foldExtra, foldIssue, foldMarker, foldOutcome, foldSession, foldSettings } from './fold-records';

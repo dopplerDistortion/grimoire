@@ -10,6 +10,7 @@ import type { UpdateResult } from './update';
 import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, ReopenResult } from './human-ops';
 import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
+import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult } from './skills';
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
 import type { SyncResult, SyncStatusResult } from './sync';
@@ -122,6 +123,10 @@ export interface OpResults {
   resolve: ResolveResult;
   outcome_set: OutcomeSetResult;
   settings_set: SettingsSetResult;
+  skill_list: SkillListResult;
+  skill_read: SkillReadResult;
+  skill_edit: SkillEditResult;
+  skill_show: SkillShowResult;
   wiki_list: WikiListResult;
   wiki_show: WikiShowResult;
   wiki_edit: WikiEditResult;

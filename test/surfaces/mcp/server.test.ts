@@ -302,7 +302,19 @@ describe('gating', () => {
       // An agent op the registry keeps off MCP (the CLI and dashboard offer it).
       const offMcp = await served.client.callTool({ name: 'settings_get', arguments: {} });
 
-      expect(tools.map((tool) => tool.name)).toEqual(['show', 'list', 'labels', 'create', 'update', 'comment', 'claim', 'release', 'close']);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'show',
+        'list',
+        'labels',
+        'skill_list',
+        'skill_read',
+        'create',
+        'update',
+        'comment',
+        'claim',
+        'release',
+        'close',
+      ]);
       expect(humanOnly.structuredContent).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });
       expect(humanRead.structuredContent).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });
       for (const result of [internal, unknown, offMcp]) {

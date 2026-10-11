@@ -53,8 +53,14 @@ describe('store settings', () => {
         },
       },
     });
-    // The store settings other parts of grimoire own (the excerpt mode, delivery, the loop pause, thresholds) come with them.
-    expect(Object.keys(shown.ok ? shown.result.store : {}).sort()).toEqual(['auto-sync', 'link_base']);
+    // The store settings other parts of grimoire own (the excerpt mode, the loop pause, thresholds) come with them.
+    expect(Object.keys(shown.ok ? shown.result.store : {}).sort()).toEqual([
+      'auto-sync',
+      'link_base',
+      'skills.delivery',
+      'skills.description_max',
+      'skills.max_active',
+    ]);
   });
 
   test('settings_set commits one line per key holding the value, when and by whom; show’s link follows it', async ({

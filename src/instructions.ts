@@ -26,6 +26,7 @@ const DETAILS = [
   "- When the user names an issue your person already holds, take it over with the `attempt` handle from ALREADY_CLAIMED's details; you may then `update`, `comment` or `close` it, or `release` it with `abandoned: true`.",
   '- A debrief is {asked, tried, failed, worked, next}: report only what you saw, and write "none" where there is nothing.',
   '- Pass an `idempotency_key` to `create`, `comment` and `claim` so a retry never duplicates; `close` and `release` replay safely on their own.',
+  "- Evolved skills are procedures learned from past issues: `skill_list` names them, and `skill_read` gives one's text (a stub named `grimoire-<name>` points at the same skill). Follow one unless the repo's own instructions or hand-written skills say otherwise.",
   '- A result with `truncated: true` was cut to fit: pass its `cursor` back for the rest.',
   '- Read and write issue state only through grimoire. The only `.grimoire/` file you are ever pointed at is an evolved skill\'s copy, through its stub.',
   'When things go wrong:',
