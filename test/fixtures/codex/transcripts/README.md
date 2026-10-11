@@ -30,3 +30,13 @@ The repo had grimoire's SessionStart hook block, run with `--dangerously-bypass-
 | `compaction/` | An auto-compaction mid-turn, local because the provider isn't OpenAI. It was triggered by the stand-in reporting 50,000 tokens against `model_auto_compact_token_limit = 2000`. In order: the summarizer's reply as an assistant `response_item`, then `compacted` (`message`, `replacement_history`, …), `world_state`, `turn_context`, `thread_settings_applied`, and `item_completed` `ContextCompaction`. |
 | `mcp-results/` | What the model saw for each MCP result shape (one turn, the wire traffic is in `../mcp/tools-call/`): `which` (only `structuredContent`), `big` (24,482 bytes, whole), `boom` (a JSON-RPC error as two content items), two parallel `echo`s. Every output starts with `Wall time: … seconds\nOutput:`. |
 | `archived-zstd/archived_sessions/` | Scenario A's session after `thread/archive` (moved, same name), back-dated 9 days and compressed by the app-server's `rollout/compress` RPC. It decodes to exactly the `paginated/` file. |
+
+## Spike F (GOK-131)
+
+Captured under a scripted model. Each folder's README has its run and
+provenance.
+
+| Folder | What it shows |
+| -- | -- |
+| `skill-stub-read/` | B2 and P2: one app-server thread, three turns. Turn 1's skills listing lacks the stubs that the SessionStart hook and a turn-1 command wrote; turn 2 opens with a new full `<skills_instructions>` listing them (plus a `world_state` `host_skills` update); turn 2 reads the stub, then the copy (`CommandExecution` `parsed_cmd` `{type: "read", path}`); an in-place description edit is never re-listed. |
+| `chore-role/` | P5: a root thread spawning the `grimoire-chores` role (`.codex/agents/grimoire-chores.toml`) with `fork_context: false`, and the child's rollout: `agent_role: "grimoire-chores"` in `session_meta`, the role's developer instructions, no skills listing, `exec_command` refused, `apply_patch` still working, `chore_start` over MCP. |

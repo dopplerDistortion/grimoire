@@ -26,3 +26,9 @@ directory outside any git repo.
 | `runner-stdin-bundle.jsonl` | The bundle on stdin as the whole prompt, with no prompt argument. The model answered with the schema-shaped final message only: `thread.started`, `turn.started`, `item.completed` (`agent_message`), `turn.completed`. `-o` received the same text and the exit code was 0. |
 | `read-only-shell-blocked.jsonl` | The model asked for `Get-Content input.txt`, then `Set-Content written.txt x`. Without `prefer_mxc` both were refused before running ("blocked by policy" on stderr), so no `command_execution` item appears. The turn still completed. |
 | `read-only-prefer-mxc.jsonl` | The same with `--enable prefer_mxc`. It starts with a warning `item.completed` of type `error` (an under-development feature). The read ran (`exit_code: 0`, the file's text), and the write failed with "Access to the path … is denied" (`exit_code: 1`). |
+
+## Spike F (GOK-131), items P7 and C4
+
+`runner/`: the same invocation with a strict `{verdict, pairs}` schema, as
+success, with the shell tool off, a model API error, and a real not-logged-in
+failure with no stand-in. See `runner/README.md`.
