@@ -162,12 +162,17 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   return captures;
 }
 
-/** The bound contexts, and the calling context when its ending call binds. */
+/**
+ * The bound contexts, and the calling context when its ending call binds. A
+ * person's own writes at a terminal or in the dashboard name the handle too,
+ * but a person is no agent session's context: nothing of theirs is cut.
+ */
 async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
   const { call } = input;
   const rows: SeenHereRow[] = input.attempt ? await seenHereRows(input.store, { handle: input.attempt.id }).catch(() => []) : [];
   const bindings = input.attempt ? await readBindings(input.repoRoot, input.attempt, [input.view.tip]).catch(() => []) : [];
-  const targets: Target[] = boundContexts(bindings, rows).map((context) => {
+  const agents = boundContexts(bindings, rows).filter((context) => context.bindings.some((binding) => binding.actor.kind !== 'human'));
+  const targets: Target[] = agents.map((context) => {
     const latest = context.bindings.at(-1)!.actor;
     return {
       key: context.key,
@@ -184,7 +189,7 @@ async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
       calling: false,
     };
   });
-  if (!call.binds) return targets;
+  if (!call.binds || call.actor.kind === 'human') return targets;
 
   // The ending call's own binding write isn't committed yet: the cut looks for it from what this process saw.
   const actor = call.actor;

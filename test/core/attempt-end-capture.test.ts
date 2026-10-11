@@ -524,7 +524,7 @@ describe('the other attempt-ending ops', () => {
     ]);
   });
 
-  test('a reassign cuts the bound contexts, and its own binding context, a person’s terminal, gets a record with no transcript', async ({
+  test('a reassign cuts the bound agent contexts; the person reassigning is no agent context, so gets no record', async ({
     world,
     grimoire,
     capture,
@@ -539,13 +539,40 @@ describe('the other attempt-ending ops', () => {
 
     expect(reassigned).toMatchObject({ ok: true, result: { ended: attempt } });
     const records = await sessionRecords(world.a, id, attempt);
-    expect(records.map((r) => [r.fields.client, r.fields.context, r.fields.excerpt, r.fields.facts]).sort()).toEqual([
-      ['claude-code', 'main', 'cut', 'scanned'],
-      ['cli', null, 'no_transcript', 'events_only'],
-    ]);
+    expect(records.map((r) => [r.fields.client, r.fields.context, r.fields.excerpt, r.fields.facts])).toEqual([['claude-code', 'main', 'cut', 'scanned']]);
     // The attempt it opened has no bound context yet.
     const opened = (reassigned as { ok: true; result: { attempt: string } }).result.attempt;
     expect(await sessionRecords(world.a, id, opened)).toEqual([]);
+  });
+});
+
+describe('an unclaimed close', () => {
+  test('cuts its own context into the instant attempt it opens and seals in one commit', async ({ world, grimoire, capture }) => {
+    const core = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Done without a claim');
+    const before = (await trackerTip(world.a))!;
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    // The Agent launch stands in for the close call: the attempt opens and ends with it.
+    const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, claudeCall(grimoire.ctx, MAIN_CALL));
+
+    expect(closed).toMatchObject({ ok: true, result: { ended: 'done', outcome: 'pass' } });
+    expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
+    const attempt = (closed as { ok: true; result: { attempt: string } }).result.attempt;
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.map((r) => [r.fields.session, r.fields.context, r.fields.excerpt, r.fields.excerpt_notes])).toEqual([[CLAUDE_SESSION, 'main', 'cut', []]]);
+    expect(records[0]!.body).toContain('tool Agent');
+  });
+
+  test('by a person at their terminal leaves no session record: a person is no agent context', async ({ world, grimoire, capture }) => {
+    const core = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Done by hand');
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    const closed = await core.call('close', { id, reason: 'done' }, { ...grimoire.ctx, surface: 'cli', client: null, evidence: {}, tty: true, nonce: 'nonce-human' });
+
+    expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+    expect(await sessionRecords(world.a, id, (closed as { ok: true; result: { attempt: string } }).result.attempt)).toEqual([]);
   });
 });
 
