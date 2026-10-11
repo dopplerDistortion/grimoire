@@ -47,12 +47,17 @@ async function claudeConfigDir(...sessions: { folder: string; session: string }[
   return dir;
 }
 
-/** A Claude Code MCP call from `session`'s main line (or a subagent), with the hook's hint matching `_meta`. */
+/** A Claude Code MCP call from the subagent session's main line (or its subagent), with the hook's hint matching `_meta`. */
 function claudeCall(base: CallContext, toolUseId: string, agentId?: string): CallContext {
+  return claudeCallIn(base, CLAUDE_SESSION, toolUseId, agentId === undefined ? undefined : { id: agentId, type: 'general-purpose' });
+}
+
+/** A Claude Code MCP call from `session`'s main line, or one of its subagents, with the hook's hint matching `_meta`. */
+function claudeCallIn(base: CallContext, session: string, toolUseId: string, agent?: { id: string; type?: string }): CallContext {
   const hint = {
-    session_id: CLAUDE_SESSION,
+    session_id: session,
     tool_use_id: toolUseId,
-    ...(agentId !== undefined ? { agent_id: agentId, agent_type: 'general-purpose' } : {}),
+    ...(agent !== undefined ? { agent_id: agent.id, ...(agent.type !== undefined ? { agent_type: agent.type } : {}) } : {}),
   };
   return {
     ...base,
@@ -130,6 +135,7 @@ const test = coreTest.extend('capture', async ({ world, grimoire }, { onCleanup 
   const configDir = await claudeConfigDir(
     { folder: CLAUDE_TX, session: CLAUDE_SESSION },
     { folder: 'claude-code/transcripts/plain', session: '0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5' },
+    { folder: 'claude-code/transcripts/chore-fork', session: CHORE_SESSION },
   );
   onCleanup(() => removeDir(configDir));
   let now = new Date('2026-10-11T03:27:17.500Z');
@@ -448,14 +454,23 @@ const CODEX_CHILD = '01a12947-16a2-7152-be00-4e4b1e12a4d8';
 const CODEX_TX = 'codex/transcripts/subagent';
 
 /** A Codex MCP call from `thread` of the root session, as call `callId` (Codex runs no grimoire hook: `_meta` only). */
-function codexCall(base: CallContext, thread: string, callId: string): CallContext {
+function codexCall(base: CallContext, thread: string, callId: string, session = CODEX_ROOT): CallContext {
   return {
     ...base,
     client: { name: 'codex-mcp-client', version: '0.162.1' },
     evidence: {},
-    mcp: { era: 'legacy', hint: null, meta: { sessionId: CODEX_ROOT, threadId: thread, callId } },
+    mcp: { era: 'legacy', hint: null, meta: { sessionId: session, threadId: thread, callId } },
     nonce: 'nonce-codex',
   };
+}
+
+/** A Codex home whose `sessions/2026/10/11/` holds the named rollouts of a fixture folder. */
+async function codexHomeWith(folder: string, ...rollouts: string[]): Promise<{ home: string; day: string }> {
+  const home = await makeTempDir('grimoire-codex-home-');
+  const day = path.join(home, 'sessions', '2026', '10', '11');
+  await mkdir(day, { recursive: true });
+  for (const name of rollouts) await cp(fixturePath(`${folder}/${name}`), path.join(day, name));
+  return { home, day };
 }
 
 describe('Codex', () => {
@@ -501,6 +516,104 @@ describe('Codex', () => {
     } finally {
       await removeDir(codexHome);
     }
+  });
+});
+
+/** Spike C's Claude Code run: the main line ran the grimoire-chores skill, forked into a grimoire-chores subagent. */
+const CHORE_SESSION = 'c2eb58d9-ccb7-4978-bc0e-35f624a5266b';
+const CHORE_SUBAGENT = 'a523fef26307d8241';
+/** The main line's `Skill` call, and the chores subagent's `ToolSearch`. */
+const CHORE_SKILL_CALL = 'toolu_01P6XhbCSzNqUtZ7B5KhAP3x';
+const CHORE_SUBAGENT_CALL = 'toolu_01UQtAtS3Z9HVgYgWDEF4TFq';
+
+/** Spike F's Codex run: the root thread spawned the grimoire-chores role, whose thread called chore_start. */
+const CHORE_ROOT = '01a12968-6f96-78e2-aef8-4da11543207e';
+const CHORE_THREAD = '01a12968-71aa-7fe1-a70d-7745aa7feacd';
+const CHORE_TX = 'codex/transcripts/chore-role';
+
+describe('chore contexts', () => {
+  test('a Codex chore thread that bound with the handle is excluded from excerpts and fact scans: it gets no session record', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const codex = await codexHomeWith(
+      CHORE_TX,
+      `rollout-2026-10-11T08-21-12-${CHORE_ROOT}.jsonl`,
+      `rollout-2026-10-11T08-21-13-${CHORE_THREAD}.jsonl`,
+    );
+    try {
+      const core = capture.makeCore({ capture: { codexHome: codex.home } });
+      capture.at('2026-10-11T05:21:12.900Z');
+      const id = await created(core, grimoire.ctx, 'Chores');
+      // The root's first call stands in for its claim; the chore thread's chore_start for an update naming the handle.
+      const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, CHORE_ROOT, 'call_1_0', CHORE_ROOT));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const { attempt } = claim.result;
+      capture.at('2026-10-11T05:21:13.450Z');
+      expect(await core.call('update', { id, labels_add: ['chore'], attempt }, codexCall(grimoire.ctx, CHORE_THREAD, 'call_8_0', CHORE_ROOT))).toMatchObject({
+        ok: true,
+      });
+      capture.at('2026-10-11T05:21:13.600Z');
+
+      const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, codexCall(grimoire.ctx, CHORE_ROOT, 'call_close', CHORE_ROOT));
+
+      expect(closed).toMatchObject({ ok: true });
+      const records = await sessionRecords(world.a, id, attempt);
+      expect(records.map((r) => [r.fields.context, r.fields.excerpt])).toEqual([[CHORE_ROOT, 'cut']]);
+      // Nothing of the chore thread's own steps (its apply_patch, its chore_start) is in the trace.
+      expect(records[0]!.body).not.toMatch(/^tool (?:apply_patch|mcp__grimoire__chore_start)$/m);
+      expect((await captureOf(world.a, attempt)).contexts.map((c) => c.context)).toEqual([CHORE_ROOT]);
+    } finally {
+      await removeDir(codex.home);
+    }
+  });
+});
+
+describe('chore subagents', () => {
+  test('a Claude Code grimoire-chores subagent that bound with the handle gets no session record: its own transcript names its type', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const core = capture.makeCore();
+    capture.at('2026-10-11T03:23:41.500Z');
+    const id = await created(core, grimoire.ctx, 'Claude chores');
+    const claim = await core.call('claim', { id }, claudeCallIn(grimoire.ctx, CHORE_SESSION, CHORE_SKILL_CALL));
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    const { attempt } = claim.result;
+    capture.at('2026-10-11T03:23:43.450Z');
+    // The hint names no agent type: only the subagent's own .meta.json says it is a chores subagent.
+    const fromChores = claudeCallIn(grimoire.ctx, CHORE_SESSION, CHORE_SUBAGENT_CALL, { id: CHORE_SUBAGENT });
+    expect(await core.call('comment', { id, body: 'chore', attempt }, fromChores)).toMatchObject({ ok: true });
+    capture.at('2026-10-11T03:23:52.000Z');
+
+    await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCallIn(grimoire.ctx, CHORE_SESSION, 'toolu_close'));
+
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.map((r) => [r.fields.session, r.fields.context])).toEqual([[CHORE_SESSION, 'main']]);
+  });
+
+  test('nor does a calling context its validated hint names a grimoire-chores subagent, even with no transcript to read', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const core = capture.makeCore();
+    const lost = 'ffffffff-0000-4000-8000-000000000000';
+    const id = await created(core, grimoire.ctx, 'Chores close');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    const closed = await core.call(
+      'close',
+      { id, reason: 'done', attempt, debrief: DEBRIEF },
+      claudeCallIn(grimoire.ctx, lost, 'toolu_chores_close', { id: 'a0000000000000001', type: 'grimoire-chores' }),
+    );
+
+    expect(closed).toMatchObject({ ok: true });
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.map((r) => [r.fields.session, r.fields.context])).toEqual([[CLAUDE_SESSION, 'main']]);
   });
 });
 

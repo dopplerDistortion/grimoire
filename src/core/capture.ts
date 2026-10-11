@@ -68,7 +68,7 @@ export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending
     const { commonDir, root } = env.tracker.location;
     const store = new MachineLocalStore(commonDir, env.ctx.repo.root);
     const { mode, capped } = await captureMode(view, commonDir);
-    const { source, pendingHint } = observedEvidence(env.ctx);
+    const { source, pendingHint, agentType } = observedEvidence(env.ctx);
     const skillReads = await store.records
       .list<SkillReadEvent>(SKILL_READS)
       .then((entries) => entries.map((entry) => entry.value))
@@ -80,7 +80,15 @@ export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending
       view,
       issue: ending.issue,
       attempt: ending.attempt,
-      call: { op: ending.op, actor: env.actor, source, pendingHint, binds: ending.binds, at: env.tracker.now().toISOString() },
+      call: {
+        op: ending.op,
+        actor: env.actor,
+        source,
+        pendingHint,
+        ...(agentType !== undefined ? { agentType } : {}),
+        binds: ending.binds,
+        at: env.tracker.now().toISOString(),
+      },
       mode,
       capped,
       skillReads,

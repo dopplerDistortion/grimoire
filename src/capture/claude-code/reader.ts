@@ -104,6 +104,7 @@ export async function readClaudeCodeTranscript(
       reader: { version: CLAUDE_CODE_READER_VERSION },
       session,
       context: options.agentId ?? 'main',
+      agentType: options.agentId ? await agentTypeOf(sessionDir, options.agentId) : null,
       steps: parsed.steps,
       copiedSteps,
       flushedTo: parsed.flushedTo,

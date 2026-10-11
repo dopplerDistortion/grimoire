@@ -552,6 +552,18 @@ describe('knowledge chores', () => {
     bindingCalls: [PLAIN_COMMENT],
   };
 
+  it('a grimoire-chores subagent’s own transcript carries its agent type, from the .meta.json beside it; a main line has none', async () => {
+    const agent = await readClaudeCodeTranscript(fixturePath(CHORE_PARENT), { agentId: 'a523fef26307d8241' });
+    const main = await readClaudeCodeTranscript(fixturePath(CHORE_PARENT));
+    const general = await readClaudeCodeTranscript(fixturePath(`${TX}/subagent/0e195270-803a-4006-be3c-4af4e288c343.jsonl`), {
+      agentId: 'aa0434c9616245e9e',
+    });
+
+    expect(agent.found && agent.transcript.agentType).toBe('grimoire-chores');
+    expect(main.found && main.transcript.agentType).toBeNull();
+    expect(general.found && general.transcript.agentType).toBe('general-purpose');
+  });
+
   it.each([
     ['with the subagent’s .meta.json beside it', true],
     ['with no .meta.json left', false],

@@ -941,6 +941,24 @@ describe('knowledge chores', () => {
     expect(result.callIds).toEqual(['call_8_0']);
     expect(original.excerpt).toMatch(/tool spawn_agent[\s\S]*tool wait_agent/);
   });
+
+  it('a chore thread names its role in its own session_meta (spike F): the cut carries it, so capture can leave the thread out', async () => {
+    const chores = `${TX}/chore-role/rollout-2026-10-11T08-21-13-01a12968-71aa-7fe1-a70d-7745aa7feacd.jsonl`;
+    const root = `${TX}/chore-role/rollout-2026-10-11T08-21-12-01a12968-6f96-78e2-aef8-4da11543207e.jsonl`;
+
+    const thread = await readCodexTranscript(fixturePath(chores));
+    const spawner = await readCodexTranscript(fixturePath(root));
+    const cutThread = await cutCodex({
+      transcript: fixturePath(chores),
+      context: '01a12968-71aa-7fe1-a70d-7745aa7feacd',
+      evidence: { issue: 'gr-1', attemptOpenedAt: '2026-10-11T05:21:00.000Z', bindingCalls: [{ id: 'call_8_0', at: '2026-10-11T05:21:13.450Z' }] },
+      paths,
+    });
+
+    expect(thread.found && thread.transcript.agentType).toBe('grimoire-chores');
+    expect(spawner.found && spawner.transcript.agentType).toBeNull();
+    expect(cutThread.agentType).toBe('grimoire-chores');
+  });
 });
 
 describe('the reader', () => {

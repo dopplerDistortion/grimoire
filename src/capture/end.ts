@@ -14,7 +14,7 @@ import { CLAUDE_CODE_READER_VERSION, cutClaudeCode, readClaudeCodeTranscript } f
 import { defaultClaudeConfigDir, findClaudeTranscript } from './claude-code/roots';
 import { CODEX_READER_VERSION, cutCodex } from './codex';
 import { defaultCodexHome } from './codex/roots';
-import { emptyCut, type BindingCall, type Cut, type CutEvidence } from './cut';
+import { CHORES_AGENT, emptyCut, isChoresContext, type BindingCall, type Cut, type CutEvidence } from './cut';
 import type { EvidenceSource } from './evidence';
 import { pathRewriter, type PathSpellings } from './paths';
 import { clientFamily, contextOf, seenHereRows, sessionKey, type SeenHereRow } from './seen-here';
@@ -61,6 +61,8 @@ export interface EndingCall {
   readonly actor: Actor;
   readonly source: EvidenceSource | null;
   readonly pendingHint: ReservedHint | null;
+  /** A Claude subagent's `agent_type`, from a validated hint: a `grimoire-chores` subagent is never captured. */
+  readonly agentType?: string;
   /** Whether it binds (an abandoned release and a reopen's supersede don't): its context is then cut too. */
   readonly binds: boolean;
   /** When it ends the attempt (ISO 8601): the window's end. */
@@ -155,6 +157,8 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
     }
     const cut = new ContextCut(input, target, deadline, claimed);
     const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling ? cut.waitingForFlush(started) : cut.once(), deadline, null);
+    // A chores context's transcript is excluded from excerpts and fact scans (spec §14): it gets no record.
+    if (cut.chores) continue;
     const captured = record ?? budgetRecord(target, cutAt);
     if (cut.callIds) claimed.push(...cut.callIds);
     captures.push({ key: target.key, record: captured, cut: true, row: target.row });
@@ -194,6 +198,7 @@ async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
   // The ending call's own binding write isn't committed yet: the cut looks for it from what this process saw.
   const actor = call.actor;
   const key = sessionKey(actor);
+  if (call.agentType === CHORES_AGENT) return targets.filter((target) => target.key !== key);
   const endingCall: BindingCall =
     actor.call !== undefined ? { id: actor.call, at: call.at } : { grimoire: call.op, printed: input.attempt ? [input.attempt.id] : [], at: call.at };
   const revealed = actor.session !== undefined ? await revealedRoot(input.store, actor.session).catch(() => undefined) : undefined;
@@ -243,6 +248,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 class ContextCut {
   /** The call ids its window holds, once cut: no later excerpt of the trace may hold them. */
   callIds: readonly string[] | null = null;
+  /** Whether its transcript names it a `grimoire-chores` context, which is never captured. */
+  chores = false;
   private readonly rewrite: (text: string) => string;
   private readonly paths: PathSpellings;
 
@@ -261,7 +268,7 @@ class ContextCut {
   async waitingForFlush(started: number): Promise<SessionRecord> {
     const until = Math.min(started + (this.input.options?.flushWaitMs ?? FLUSH_WAIT_MS), this.deadline);
     let record = await this.once();
-    while (record.excerpt_notes.includes('tail_unflushed') && Date.now() + FLUSH_POLL_MS <= until) {
+    while (!this.chores && record.excerpt_notes.includes('tail_unflushed') && Date.now() + FLUSH_POLL_MS <= until) {
       await sleep(FLUSH_POLL_MS);
       record = await this.once();
     }
@@ -275,6 +282,7 @@ class ContextCut {
     if (family !== 'claude-code' && family !== 'codex') return this.factsOnly('no_transcript');
     try {
       const { cut, roots, source } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
+      if (isChoresContext(cut)) this.chores = true;
       this.callIds = cut.callIds;
       return this.fromCut(cut, source, roots);
     } catch {

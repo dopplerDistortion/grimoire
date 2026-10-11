@@ -104,6 +104,7 @@ export async function readCodexTranscript(file: string): Promise<CodexReadResult
       reader: { version: CODEX_READER_VERSION },
       session: parsed.session ?? context,
       context,
+      agentType: parsed.agentRole,
       steps: parsed.steps,
       copiedSteps: parsed.copiedSteps,
       flushedTo: parsed.flushedTo,
@@ -149,6 +150,8 @@ interface Parsed {
   version: string | null;
   session: string | null;
   context: string | null;
+  /** The thread's role (`session_meta.agent_role`): a `grimoire-chores` thread is a chore thread. */
+  agentRole: string | null;
   /** Where a subagent's own records begin, when it was spawned with its parent's history. */
   ownHistoryFrom: number | null;
   flushedTo: string | null;
@@ -190,6 +193,7 @@ async function parseLines(lines: AsyncIterable<string>): Promise<Parsed> {
     version: null,
     session: null,
     context: null,
+    agentRole: null,
     ownHistoryFrom: null,
     flushedTo: null,
     read: 0,
@@ -270,8 +274,12 @@ function readSessionMeta(payload: Payload, parsed: Parsed): void {
   // Only the file's own first line: a legacy fork copies its parent's after it.
   if (parsed.context !== null) return;
   if (typeof payload.id === 'string') parsed.context = payload.id;
-  const parent = (payload.source as { subagent?: { thread_spawn?: { parent_thread_id?: unknown } } } | undefined)
-    ?.subagent?.thread_spawn?.parent_thread_id;
+  const spawn = (payload.source as { subagent?: { thread_spawn?: { parent_thread_id?: unknown; agent_role?: unknown } } } | undefined)
+    ?.subagent?.thread_spawn;
+  const parent = spawn?.parent_thread_id;
+  // A role's thread names its role twice (spike F); either will do.
+  const role = typeof payload.agent_role === 'string' ? payload.agent_role : spawn?.agent_role;
+  if (typeof role === 'string') parsed.agentRole = role;
   parsed.session =
     typeof payload.session_id === 'string' ? payload.session_id : typeof parent === 'string' ? parent : parsed.context;
   if (typeof payload.cli_version === 'string') parsed.version = payload.cli_version;
