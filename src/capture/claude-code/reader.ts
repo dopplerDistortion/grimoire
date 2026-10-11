@@ -104,7 +104,7 @@ export async function readClaudeCodeTranscript(
       reader: { version: CLAUDE_CODE_READER_VERSION },
       session,
       context: options.agentId ?? 'main',
-      agentType: options.agentId ? await agentTypeOf(sessionDir, options.agentId) : null,
+      agentType: options.agentId ? await agentTypeBeside(file) : null,
       steps: parsed.steps,
       copiedSteps,
       flushedTo: parsed.flushedTo,
@@ -417,6 +417,16 @@ async function agentTypeOf(sessionDir: string, agentId: string): Promise<string 
     const meta = JSON.parse(
       await readFile(path.join(sessionDir, 'subagents', `agent-${agentId}.meta.json`), 'utf8'),
     ) as { agentType?: unknown };
+    return typeof meta.agentType === 'string' ? meta.agentType : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A subagent's type from the `.meta.json` beside its own transcript, wherever under `subagents/` that is. */
+async function agentTypeBeside(file: string): Promise<string | null> {
+  try {
+    const meta = JSON.parse(await readFile(file.replace(/\.jsonl$/i, '.meta.json'), 'utf8')) as { agentType?: unknown };
     return typeof meta.agentType === 'string' ? meta.agentType : null;
   } catch {
     return null;

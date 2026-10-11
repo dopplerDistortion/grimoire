@@ -130,8 +130,9 @@ interface Target {
  * Cuts the attempt's bound contexts (spec §14, step 2): the calling context
  * first, then the contexts with no pending record, then the rest; only
  * contexts with a seen-here row here, and the calling context, are cut. The
- * whole cut stays within the budget: a context it can't reach in time gets
- * `budget`. Contexts whose record a human purged are skipped.
+ * whole cut, finding the bound contexts included, stays within the budget: a
+ * context it can't reach in time gets `budget`. Contexts whose record a human
+ * purged, and `grimoire-chores` contexts, are skipped.
  */
 export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCapture[]> {
   const started = Date.now();
