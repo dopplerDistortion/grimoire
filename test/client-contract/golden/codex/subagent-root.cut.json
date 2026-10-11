@@ -8,6 +8,7 @@
   },
   "session": "01a12947-11cf-7fd1-8ece-b3d7fe5a6e72",
   "context": "01a12947-11cf-7fd1-8ece-b3d7fe5a6e72",
+  "agentType": null,
   "lines": {
     "read": 35,
     "unknown": 0,

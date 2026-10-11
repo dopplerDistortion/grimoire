@@ -89,6 +89,8 @@ export interface AttemptRecord {
   readonly activity: readonly ActivityEntry[];
   /** Other seals of this attempt a fold set aside (two clones ended it differently): the attempt is in conflict. */
   readonly setAside: readonly AttemptEnd[];
+  /** Its session records (`sessions/<session-key>.md`, one per bound context): each session key with its blob. */
+  readonly sessions: ReadonlyMap<string, string>;
 }
 
 /** A fresh `at-` handle: 6 crypto-random Crockford characters. */
