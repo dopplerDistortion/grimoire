@@ -3,6 +3,7 @@
 // with a bare remote. Each test injects one defect the way another writer or a
 // person would leave it, and asserts what the report says about it. The CLI
 // over a checkout `init` installed is seam 3 (health.test.ts).
+import { createHash } from 'node:crypto';
 import { mkdir, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
@@ -132,7 +133,7 @@ describe('store checks', SLOW, () => {
     expect(report.findings).toEqual([]);
   });
 
-  test('hand-edited knowledge and session records are reported: a page, a ledger record and a skill version whose bytes no longer hash to their names, a session record', async ({ world, grimoire }) => {
+  test('hand-edited knowledge and session records are reported: a page, a ledger record and a skill version whose bytes no longer hash to their names, a skill change out of key order, a session record', async ({ world, grimoire }) => {
     const human = terminal(grimoire.ctx);
     await ok(grimoire.core.call('wiki_edit', { ...PAGE, base: null }, human));
     await ok(grimoire.core.call('quarantine', { page: PAGE.slug, reason: 'cites a poisoned trace' }, human));
@@ -141,26 +142,36 @@ describe('store checks', SLOW, () => {
     const { attempt } = await ok(grimoire.core.call('claim', { id }, grimoire.ctx));
     const files = await trackerFiles(world);
     const page = files.find((file) => file.startsWith('knowledge/wiki/pages/'))!;
-    const ledger = files.find((file) => file.startsWith('knowledge/ledger/'))!;
+    const ledgerFiles = files.filter((file) => file.startsWith('knowledge/ledger/'));
+    const ledgerTexts = await Promise.all(ledgerFiles.map((file) => trackerText(world, file)));
+    const ledger = ledgerFiles[ledgerTexts.findIndex((text) => text.includes('cites a poisoned trace'))]!;
     const version = files.find((file) => file.startsWith('knowledge/skill-versions/'))!;
     const start = files.find((file) => file.endsWith(`/${attempt}/start.md`))!;
     const session = start.replace(/start\.md$/, 'sessions/s1.md');
-    // A person's edits: the page's title moved below its kind; another reason in the mark; a changed line in the skill.
-    const lines = (await trackerText(world, page)).split('\n');
-    const title = lines.findIndex((line) => line.startsWith('title: '));
-    [lines[title], lines[title + 1]] = [lines[title + 1]!, lines[title]!];
+    // A person's edits: a key moved in the page; another reason in the mark; a changed line in the skill.
+    const swap = (lines: string[], key: string) => {
+      const at = lines.findIndex((line) => line.startsWith(`${key}: `));
+      [lines[at], lines[at + 1]] = [lines[at + 1]!, lines[at]!];
+      return `${lines.join('\n')}\n`;
+    };
+    // A skill change written by hand with its keys out of order, under the sha256 of its own bytes.
+    const skillChange = swap(ledgerTexts.find((text) => text.includes('kind: "edit"'))!.split('\n'), 'skill');
+    const forged = `knowledge/ledger/${createHash('sha256').update(skillChange).digest('hex')}.md`;
     await commitToTracker(world.a, {
-      [page]: `${lines.join('\n')}\n`,
+      [page]: swap((await trackerText(world, page)).split('\n'), 'title'),
+      [forged]: skillChange,
       [ledger]: `${(await trackerText(world, ledger)).replace('cites a poisoned trace', 'poisoned')}\n`,
       [version]: `${(await trackerText(world, version)).replace('Release notes', 'Notes')}\n`,
+      // Capture writes session records in the shared line format: a bare word is no JSON value.
       [session]: '---\nclient: claude-code\nsteps: 3\n---\n',
     });
 
     const report = await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS });
 
     const bad = report.findings.filter((finding) => finding.kind === 'non-canonical' || finding.kind === 'unparsable');
-    expect(bad.map((finding) => finding.subject).sort()).toEqual([ledger, page, session, version].sort());
+    expect(bad.map((finding) => finding.subject).sort()).toEqual([forged, ledger, page, session, version].sort());
     expect(bad.find((finding) => finding.subject === ledger)?.message).toContain('sha256');
+    expect(bad.find((finding) => finding.subject === forged)?.message).toContain('canonical serializer');
   });
 
   test('a record that doesn’t parse is reported unparsable, and the checks that need the merged view say they couldn’t read it', async ({ world, grimoire }) => {
