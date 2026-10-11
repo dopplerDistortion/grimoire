@@ -18,7 +18,7 @@ import { putMachineSetting } from '../../src/core/settings';
 import { MachineLocalStore } from '../../src/machine-local';
 import { createScanner } from '../../src/scanner';
 import { openTracker } from '../../src/tracker';
-import { commitToTracker, coreTest, TRACKER_REF, trackerFile, trackerTip } from './support';
+import { agentContext, commitToTracker, coreTest, fetchTracker, pushTracker, TRACKER_REF, trackerFile, trackerTip } from './support';
 
 /** Claude Code's spike-A subagent session: the main line launched one subagent, which called grimoire. */
 const CLAUDE_SESSION = '0e195270-803a-4006-be3c-4af4e288c343';
@@ -681,6 +681,37 @@ describe('the other attempt-ending ops', () => {
     // The attempt it opened has no bound context yet.
     const opened = (reassigned as { ok: true; result: { attempt: string } }).result.attempt;
     expect(await sessionRecords(world.a, id, opened)).toEqual([]);
+  });
+
+  test('a reopen supersedes an attempt a fold left open: its context, bound only on the other side of the fold, gets a placeholder', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const core = capture.makeCore();
+    const bobCore = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Closed here, claimed there');
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    await world.b.git(['update-ref', TRACKER_REF, 'refs/remotes/origin/grimoire/tracker']);
+    const mine = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:30.000Z');
+    await core.call('close', { id, reason: 'done', attempt: mine, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+    const bobClaim = await bobCore.call('claim', { id }, agentContext(world.b));
+    if (!bobClaim.ok) throw new Error(JSON.stringify(bobClaim.error));
+    const bobs = bobClaim.result.attempt;
+    await pushTracker(world.b);
+    await fetchTracker(world.a);
+
+    const reopened = await core.call('reopen', { id, comment: 'Bob is still on it.' }, person(grimoire.ctx));
+
+    expect(reopened).toMatchObject({ ok: true });
+    // Bob's claim is only on the remote tip: this machine has no row for his context, so it isn't cut.
+    const records = await sessionRecords(world.a, id, bobs);
+    expect(records.map((r) => r.fields)).toEqual([
+      expect.objectContaining({ client: 'claude-code', session: 'sess-1', context: 'main', excerpt: 'not_found', facts: 'not_found', roots: [], reach: null }),
+    ]);
+    expect((await captureOf(world.a, bobs)).facts_complete).toBe(false);
   });
 });
 

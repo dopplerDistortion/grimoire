@@ -69,6 +69,8 @@ import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type Quar
 export interface TrackerView {
   /** The commit this view shows. */
   readonly tip: string;
+  /** The commits it was read from: the tip, or both tips of a fold (local first). */
+  readonly parents: readonly string[];
   /** The live issue with this full id. */
   issue(id: string): IssueRecord | undefined;
   /** Every live issue, ordered by (seq, id). */
@@ -464,6 +466,10 @@ export class Draft implements TrackerDraft {
 
   get tip(): string {
     return this.base.tip;
+  }
+
+  get parents(): readonly string[] {
+    return this.base.parents;
   }
 
   issue(id: string): IssueRecord | undefined {

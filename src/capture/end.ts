@@ -175,7 +175,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
 async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
   const { call } = input;
   const rows: SeenHereRow[] = input.attempt ? await seenHereRows(input.store, { handle: input.attempt.id }).catch(() => []) : [];
-  const bindings = input.attempt ? await readBindings(input.repoRoot, input.attempt, [input.view.tip]).catch(() => []) : [];
+  const bindings = input.attempt ? await readBindings(input.repoRoot, input.attempt, input.view.parents).catch(() => []) : [];
   const agents = boundContexts(bindings, rows).filter((context) => context.bindings.some((binding) => binding.actor.kind !== 'human'));
   const targets: Target[] = agents.map((context) => {
     const latest = context.bindings.at(-1)!.actor;
