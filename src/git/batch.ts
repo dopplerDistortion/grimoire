@@ -13,112 +13,129 @@ interface Pending {
   reject(error: Error): void;
 }
 
+/** One `git cat-file --batch` process, with the reads it has yet to answer. */
+interface Batch {
+  readonly child: ChildProcessWithoutNullStreams;
+  readonly pending: Pending[];
+  buffer: Buffer;
+}
+
 /**
  * One long-lived `git cat-file --batch` per repository: reads cost a pipe round
  * trip, not a process. Requests are answered in order, so callers may pipeline.
  * A request may name a ref: git resolves it when it reads the request (loose
  * refs and reftable fresh each time, packed-refs only when its stat changed).
  * The process is unref'd while idle, so it never keeps Node alive; `close()`
- * ends it. A crashed process fails its pending reads and is respawned on the
- * next read.
+ * ends it. A read after `close()` still gets its answer, from a process that
+ * ends once its reads are answered. A crashed process fails its pending reads
+ * and is respawned on the next read.
  */
 export class ObjectReader {
-  private child: ChildProcessWithoutNullStreams | null = null;
-  private pending: Pending[] = [];
-  private buffer: Buffer = Buffer.alloc(0);
+  private batch: Batch | null = null;
+  private closed = false;
 
   constructor(private readonly cwd: string) {}
 
   /** Reads the object `name` (an oid or a full ref name) names, or null when there is none. */
   read(name: string): Promise<GitObject | null> {
     return new Promise((resolve, reject) => {
-      const child = this.ensureChild();
-      this.pending.push({ resolve, reject });
-      this.setActive(true);
-      child.stdin.write(`${name}\n`);
+      const batch = this.ensureBatch();
+      batch.pending.push({ resolve, reject });
+      setActive(batch, true);
+      batch.child.stdin.write(`${name}\n`);
     });
   }
 
   /** Starts the process ahead of the first read. */
   warm(): void {
-    this.ensureChild();
+    if (!this.closed) this.ensureBatch();
   }
 
   async close(): Promise<void> {
-    const child = this.child;
-    if (!child) return;
-    // Keep Node alive until git has exited, or the await below never settles.
-    this.setActive(true);
-    this.child = null;
-    const exited = new Promise<void>((resolve) => child.once('close', () => resolve()));
-    child.stdin.end();
-    await exited;
+    this.closed = true;
+    const batch = this.batch;
+    this.batch = null;
+    if (batch) await end(batch);
   }
 
-  private ensureChild(): ChildProcessWithoutNullStreams {
-    if (this.child) return this.child;
+  private ensureBatch(): Batch {
+    if (this.batch) return this.batch;
     const child = spawn('git', ['-c', `core.hooksPath=${NO_HOOKS}`, 'cat-file', '--batch'], {
       cwd: this.cwd,
       env: cleanGitEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    const batch: Batch = { child, pending: [], buffer: Buffer.alloc(0) };
     const stderr: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
+    child.stdout.on('data', (chunk: Buffer) => this.onData(batch, chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
     child.stdin.on('error', () => {
       // Surfaces as the process closing.
     });
     const fail = (reason: string) => {
-      if (this.child === child) this.child = null;
-      this.buffer = Buffer.alloc(0);
+      if (this.batch === batch) this.batch = null;
       const error = new Error(`git cat-file --batch ${reason}: ${Buffer.concat(stderr).toString('utf8').trim()}`);
-      for (const request of this.pending.splice(0)) request.reject(error);
+      for (const request of batch.pending.splice(0)) request.reject(error);
     };
     child.on('error', (error) => fail(error.message));
     child.on('close', (code) => fail(`exited ${code}`));
-    this.child = child;
-    this.buffer = Buffer.alloc(0);
-    this.setActive(false);
-    return child;
+    this.batch = batch;
+    setActive(batch, false);
+    return batch;
   }
 
-  private setActive(active: boolean): void {
-    const child = this.child;
-    if (!child) return;
-    const handles = [child, child.stdin, child.stdout, child.stderr] as unknown as {
-      ref?: () => void;
-      unref?: () => void;
-    }[];
-    for (const handle of handles) {
-      if (active) handle.ref?.();
-      else handle.unref?.();
-    }
-  }
-
-  private onData(chunk: Buffer): void {
-    this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
+  private onData(batch: Batch, chunk: Buffer): void {
+    batch.buffer = batch.buffer.length === 0 ? chunk : Buffer.concat([batch.buffer, chunk]);
     for (;;) {
-      const head = this.pending[0];
+      const head = batch.pending[0];
       if (!head) break;
-      const newline = this.buffer.indexOf(0x0a);
+      const newline = batch.buffer.indexOf(0x0a);
       if (newline < 0) break;
-      const header = this.buffer.toString('utf8', 0, newline);
+      const header = batch.buffer.toString('utf8', 0, newline);
       if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-        this.buffer = this.buffer.subarray(newline + 1);
-        this.pending.shift();
+        batch.buffer = batch.buffer.subarray(newline + 1);
+        batch.pending.shift();
         head.resolve(null);
         continue;
       }
       const [oid, type, size] = header.split(' ');
       const length = Number(size);
       const end = newline + 1 + length;
-      if (this.buffer.length < end + 1) break;
-      const content = Buffer.from(this.buffer.subarray(newline + 1, end));
-      this.buffer = this.buffer.subarray(end + 1);
-      this.pending.shift();
+      if (batch.buffer.length < end + 1) break;
+      const content = Buffer.from(batch.buffer.subarray(newline + 1, end));
+      batch.buffer = batch.buffer.subarray(end + 1);
+      batch.pending.shift();
       head.resolve({ oid: oid ?? '', type: type ?? '', content });
     }
-    if (this.pending.length === 0) this.setActive(false);
+    if (batch.pending.length > 0) return;
+    setActive(batch, false);
+    if (this.closed && this.batch === batch) {
+      this.batch = null;
+      void end(batch);
+    }
+  }
+}
+
+/** Lets a process exit once it has answered what it was asked; Node stays alive until it has. */
+function end(batch: Batch): Promise<void> {
+  const { child } = batch;
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  setActive(batch, true);
+  const exited = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  child.stdin.end();
+  return exited;
+}
+
+/** Keeps Node alive for a process only while it has reads to answer. */
+function setActive(batch: Batch, active: boolean): void {
+  const { child } = batch;
+  const handles = [child, child.stdin, child.stdout, child.stderr] as unknown as {
+    ref?: () => void;
+    unref?: () => void;
+  }[];
+  for (const handle of handles) {
+    if (active) handle.ref?.();
+    else handle.unref?.();
   }
 }

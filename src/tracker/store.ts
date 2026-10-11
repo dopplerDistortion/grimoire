@@ -164,7 +164,7 @@ class GitTrackerStore implements TrackerStore {
     this.objects = new TrackerObjects(location.root, path.join(location.commonDir, 'objects'), location.objectFormat);
     this.loader = new SnapshotLoader(this.objects);
     this.fairness = new FairnessLock(location.commonDir);
-    this.updater = new RefUpdater(location.root, 'grimoire: write');
+    this.updater = new RefUpdater(location.root, 'grimoire: write', () => packedRefsStamp(location.commonDir));
     this.clock = options.clock ?? (() => new Date());
     this.randomSuffix = options.randomIdSuffix ?? randomIdSuffix;
     this.budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
@@ -214,12 +214,13 @@ class GitTrackerStore implements TrackerStore {
    * Any failure here is the round's to report.
    */
   private async prefetch(): Promise<void> {
+    const warming = this.updater.warm();
     try {
-      this.updater.warm(await packedRefsStamp(this.location.commonDir));
       await this.snapshotOf(await this.resolveTips());
     } catch {
       // The round resolves and loads again, and reports what went wrong.
     }
+    await warming;
   }
 
   async fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }> {
@@ -484,13 +485,11 @@ class GitTrackerStore implements TrackerStore {
    * through the long-lived updater (no process start inside the fairness lock).
    */
   private async moveRef(old: string | null, commit: string): Promise<RefMove> {
-    const update = await this.updater.update(
-      TRACKER_REF,
-      commit,
-      old ?? zeroOid(this.location.objectFormat),
-      await packedRefsStamp(this.location.commonDir),
-    );
-    return update.moved ? { moved: true } : this.failedMove(update.stderr);
+    const update = await this.updater.update(TRACKER_REF, commit, old ?? zeroOid(this.location.objectFormat));
+    if (update.moved) return { moved: true };
+    // No reason from git (its process died, or packed-refs kept changing): the ref did not move, so retry the round.
+    if (update.stderr.trim() === '') return { moved: false };
+    return this.failedMove(update.stderr);
   }
 
   /** Creates the tracker ref with a process of its own, so its reflog entry carries `subject`. */
