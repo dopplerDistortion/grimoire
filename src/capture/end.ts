@@ -130,12 +130,15 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   const started = Date.now();
   const deadline = started + (input.options?.budgetMs ?? CUT_BUDGET_MS);
   const handle = input.attempt?.id ?? null;
+  // Which contexts are bound, and which hold a pending record or a purge, is read in full: the budget bounds the cuts.
   const targets = await targetsOf(input);
   const pending = new Set<string>();
-  if (handle !== null) {
-    for (const target of targets) if ((await input.view.sessionRecord(handle, target.key)) !== null) pending.add(target.key);
-  }
   const purged = handle === null ? new Set<string>() : await input.view.purgedSessions(handle).catch(() => new Set<string>());
+  if (handle !== null) {
+    for (const target of targets) {
+      if ((await input.view.sessionRecord(handle, target.key).catch(() => null)) !== null) pending.add(target.key);
+    }
+  }
   const rank = (t: Target) => (t.calling ? 0 : pending.has(t.key) ? 2 : 1);
   const ordered = [...targets].sort((a, b) => rank(a) - rank(b));
 
@@ -149,7 +152,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
       continue;
     }
     const cut = new ContextCut(input, target, deadline, claimed);
-    const record = Date.now() >= deadline ? null : await withinDeadline(target.calling ? cut.waitingForFlush(started) : cut.once(), deadline);
+    const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling ? cut.waitingForFlush(started) : cut.once(), deadline, null);
     const captured = record ?? budgetRecord(target, cutAt);
     if (cut.callIds) claimed.push(...cut.callIds);
     captures.push({ key: target.key, record: captured, cut: true, row: target.row });
@@ -161,9 +164,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
 async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
   const { call } = input;
   const rows: SeenHereRow[] = input.attempt ? await seenHereRows(input.store, { handle: input.attempt.id }).catch(() => []) : [];
-  const bindings = input.attempt
-    ? await readBindings(input.repoRoot, input.attempt, [input.view.tip]).catch(() => [])
-    : [];
+  const bindings = input.attempt ? await readBindings(input.repoRoot, input.attempt, [input.view.tip]).catch(() => []) : [];
   const targets: Target[] = boundContexts(bindings, rows).map((context) => {
     const latest = context.bindings.at(-1)!.actor;
     return {
@@ -209,22 +210,23 @@ async function targetsOf(input: EndCaptureInput): Promise<Target[]> {
   return [calling, ...targets];
 }
 
-/** Resolves within the deadline, or null when it passed first; a throw is a capture problem, read as `unreadable`. */
-async function withinDeadline(work: Promise<SessionRecord>, deadline: number): Promise<SessionRecord | null> {
+/**
+ * What `work` gives if it settles before the deadline, else `fallback`: the
+ * hard budget, whatever a filesystem or a git process does. A failure is
+ * `fallback` too: capture problems are statuses, never errors.
+ */
+async function beforeDeadline<T, F>(work: Promise<T>, deadline: number, fallback: F): Promise<T | F> {
+  work.catch(() => {});
   const left = deadline - Date.now();
-  if (left <= 0) {
-    work.catch(() => {});
-    return null;
-  }
+  if (left <= 0) return fallback;
   let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), left);
+  const timeout = new Promise<F>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), left);
   });
   try {
-    return await Promise.race([work, timeout]);
+    return await Promise.race([work.catch(() => fallback), timeout]);
   } finally {
     clearTimeout(timer);
-    work.catch(() => {});
   }
 }
 
@@ -358,6 +360,8 @@ class ContextCut {
       paths: this.paths,
       scanner: input.scanner,
     });
+    // The spawn-env session counts only if its transcript holds the call: one past its flushed end doesn't.
+    if (source === 'spawn-env' && cut.status === 'cut' && cut.window === null) return { cut: emptyCut(cut, 'unmatched'), roots: [], source };
     return { cut, roots: cut.status === 'not_found' ? [location.transcript] : [], source };
   }
 
@@ -392,7 +396,8 @@ class ContextCut {
     const notes: RecordNote[] = [...cut.notes];
     if (excerpt === 'off' && input.capped) notes.push('capped');
     const facts: FactsStatus = failed ? (cut.status as FactsStatus) : 'scanned';
-    const text = excerpt === 'cut' ? cut.excerpt : null;
+    // No window (every binding call past the flushed end): nothing to show yet.
+    const text = excerpt === 'cut' && windowFound ? cut.excerpt : null;
     return {
       client: cut.client.name,
       client_version: cut.client.version,

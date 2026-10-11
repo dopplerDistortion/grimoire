@@ -9,7 +9,7 @@ import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { FIXTURES_DIR, fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
-import { sessionKey } from '../../src/capture/seen-here';
+import { seenHereRows, sessionKey } from '../../src/capture/seen-here';
 import { registerSweep } from '../../src/capture/sweeps';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
 import type { CallContext, Core, CoreOptions } from '../../src/core';
@@ -222,6 +222,10 @@ describe('closing an attempt', () => {
       ]),
     );
     expect(trace.facts_complete).toBe(true);
+    // Each cut's reach is noted on its context's seen-here row.
+    const rows = await seenHereRows(new MachineLocalStore(path.join(world.a.dir, '.git')), { handle: attempt });
+    expect(rows.find((row) => row.context === CLAUDE_AGENT)!.reach).toEqual(subagent.fields.reach);
+    expect(rows.find((row) => row.context === 'main')!.reach).toEqual(main.fields.reach);
   });
 });
 
