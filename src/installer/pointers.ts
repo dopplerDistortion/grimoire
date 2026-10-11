@@ -28,6 +28,8 @@ interface EntryBase {
 export interface FileEntry extends EntryBase {
   readonly kind: 'file' | 'seeded-file';
   readonly text: string;
+  /** Shipped text (the instruction file, chore carriers): upkeep refreshes it when it drifts (spec §13). */
+  readonly content?: boolean;
 }
 
 /** A key of a JSON file (`json-key`), or `package.json`'s script (`npm-script`). */
@@ -53,6 +55,8 @@ export interface MarkerBlockEntry extends EntryBase {
   readonly marker: string;
   readonly body: string;
   readonly placement: 'top' | 'end';
+  /** Shipped text (the AGENTS.md block, the adapter block): upkeep refreshes it when it drifts (spec §13). */
+  readonly content?: boolean;
 }
 
 /** grimoire's marked block of TOML tables, appended at the end of the file; `grants` are its permission-bearing keys. */
@@ -64,6 +68,16 @@ export interface TomlBlockEntry extends EntryBase {
 }
 
 export type DesiredEntry = FileEntry | JsonKeyEntry | JsonItemEntry | MarkerBlockEntry | TomlBlockEntry;
+
+/**
+ * Whether an entry is a content entry: shipped text that may change in any
+ * release (spec §21, What install_format covers), which upkeep and
+ * `doctor --fix` refresh when it drifts. Everything else (the bootstrap and
+ * hook entries, grants, run.cjs, the dotfolder layout) only `init` writes.
+ */
+export function isContentEntry(entry: DesiredEntry): entry is FileEntry | MarkerBlockEntry {
+  return (entry.kind === 'file' || entry.kind === 'marker-block') && entry.content === true;
+}
 
 /** `.codex/config.toml`'s block marker name. */
 export const CODEX_MARKER = 'grimoire';
@@ -186,7 +200,7 @@ export function desiredEntries(options: PointerOptions): DesiredEntry[] {
       { path: '.claude/settings.json', kind: 'json-array-item', key: ['enabledMcpjsonServers'], item: 'grimoire', value: 'grimoire', permission: true, client },
       { path: '.claude/settings.json', kind: 'json-array-item', key: ['hooks', 'PreToolUse'], hook: 'pre-tool-use', value: claudeHookGroup('pre-tool-use'), client },
       { path: '.claude/settings.json', kind: 'json-array-item', key: ['hooks', 'SessionStart'], hook: 'session-start', value: claudeHookGroup('session-start'), client },
-      { path: '.claude/rules/grimoire.md', kind: 'file', text: instructionRulesText(), client },
+      { path: '.claude/rules/grimoire.md', kind: 'file', text: instructionRulesText(), content: true, client },
     );
   }
   if (options.clients.includes('codex')) {
@@ -200,7 +214,7 @@ export function desiredEntries(options: PointerOptions): DesiredEntry[] {
         grants: [{ key: ['mcp_servers', 'grimoire', 'default_tools_approval_mode'], value: 'approve' }],
         client,
       },
-      { path: 'AGENTS.md', kind: 'marker-block', marker: AGENTS_MARKER, body: agentsBlockBody(), placement: 'end', client },
+      { path: 'AGENTS.md', kind: 'marker-block', marker: AGENTS_MARKER, body: agentsBlockBody(), placement: 'end', content: true, client },
     );
   }
   if (options.adapter !== 'none') {
@@ -210,6 +224,7 @@ export function desiredEntries(options: PointerOptions): DesiredEntry[] {
       marker: ADAPTER_MARKER,
       body: adapterBlockBody({ supersedes: options.adapter === 'top' }),
       placement: options.adapter,
+      content: true,
     });
   }
   entries.push({ path: TRIAGE_LABELS_DOC, kind: 'seeded-file', text: triageLabelsText() });

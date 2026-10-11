@@ -3,9 +3,13 @@
 // accepts. Claude Code reloads skills from `hookSpecificOutput.reloadSkills`;
 // Codex fails the hook on any key it doesn't know, so it only ever gets the
 // plain line.
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { readFixture, readFixtureJson } from '#harness';
+import { gitTest, readFixture, readFixtureJson } from '#harness';
+import { runUpkeep } from '../../../src/upkeep';
+import { installed } from '../../upkeep/support';
 import { runHook } from '../../../src/surfaces/hooks/run-hook';
 import { sessionStart, sessionStartClient, sessionStartOutput } from '../../../src/surfaces/hooks/session-start';
 
@@ -67,5 +71,25 @@ describe('what each client is given', () => {
   it('nothing to say prints nothing, for every captured payload and for an unreadable one', async () => {
     for (const fixture of [...CLAUDE, ...CODEX]) expect(await sessionStart(readFixture(fixture), { startDir: process.cwd() }), fixture).toBe('');
     expect(await sessionStart('not json', { startDir: process.cwd() })).toBe('');
+  });
+});
+
+describe('the session line', () => {
+  gitTest('names the pointer files upkeep refreshed until they are committed', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    await world.a.git(['add', '-A']);
+    await world.a.git(['commit', '--quiet', '-m', 'install grimoire']);
+    await writeFile(path.join(root, 'AGENTS.md'), (await readFile(path.join(root, 'AGENTS.md'), 'utf8')).replace('## grimoire', '## grimoire (mine)'));
+    await writeFile(path.join(root, '.claude/rules/grimoire.md'), 'drifted\n');
+    await world.a.git(['commit', '--quiet', '-am', 'my edits']);
+    await runUpkeep({ root });
+
+    for (const fixture of [CLAUDE[0]!, CODEX[0]!]) {
+      expect(await sessionStart(readFixture(fixture), { startDir: root }), fixture).toBe('grimoire refreshed 2 pointer files: commit them\n');
+    }
+
+    await world.a.git(['commit', '--quiet', '-am', 'take the shipped text']);
+    expect(await sessionStart(readFixture(CLAUDE[0]!), { startDir: root })).toBe('');
   });
 });

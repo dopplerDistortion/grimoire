@@ -14,7 +14,8 @@
 //  5. The version copy, the launcher and the join record.
 //  6. The dotfolder and pointer files, the manifest, then config.yml last:
 //     the commit point for this worktree.
-//  7. Upkeep (for now: pruning copies, keeping this version).
+//  7. Upkeep, forced: every part runs (copy pruning, pending syncs, content
+//     pointer refresh, and what later releases add).
 //  8. The report: what was written, the next steps, machine checks.
 //
 // Every refusal comes before step 4, so a refused init changes nothing.
@@ -29,7 +30,7 @@ import { findGitDirs, MachineLocalStore, readTextIfExists } from '../machine-loc
 import { openTracker, type Person } from '../tracker';
 import { MCP_ENTRY_ARGS, joinCommand } from './bootstrap';
 import { CONFIG_PATH, INSTALL_FORMAT, readInstallConfig, sameInstall, serializeInstallConfig, type AdapterDecision, type InstallConfig } from './config';
-import { installCopy, listCopies, pruneCopies, type CopySource } from './copies';
+import { installCopy, listCopies, type CopySource } from './copies';
 import { inspectLauncher, installLauncher, LAUNCHER_VERSION } from './launcher';
 import { CLIENTS, normalizedText, readManifest, type ClientName } from './manifest';
 import { codexHookHash, desiredEntries, type PointerOptions } from './pointers';
@@ -49,6 +50,8 @@ import {
   type Remotes,
 } from './preflight';
 import { readJoinRecord, writeJoinRecord, type JoinRecord } from './records';
+import { existingAdapterPlacement } from './refresh';
+import { holdWorktreeLease, runUpkeep, type UpkeepReport } from '../upkeep';
 import { ADAPTER_DOC, ADAPTER_MARKER, markdownMarkers } from './texts';
 import { applyFiles, planFiles, tomlMarkers, writePlanned, type FilePlan, type PlannedEntry } from './writer';
 
@@ -128,6 +131,8 @@ export interface InitReport {
   skipped: { path: string; why: string }[];
   /** What init did on this machine; null for a plan only (--json without --yes). */
   machine: MachineResult | null;
+  /** What upkeep did at the end (step 7); absent for a plan only. */
+  upkeep?: UpkeepReport;
   warnings: { code: string; message: string }[];
   next_steps: string[];
   machine_checks: { node: { running: string; on_path: string | null } };
@@ -248,7 +253,13 @@ async function chooseAdapter(
 ): Promise<{ placement: PointerOptions['adapter']; decision: AdapterDecision }> {
   const doc = await readTextIfExists(path.join(root, ADAPTER_DOC));
   const { begin } = markdownMarkers(ADAPTER_MARKER);
-  if (doc === undefined || normalizedText(doc).split('\n').some((line) => line.trim() === begin)) return { placement: 'end', decision: 'grimoire' };
+  if (doc === undefined) return { placement: 'end', decision: 'grimoire' };
+  if (normalizedText(doc).split('\n').some((line) => line.trim() === begin)) {
+    // The block is there: a superseding one stays superseding.
+    const { entries } = await readManifest(root);
+    const recorded = entries.find((entry) => entry.path === ADAPTER_DOC && entry.kind === 'marker-block' && entry.marker === ADAPTER_MARKER);
+    return { placement: existingAdapterPlacement(doc, recorded?.created ?? null), decision: 'grimoire' };
+  }
   if ((previous === 'declined' && !flags.adapter) || !prompter) return { placement: 'none', decision: 'declined' };
   const answer = await choose(
     prompter,
@@ -599,76 +610,94 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     if (!/^y(es)?$/i.test(answer?.trim() ?? '')) throw canceled('the consent');
   }
 
-  // 4. The tracker.
-  if (remote.save && remote.name !== null) await saveRemote(root, remote.name);
-  if (trackerPlan.action === 'mint' || trackerPlan.action === 'replace') {
-    const author: Person = { name: o.person.name ?? o.person.email!, email: o.person.email! };
-    const actor = { kind: 'human' as const, client: 'cli', nonce: o.nonce };
-    const trackerStore = await openTracker(root);
-    try {
-      const minted = await trackerStore.initialize({ author, actor }, { settings: seedStoreSettings(trackerPlan.mode), replace: trackerPlan.action === 'replace' });
-      tracker.root = minted.root;
-      if (!minted.created) {
-        // Another init minted one meanwhile: adopt it, and show its mode.
-        tracker.action = 'adopted';
-        tracker.excerpt_mode = mode = storeExcerptMode(await trackerStore.read());
-      }
-      if (trackerPlan.action === 'replace' && trackerPlan.remoteTip !== null && remote.name !== null) {
-        // The remote's branch must move with the local ref: a sync would fold the old history back in.
-        const refused = await replaceRemoteTracker(root, remote.name, remotes, minted.root, trackerPlan.remoteTip);
-        if (refused) {
-          await restoreTrackerRef(root, tips.local, minted.root);
-          throw new GrimoireError('NOT_SYNCED', `init couldn't replace grimoire/tracker on ${remote.name} (${refused.message}); the tracker here is back as it was, and nothing changed`, {
-            failure: refused,
-            remedy: 'rerun init --new-tracker once the remote takes the push (its branch may have moved: check what it holds first)',
-          });
-        }
-        tracker.sync = 'pushed';
-      } else {
-        if (trackerPlan.action === 'replace' && remote.name !== null && tips.remote !== null) {
-          // The remote holds no tracker, but this clone still tracks the old one: a sync would fold it back in.
-          await dropStaleRemoteTracker(root, remote.name, tips.remote);
-        }
-        const outcome = await syncNow(trackerStore, { author, identity: { name: o.person.name, email: o.person.email }, actor, client: 'cli', surface: 'cli' });
-        tracker.sync = outcome.state;
-        if (outcome.reason) tracker.sync_reason = outcome.reason;
-        if (outcome.failure) tracker.failure = outcome.failure;
-      }
-    } finally {
-      await trackerStore.close();
-    }
-    if (tracker.sync === 'pending') {
-      warn(
-        'SYNC_PENDING',
-        tracker.sync_reason === 'no-default-branch'
-          ? `${remote.name} has no default branch yet, so grimoire won't push grimoire/tracker there before it has one; the tracker stays sync-pending and goes out with the next sync`
-          : `the new tracker isn't on ${remote.name ?? 'a remote'} yet${tracker.failure ? ` (${tracker.failure.message})` : ''}; it stays sync-pending and goes out with the next sync (\`grimoire sync\`)`,
-      );
-    }
+  // The (live store, worktree) lease upkeep's per-worktree part and doctor --fix share: held through step 6.
+  const worktreeLease = await holdWorktreeLease(store, root);
+  if (!worktreeLease) {
+    throw new GrimoireError('BUSY', `another grimoire process keeps working on ${root} (upkeep, doctor --fix or init); nothing changed, so run init again in a moment`, {});
   }
-  const finalConfig: InstallConfig = { ...config, tracker_root: tracker.root! };
+  const writeAll = async () => {
+    // 4. The tracker.
+    if (remote.save && remote.name !== null) await saveRemote(root, remote.name);
+    if (trackerPlan.action === 'mint' || trackerPlan.action === 'replace') {
+      const author: Person = { name: o.person.name ?? o.person.email!, email: o.person.email! };
+      const actor = { kind: 'human' as const, client: 'cli', nonce: o.nonce };
+      const trackerStore = await openTracker(root);
+      try {
+        const minted = await trackerStore.initialize({ author, actor }, { settings: seedStoreSettings(trackerPlan.mode), replace: trackerPlan.action === 'replace' });
+        tracker.root = minted.root;
+        if (!minted.created) {
+          // Another init minted one meanwhile: adopt it, and show its mode.
+          tracker.action = 'adopted';
+          tracker.excerpt_mode = mode = storeExcerptMode(await trackerStore.read());
+        }
+        if (trackerPlan.action === 'replace' && trackerPlan.remoteTip !== null && remote.name !== null) {
+          // The remote's branch must move with the local ref: a sync would fold the old history back in.
+          const refused = await replaceRemoteTracker(root, remote.name, remotes, minted.root, trackerPlan.remoteTip);
+          if (refused) {
+            await restoreTrackerRef(root, tips.local, minted.root);
+            throw new GrimoireError('NOT_SYNCED', `init couldn't replace grimoire/tracker on ${remote.name} (${refused.message}); the tracker here is back as it was, and nothing changed`, {
+              failure: refused,
+              remedy: 'rerun init --new-tracker once the remote takes the push (its branch may have moved: check what it holds first)',
+            });
+          }
+          tracker.sync = 'pushed';
+        } else {
+          if (trackerPlan.action === 'replace' && remote.name !== null && tips.remote !== null) {
+            // The remote holds no tracker, but this clone still tracks the old one: a sync would fold it back in.
+            await dropStaleRemoteTracker(root, remote.name, tips.remote);
+          }
+          const outcome = await syncNow(trackerStore, { author, identity: { name: o.person.name, email: o.person.email }, actor, client: 'cli', surface: 'cli' });
+          tracker.sync = outcome.state;
+          if (outcome.reason) tracker.sync_reason = outcome.reason;
+          if (outcome.failure) tracker.failure = outcome.failure;
+        }
+      } finally {
+        await trackerStore.close();
+      }
+      if (tracker.sync === 'pending') {
+        warn(
+          'SYNC_PENDING',
+          tracker.sync_reason === 'no-default-branch'
+            ? `${remote.name} has no default branch yet, so grimoire won't push grimoire/tracker there before it has one; the tracker stays sync-pending and goes out with the next sync`
+            : `the new tracker isn't on ${remote.name ?? 'a remote'} yet${tracker.failure ? ` (${tracker.failure.message})` : ''}; it stays sync-pending and goes out with the next sync (\`grimoire sync\`)`,
+        );
+      }
+    }
+    const finalConfig: InstallConfig = { ...config, tracker_root: tracker.root! };
 
-  // 5. The version copy, the launcher and the join record.
-  const copy = await installCopy(store, version, o.source);
-  const launched = await installLauncher(store);
-  const record: JoinRecord = { ...joinRecord, excerpt_mode: mode ?? 'unknown' };
-  const joinWrite: MachineResult['join_record'] =
-    !join ? 'written' : join.excerpt_mode !== record.excerpt_mode || join.codex_hook_hash !== record.codex_hook_hash ? 'updated' : 'unchanged';
-  if (joinWrite !== 'unchanged') await writeJoinRecord(store, version, record);
-  if (excerptsMax !== undefined) await putMachineSetting(dirs.commonDir, 'capture.excerpts_max', excerptsMax);
+    // 5. The version copy, the launcher and the join record.
+    const copy = await installCopy(store, version, o.source);
+    const launched = await installLauncher(store);
+    const record: JoinRecord = { ...joinRecord, excerpt_mode: mode ?? 'unknown' };
+    const joinWrite: MachineResult['join_record'] =
+      !join ? 'written' : join.excerpt_mode !== record.excerpt_mode || join.codex_hook_hash !== record.codex_hook_hash ? 'updated' : 'unchanged';
+    if (joinWrite !== 'unchanged') await writeJoinRecord(store, version, record);
+    if (excerptsMax !== undefined) await putMachineSetting(dirs.commonDir, 'capture.excerpts_max', excerptsMax);
 
-  // 6. The files, the manifest, then config.yml last.
-  const applied = await applyFiles(filePlan);
-  const written = [...applied.written];
-  const skipped = [...applied.skipped];
-  if (!sameInstall(existing, finalConfig)) {
-    const why = await writePlanned(root, { path: CONFIG_PATH, before: existing?.text ?? null, after: serializeInstallConfig(finalConfig) });
-    if (why === null) written.push(CONFIG_PATH);
-    else skipped.push({ path: CONFIG_PATH, why });
+    // 6. The files, the manifest, then config.yml last.
+    const applied = await applyFiles(filePlan);
+    const written = [...applied.written];
+    const skipped = [...applied.skipped];
+    if (!sameInstall(existing, finalConfig)) {
+      const why = await writePlanned(root, { path: CONFIG_PATH, before: existing?.text ?? null, after: serializeInstallConfig(finalConfig) });
+      if (why === null) written.push(CONFIG_PATH);
+      else skipped.push({ path: CONFIG_PATH, why });
+    }
+    return { copy, launched, joinWrite, written, skipped };
+  };
+  let wrote: Awaited<ReturnType<typeof writeAll>>;
+  try {
+    wrote = await writeAll();
+  } finally {
+    await worktreeLease.release().catch(() => {});
   }
+  const { copy, launched, joinWrite, written, skipped } = wrote;
 
-  // 7. Upkeep: copies nothing needs go, never this one.
-  const pruned = await pruneCopies(store, { keep: [version] });
+  // 7. Upkeep, every part now: it keeps the copy this init runs, whatever config.yml says.
+  const upkeep = await runUpkeep({ root, version, surface: 'cli', nonce: o.nonce, force: true });
+  const pruneRun = upkeep.runs.find((run) => run.part === 'prune-copies' && run.status === 'ran');
+  const removed = (pruneRun?.result as { removed?: unknown } | undefined)?.removed;
+  const pruned = Array.isArray(removed) ? removed.filter((version): version is string => typeof version === 'string') : [];
 
   // 8. The report.
   const done = report({
@@ -679,10 +708,11 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       launcher: launched.action,
       join_record: joinWrite,
       ...(excerptsMax !== undefined ? { excerpts_max: excerptsMax } : {}),
-      pruned: pruned.removed,
+      pruned,
     },
     next_steps: nextSteps(written),
   });
+  done.upkeep = upkeep;
   if (tracker.action === 'missing') {
     done.error = new GrimoireError('NOT_SYNCED', `the tracker .grimoire/config.yml names (root ${tracker.root}) isn't in this clone yet; everything else is set up`, {
       tracker_root: tracker.root,
@@ -698,6 +728,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       ...(skipped.length > 0 ? skipped.map((entry) => `Left alone: ${entry.path} (${entry.why}).`) : []),
       ...(done.error ? [`NOT_SYNCED: ${done.error.message}`] : []),
       ...(warnings.some((w) => w.code === 'SYNC_PENDING') ? [`SYNC_PENDING: ${warnings.find((w) => w.code === 'SYNC_PENDING')!.message}`] : []),
+      ...upkeep.notices,
       'Next steps:',
       ...done.next_steps.map((step) => `  - ${step}`),
       `Other MCP clients: run this stdio server command from the repo root (also under generic_mcp in the JSON report): ${genericMcpCommand()}`,
