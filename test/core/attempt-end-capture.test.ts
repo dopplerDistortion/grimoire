@@ -807,6 +807,29 @@ describe('an unclaimed close', () => {
     expect(records[0]!.body).toContain('tool Agent');
   });
 
+  test('whose call never reaches the transcript in time finds no window: nothing was scanned, so its facts are partial', async ({ world, grimoire, capture }) => {
+    const core = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Not flushed');
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close_never_flushed'));
+
+    expect(closed).toMatchObject({ ok: true });
+    const attempt = (closed as { ok: true; result: { attempt: string } }).result.attempt;
+    const [record] = await sessionRecords(world.a, id, attempt);
+    expect(record!.fields).toMatchObject({
+      session: CLAUDE_SESSION,
+      excerpt: 'cut',
+      excerpt_notes: ['tail_unflushed'],
+      facts: 'partial',
+      window_start: null,
+      steps: 0,
+      reach: null,
+    });
+    expect(record!.body).toBe('');
+    expect((await captureOf(world.a, attempt)).facts_complete).toBe(false);
+  });
+
   test('by a person at their terminal leaves no session record: a person is no agent context', async ({ world, grimoire, capture }) => {
     const core = capture.makeCore();
     const id = await created(core, grimoire.ctx, 'Done by hand');

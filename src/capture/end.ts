@@ -470,8 +470,8 @@ class ContextCut {
     const excerpt: RecordExcerptStatus = failed || input.mode === 'excerpts' ? cut.status : 'off';
     const notes: RecordNote[] = [...cut.notes];
     if (excerpt === 'off' && input.capped) notes.push('capped');
-    const facts: FactsStatus = failed ? (cut.status as FactsStatus) : 'scanned';
-    // No window (every binding call past the flushed end): nothing to show yet.
+    // No window (every binding call past the flushed end): nothing was scanned, and nothing to show yet.
+    const facts: FactsStatus = failed ? (cut.status as FactsStatus) : windowFound ? 'scanned' : 'partial';
     const text = excerpt === 'cut' && windowFound ? cut.excerpt : null;
     return {
       client: cut.client.name,

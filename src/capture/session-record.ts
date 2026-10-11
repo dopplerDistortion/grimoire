@@ -27,7 +27,11 @@ export type RecordExcerptStatus = ExcerptStatus | 'off' | 'no_transcript' | 'pur
  */
 export type RecordNote = 'tail_unflushed' | 'source: pending' | 'capped';
 
-/** The facts statuses (spec §14 Statuses); `facts_complete` needs every bound context `scanned`. */
+/**
+ * The facts statuses (spec §14 Statuses); `facts_complete` needs every bound
+ * context `scanned`. `partial`: a cut that found no window to scan, every
+ * binding call being past the transcript's flushed end.
+ */
 export type FactsStatus = 'scanned' | 'events_only' | 'not_found' | 'unreadable' | 'unmatched' | 'budget' | 'partial' | 'purged';
 
 export interface SessionRecord {
