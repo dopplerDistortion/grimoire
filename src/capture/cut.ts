@@ -7,10 +7,24 @@ import { isCall, isResult, type Step, type StepOrigin, type Transcript } from '.
 // check, The excerpt): client-neutral, over the steps a client's reader made.
 
 /** A binding call the evidence says this context made: its call id, and when grimoire saw it. */
-export interface BindingCall {
+export interface BindingCallById {
   readonly id: string;
   readonly at: string;
 }
+
+/**
+ * A binding call the evidence holds no call id for (T6's fallback, for a Codex
+ * call without `_meta.callId`): it is found by its grimoire operation and the
+ * time grimoire saw it. More than one call fitting gives `unmatched`.
+ */
+export interface BindingCallByTime {
+  readonly id?: undefined;
+  /** The grimoire operation: the MCP tool's name (`claim`, `close`, …). */
+  readonly grimoire: string;
+  readonly at: string;
+}
+
+export type BindingCall = BindingCallById | BindingCallByTime;
 
 export interface CutEvidence {
   /** The issue the attempt is on, e.g. `gr-1`. */
@@ -40,10 +54,14 @@ export interface CutOptions {
 /**
  * - `cut`: the window was found and the excerpt made;
  * - `not_found`: there is no transcript for the context;
- * - `unreadable`: a binding call the evidence names is missing from the parsed transcript;
- * - `unscanned`: the scanner couldn't run, so the excerpt was dropped.
+ * - `unreadable`: a binding call the evidence names is missing from the parsed
+ *   transcript, or the transcript can't be read at all (a `.jsonl.zst` without zstd);
+ * - `unmatched`: a binding call the evidence names only by operation and time
+ *   fits no call, or more than one;
+ * - `unscanned`: the scanner couldn't run, so the excerpt was dropped;
+ * - `budget`: the transcript search ran out of time; the next sweep tries again.
  */
-export type ExcerptStatus = 'cut' | 'not_found' | 'unreadable' | 'unscanned';
+export type ExcerptStatus = 'cut' | 'not_found' | 'unreadable' | 'unmatched' | 'unscanned' | 'budget';
 
 /** `tail_unflushed`: a binding call is past the flushed end, so the cut stops there. */
 export type ExcerptNote = 'tail_unflushed';
@@ -91,20 +109,35 @@ export function cutTranscript(transcript: Transcript, options: CutOptions): Cut 
 
   // The format check: every binding call must be found. One missing inside the
   // parsed range means the reader can't be trusted; one past the flushed end
-  // just hasn't been written yet.
+  // just hasn't been written yet. A call known only by operation and time must
+  // fit exactly one call.
   const callAt = new Map<string, number>();
   steps.forEach((step, index) => {
     if (isCall(step) && !callAt.has(step.id)) callAt.set(step.id, index);
   });
   const notes: ExcerptNote[] = [];
+  const bindingIds: string[] = [];
   for (const call of evidence.bindingCalls) {
-    if (callAt.has(call.id)) continue;
-    if (!pastFlushedEnd(call, transcript)) return unreadable(base);
+    if (call.id !== undefined && callAt.has(call.id)) {
+      bindingIds.push(call.id);
+      continue;
+    }
+    if (call.id === undefined) {
+      const fits = callsAtTime(steps, call);
+      if (fits.length > 1) return emptyCut(base, 'unmatched');
+      if (fits.length === 1) {
+        bindingIds.push(fits[0]!);
+        continue;
+      }
+      if (!pastFlushedEnd(call, transcript)) return emptyCut(base, 'unmatched');
+    } else if (!pastFlushedEnd(call, transcript)) {
+      return emptyCut(base, 'unreadable');
+    }
     if (!notes.includes('tail_unflushed')) notes.push('tail_unflushed');
   }
 
   const claimed = new Set(evidence.claimedCallIds ?? []);
-  const window = selectWindow(steps, evidence, claimed);
+  const window = selectWindow(steps, evidence, bindingIds, claimed);
   const excluded = excludedCallIds(window, claimed);
   const kept = window.filter((step) => !((isCall(step) || isResult(step)) && excluded.has(step.id)));
   const first = kept[0];
@@ -142,32 +175,59 @@ export function cutTranscript(transcript: Transcript, options: CutOptions): Cut 
 
 /** A context with no transcript. */
 export function notFound(transcript: Pick<Transcript, 'client' | 'reader' | 'session' | 'context'>): Cut {
+  return emptyCut(transcript, 'not_found');
+}
+
+/** A cut with no window, steps or excerpt: a context whose transcript was not found or could not be trusted. */
+export function emptyCut(
+  base: Pick<Cut, 'client' | 'reader' | 'session' | 'context'> & { readonly lines?: Cut['lines'] },
+  status: Exclude<ExcerptStatus, 'cut' | 'unscanned'>,
+): Cut {
   return {
-    ...transcript,
-    status: 'not_found',
+    ...base,
+    lines: base.lines ?? { read: 0, unknown: 0, malformed: 0 },
+    status,
     notes: [],
     window: null,
     reach: null,
     counts: { stepsInWindow: 0, stepsKept: 0, characters: 0 },
-    lines: { read: 0, unknown: 0, malformed: 0 },
     steps: [],
     callIds: [],
     excerpt: null,
   };
 }
 
-function unreadable(base: Pick<Cut, 'client' | 'reader' | 'session' | 'context' | 'lines'>): Cut {
-  return {
-    ...base,
-    status: 'unreadable',
-    notes: [],
-    window: null,
-    reach: null,
-    counts: { stepsInWindow: 0, stepsKept: 0, characters: 0 },
-    steps: [],
-    callIds: [],
-    excerpt: null,
+/**
+ * How long after a call's line grimoire may have seen it: the client writes the
+ * call just before sending it, but a time grimoire took from a commit is cut to
+ * the second.
+ */
+const MATCH_SLACK_MS = 1_000;
+
+/**
+ * The calls a binding call known only by operation and time can be (T6's
+ * fallback): grimoire calls of that operation that bracket the time (made at or
+ * before it, and not answered before it); if none does, those made up to a
+ * second after it and not answered before it.
+ */
+function callsAtTime(steps: readonly Step[], call: BindingCallByTime): string[] {
+  const at = Date.parse(call.at);
+  if (!Number.isFinite(at)) return [];
+  const answered = new Map<string, number>();
+  for (const step of steps) if (isResult(step) && !answered.has(step.id)) answered.set(step.id, Date.parse(step.at));
+  const fitting = (slack: number): string[] => {
+    const fits = new Set<string>();
+    for (const step of steps) {
+      if (step.kind !== 'tool_call' || step.grimoire !== call.grimoire) continue;
+      if (Date.parse(step.at) > at + slack) continue;
+      const resultAt = answered.get(step.id);
+      if (resultAt !== undefined && resultAt < at) continue;
+      fits.add(step.id);
+    }
+    return [...fits];
   };
+  const bracketing = fitting(0);
+  return bracketing.length > 0 ? bracketing : fitting(MATCH_SLACK_MS);
 }
 
 /**
@@ -190,8 +250,13 @@ function pastFlushedEnd(call: BindingCall, transcript: Transcript): boolean {
  * the trace holds never opens the window (T5's fallback for a fork whose copied
  * history wasn't detected).
  */
-function selectWindow(steps: readonly Step[], evidence: CutEvidence, claimed: ReadonlySet<string>): Step[] {
-  const binding = new Set(evidence.bindingCalls.map((call) => call.id));
+function selectWindow(
+  steps: readonly Step[],
+  evidence: CutEvidence,
+  bindingIds: readonly string[],
+  claimed: ReadonlySet<string>,
+): Step[] {
+  const binding = new Set(bindingIds);
   const opened = Date.parse(evidence.attemptOpenedAt);
   const ended = evidence.attemptEndedAt === undefined ? Infinity : Date.parse(evidence.attemptEndedAt);
   const anchors = (step: Step): boolean =>
@@ -236,14 +301,25 @@ function hasValue(value: unknown, wanted: string): boolean {
 
 /**
  * Calls kept out of the excerpt, with their results: chore calls and the
- * `grimoire-chores` subagents (spec §14), and calls another excerpt of the
- * trace already holds.
+ * `grimoire-chores` subagents (spec §14), calls that address such a subagent by
+ * its id (Codex's `wait_agent`, `send_input`, `close_agent`), and calls another
+ * excerpt of the trace already holds.
  */
 function excludedCallIds(window: readonly Step[], claimed: ReadonlySet<string>): Set<string> {
   const excluded = new Set(claimed);
+  const choreLaunches = new Set<string>();
   for (const step of window) {
     if (step.kind === 'tool_call' && step.grimoire?.startsWith('chore_')) excluded.add(step.id);
-    if (step.kind === 'subagent_launch' && step.agentType === CHORES_AGENT) excluded.add(step.id);
+    if (step.kind === 'subagent_launch' && step.agentType === CHORES_AGENT) {
+      excluded.add(step.id);
+      choreLaunches.add(step.id);
+    }
+  }
+  const choreAgents = window.flatMap((step) =>
+    step.kind === 'subagent_result' && choreLaunches.has(step.id) && step.agentId !== null ? [step.agentId] : [],
+  );
+  for (const step of window) {
+    if (step.kind === 'tool_call' && choreAgents.some((agent) => hasValue(step.input, agent))) excluded.add(step.id);
   }
   return excluded;
 }
