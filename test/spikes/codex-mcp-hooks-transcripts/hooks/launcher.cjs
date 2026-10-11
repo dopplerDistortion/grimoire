@@ -75,11 +75,16 @@ module.exports = function launcher(args, root) {
   });
   fs.appendFileSync(path.join(commonDir, 'grimoire', 'hook-log.jsonl'), `${JSON.stringify(entry)}\n`);
   // GRIMOIRE_PROBE_OUTPUT picks the stdout shape: plain text (default), Codex's
-  // JSON schema, or Claude Code's shape with the extra `reloadSkills` key.
+  // JSON schema (`codex-json`), Claude Code's real shape with `reloadSkills`
+  // inside hookSpecificOutput (`claude-json`, as spike C captured it), or the
+  // same key at the top level (`claude-json-top`, the first, inexact run).
   const line = `grimoire probe: session line from the hook (${args.join(' ')})`;
   const context = { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: line } };
   const mode = process.env.GRIMOIRE_PROBE_OUTPUT;
-  if (mode === 'claude-json') process.stdout.write(`${JSON.stringify({ reloadSkills: true, ...context })}\n`);
+  if (mode === 'claude-json') {
+    const claude = { hookSpecificOutput: { hookEventName: 'SessionStart', reloadSkills: true, additionalContext: line } };
+    process.stdout.write(`${JSON.stringify(claude)}\n`);
+  } else if (mode === 'claude-json-top') process.stdout.write(`${JSON.stringify({ reloadSkills: true, ...context })}\n`);
   else if (mode === 'codex-json') process.stdout.write(`${JSON.stringify(context)}\n`);
   else process.stdout.write(`${line}\n`);
 };
