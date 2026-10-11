@@ -5,7 +5,7 @@
 // transcripts from the seam-2 fixtures stand in for the clients' transcripts:
 // their tool-use ids stand in for the ids of the grimoire calls the tests make.
 import * as childProcess from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -872,18 +872,55 @@ describe('which contexts are cut', () => {
     expect(records.find((r) => r.fields.context === 'main')!.fields).toMatchObject({ excerpt: 'cut' });
   });
 
-  test('an attempt-ending call cancels the sweeps running in its process before it cuts', async ({ grimoire, capture }) => {
+  test('an attempt-ending call cancels the sweeps running in its process before it cuts', async ({ world, grimoire, capture }) => {
     const core = capture.makeCore();
     const id = await created(core, grimoire.ctx, 'Swept');
     const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    // The subagent's own transcript is away until the sweep is cancelled: a cut made before that can't find it.
+    const subagents = path.join(capture.configDir, 'projects', 'C--Users-user-proj', CLAUDE_SESSION);
+    renameSync(subagents, `${subagents}.away`);
     let cancelled = 0;
-    const done = registerSweep(() => void cancelled++);
+    const done = registerSweep(() => {
+      cancelled++;
+      renameSync(`${subagents}.away`, subagents);
+    });
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    try {
+      await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+    } finally {
+      done();
+      if (existsSync(`${subagents}.away`)) renameSync(`${subagents}.away`, subagents);
+    }
+
+    expect(cancelled).toBe(1);
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.find((r) => r.fields.context === CLAUDE_AGENT)!.fields).toMatchObject({ excerpt: 'cut' });
+  });
+
+  test('a context whose record a human purged is skipped: no record is written, and the trace lists it purged', async ({ world, grimoire, capture }) => {
+    const core = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Purged');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    const subagentKey = sessionKey({ client: 'claude-code', session: CLAUDE_SESSION, context: CLAUDE_AGENT, nonce: 'nonce-claude' });
+    await commitToTracker(world.a, { [`purges/${attempt}/${subagentKey}.md`]: '---\nby: "alice@example.com"\nat: "2026-10-11T03:27:25.000Z"\n---\n' });
     capture.at('2026-10-11T03:27:30.000Z');
 
     await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
-    done();
 
-    expect(cancelled).toBe(1);
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.map((r) => r.fields.context)).toEqual(['main']);
+    expect(records.map((r) => r.name)).not.toContain(`${subagentKey}.md`);
+    const trace = await captureOf(world.a, attempt);
+    expect(trace.contexts.map((c) => [c.key, c.excerpt.status, c.facts])).toEqual(
+      expect.arrayContaining([[subagentKey, 'purged', 'purged']]),
+    );
+    expect(trace.contexts).toHaveLength(2);
+    expect(trace.facts_complete).toBe(false);
   });
 });
 
