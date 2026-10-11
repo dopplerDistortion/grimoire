@@ -13,8 +13,9 @@ vi.mock('node:zlib', async (importOriginal) => {
   return { ...withoutZstd, default: withoutZstd };
 });
 
+const ARCHIVED_THREAD = '01a1296e-1847-78b3-87fa-10b5d9b7d8fd';
+const ARCHIVED_ZST = `codex/transcripts/archived-zstd/archived_sessions/rollout-2026-10-11T08-27-23-${ARCHIVED_THREAD}.jsonl.zst`;
 const THREAD = '01a12946-7d23-7f93-b8c8-aa18d1bca5ef';
-const ARCHIVED_ZST = `codex/transcripts/archived-zstd/archived_sessions/rollout-2026-10-11T07-44-07-${THREAD}.jsonl.zst`;
 const PAGINATED = `codex/transcripts/paginated/rollout-2026-10-11T07-44-07-${THREAD}.jsonl`;
 const evidence = {
   issue: 'gr-7k2pq',
@@ -34,11 +35,11 @@ describe('without zstd support', () => {
     home = await makeTempDir('grimoire-codex-no-zstd-');
     await mkdir(path.join(home, 'archived_sessions'));
     await writeFile(path.join(home, 'archived_sessions', path.basename(ARCHIVED_ZST)), readFixtureBytes(ARCHIVED_ZST));
-    const result = await cutCodex({ codexHome: home, context: THREAD, evidence, paths });
+    const result = await cutCodex({ codexHome: home, context: ARCHIVED_THREAD, evidence, paths });
     const read = await readCodexTranscript(fixturePath(ARCHIVED_ZST));
 
     expect(result.status).toBe('unreadable');
-    expect(result).toMatchObject({ excerpt: null, steps: [], window: null, reach: null, context: THREAD });
+    expect(result).toMatchObject({ excerpt: null, steps: [], window: null, reach: null, context: ARCHIVED_THREAD });
     expect(read).toEqual({ found: false, file: fixturePath(ARCHIVED_ZST), unreadable: 'zstd_unavailable' });
   });
 

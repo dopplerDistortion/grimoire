@@ -372,6 +372,45 @@ describe('a compacted session', () => {
   });
 });
 
+/** The same compaction in legacy mode, then a second turn on the thread. */
+const COMPACTED_LEGACY_THREAD = '01a1296f-3c01-7853-a8c8-7fac7b0120f3';
+const COMPACTED_LEGACY = `${TX}/compaction-legacy/rollout-2026-10-11T08-28-38-${COMPACTED_LEGACY_THREAD}.jsonl`;
+
+describe('a compacted legacy session', () => {
+  it('is cut across the compaction the same way, with line indexes as refs', async () => {
+    const result = await cutCodex({
+      transcript: fixturePath(COMPACTED_LEGACY),
+      context: COMPACTED_LEGACY_THREAD,
+      evidence: {
+        issue: 'gr-3',
+        attemptOpenedAt: '2026-10-11T05:28:00.000Z',
+        // Ended before the second turn's prompt.
+        attemptEndedAt: '2026-10-11T05:28:38.430Z',
+        bindingCalls: [{ id: 'call_2_0', at: '2026-10-11T05:28:38.350Z' }],
+      },
+      paths: { home: HOME, repo: 'C:\\gok130\\runs\\legacy-compact\\work', tmp: 'C:\\gok130' },
+    });
+
+    expect(result.status).toBe('cut');
+    expect(result.steps.map(label)).toEqual([
+      'prompt',
+      'call tool_search',
+      'result ok',
+      'call mcp__probe__echo',
+      'result ok',
+      'compaction',
+      'call mcp__probe__echo',
+      'result ok',
+      'assistant',
+    ]);
+    expect(result.steps.find((s) => s.kind === 'compaction')).toMatchObject({
+      text: 'SUMMARY: the user asked for scripted probe calls; all ran.',
+      ref: '21',
+    });
+    expect(result.reach).toEqual({ at: '2026-10-11T05:28:38.419Z', ref: '33' });
+  });
+});
+
 const ROOT_THREAD = '01a12947-11cf-7fd1-8ece-b3d7fe5a6e72';
 const CHILD_THREAD = '01a12947-16a2-7152-be00-4e4b1e12a4d8';
 const ROOT = `${TX}/subagent/rollout-2026-10-11T07-44-45-${ROOT_THREAD}.jsonl`;
@@ -475,6 +514,46 @@ describe('a subagent thread (T4 confirmed)', () => {
   });
 });
 
+/** The subagent plan under a legacy root: the child it spawned is paginated, so the history mode is per file. */
+const LEGACY_ROOT_THREAD = '01a12970-01ef-78e3-beb0-6cf15194ce44';
+const LEGACY_ROOT_CHILD_THREAD = '01a12970-02ea-76f0-b5e7-f464f0b54030';
+const LEGACY_ROOT = `${TX}/subagent-legacy-root/rollout-2026-10-11T08-29-28-${LEGACY_ROOT_THREAD}.jsonl`;
+const LEGACY_ROOT_CHILD = `${TX}/subagent-legacy-root/rollout-2026-10-11T08-29-29-${LEGACY_ROOT_CHILD_THREAD}.jsonl`;
+
+describe('a subagent of a legacy root', () => {
+  const attempt = { issue: 'gr-7k2pq', attemptOpenedAt: '2026-10-11T05:29:00.000Z' };
+  const paths = { home: HOME, repo: 'C:\\gok130\\runs\\legacy-subagent\\work', tmp: 'C:\\gok130' };
+
+  it('is cut from its own paginated transcript, and the legacy root names it from the spawn_agent output alone', async () => {
+    const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [LEGACY_ROOT, LEGACY_ROOT_CHILD] });
+    const child = await cutCodex({
+      codexHome,
+      context: LEGACY_ROOT_CHILD_THREAD,
+      session: LEGACY_ROOT_THREAD,
+      evidence: { ...attempt, bindingCalls: [{ id: 'call_5_0', at: '2026-10-11T05:29:29.280Z' }] },
+      paths,
+    });
+    const root = await readCodexTranscript(fixturePath(LEGACY_ROOT));
+
+    expect(child.status).toBe('cut');
+    expect([child.session, child.context]).toEqual([LEGACY_ROOT_THREAD, LEGACY_ROOT_CHILD_THREAD]);
+    expect(child.steps.map(label)).toEqual([
+      'prompt',
+      'call tool_search',
+      'result ok',
+      'call mcp__probe__echo',
+      'result ok',
+      'call exec_command',
+      'result ok',
+      'assistant',
+    ]);
+    // A legacy root writes no CollabAgentToolCall record.
+    expect(root.found && root.transcript.steps.find((s) => s.kind === 'subagent_result')).toMatchObject({
+      agentId: LEGACY_ROOT_CHILD_THREAD,
+    });
+  });
+});
+
 /**
  * Node reads zstd from 22.15; package.json allows any 22. Without it a
  * `.jsonl.zst` is unreadable (codex-capture-no-zstd.test.ts), so the cases that
@@ -482,8 +561,13 @@ describe('a subagent thread (T4 confirmed)', () => {
  */
 const withZstd = it.skipIf(typeof zlib.createZstdDecompress !== 'function');
 
-/** Scenario A's paginated session after `thread/archive` and `rollout/compress`. */
-const ARCHIVED_ZST = `${TX}/archived-zstd/archived_sessions/rollout-2026-10-11T07-44-07-${PAGINATED_THREAD}.jsonl.zst`;
+/**
+ * A short paginated session (`tool_search`, an MCP `echo` naming gr-7k2pq,
+ * `git log`): as it was, and after `thread/archive` and `rollout/compress`.
+ */
+const ARCHIVED_THREAD = '01a1296e-1847-78b3-87fa-10b5d9b7d8fd';
+const ARCHIVED_PLAIN = `${TX}/archived-zstd/before-archive/rollout-2026-10-11T08-27-23-${ARCHIVED_THREAD}.jsonl`;
+const ARCHIVED_ZST = `${TX}/archived-zstd/archived_sessions/rollout-2026-10-11T08-27-23-${ARCHIVED_THREAD}.jsonl.zst`;
 
 describe('archived and compressed sessions', () => {
   const evidence: CutEvidence = {
@@ -492,42 +576,62 @@ describe('archived and compressed sessions', () => {
     bindingCalls: [PAGINATED_ECHO],
   };
   const paths = { home: HOME, repo: repo('a1'), tmp: TMP };
+  /** The archived session's context, evidence (its `echo`) and paths (its fix-pass run folder). */
+  const archived = {
+    context: ARCHIVED_THREAD,
+    evidence: {
+      issue: 'gr-7k2pq',
+      attemptOpenedAt: '2026-10-11T05:27:00.000Z',
+      bindingCalls: [{ id: 'call_2_0', at: '2026-10-11T05:27:23.700Z' }],
+    },
+    paths: { home: HOME, repo: 'C:\\gok130\\runs\\zst\\work', tmp: 'C:\\gok130' },
+  };
 
   withZstd('are found in archived_sessions/ by thread id, and a .jsonl.zst is read through Node’s zstd', async () => {
     const codexHome = await codexHomeWith({ archived_sessions: [ARCHIVED_ZST] });
-    const result = await cutCodex({ codexHome, context: PAGINATED_THREAD, evidence, paths });
-    const live = await cut(PAGINATED, PAGINATED_THREAD, evidence);
+    const result = await cutCodex({ codexHome, ...archived });
+    const live = await cutCodex({ transcript: fixturePath(ARCHIVED_PLAIN), ...archived });
 
     expect(result.status).toBe('cut');
+    expect(result.steps.map(label)).toEqual([
+      'prompt',
+      'call tool_search',
+      'result ok',
+      'call mcp__probe__echo',
+      'result ok',
+      'call exec_command',
+      'result ok',
+      'assistant',
+    ]);
     expect(result.steps).toEqual(live.steps);
-    expect(result.reach).toEqual({ at: '2026-10-11T04:44:26.300Z', ref: '48' });
+    expect(result.reach).toEqual({ at: '2026-10-11T05:27:23.940Z', ref: '23' });
     await expectGolden('archived-zstd', result);
   });
 
   withZstd('are found from a hook’s transcript_path, in its extended \\\\?\\ spelling, after the file was archived and compressed', async () => {
     const codexHome = await codexHomeWith({ archived_sessions: [ARCHIVED_ZST] });
-    const hookPath = `\\\\?\\${path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(PAGINATED))}`;
-    const result = await cutCodex({ transcript: hookPath, context: PAGINATED_THREAD, evidence, paths });
+    const hookPath = `\\\\?\\${path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(ARCHIVED_PLAIN))}`;
+    const result = await cutCodex({ transcript: hookPath, ...archived });
 
     expect(result.status).toBe('cut');
-    expect(result.reach?.ref).toBe('48');
+    expect(result.reach?.ref).toBe('23');
   });
 
   withZstd('are read where they were compressed in place, from the plain name a hook gave', async () => {
     const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [ARCHIVED_ZST] });
-    const hookPath = path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(PAGINATED));
-    const result = await cutCodex({ transcript: hookPath, context: PAGINATED_THREAD, evidence, paths });
+    const hookPath = path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(ARCHIVED_PLAIN));
+    const result = await cutCodex({ transcript: hookPath, ...archived });
 
     expect(result.status).toBe('cut');
   });
 
   it('prefer the plain transcript when both a .jsonl and a .jsonl.zst exist, as Codex does', async () => {
-    const plain = await editedCopy(PAGINATED, (lines) => [...lines, lines.at(-1)!.replace('"ordinal":51', '"ordinal":52')]);
+    const plain = await editedCopy(ARCHIVED_PLAIN, (lines) => [...lines, lines.at(-1)!.replace('"ordinal":26', '"ordinal":27')]);
     const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [ARCHIVED_ZST] });
-    await writeFile(path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(PAGINATED)), await readFile(plain));
-    const result = await cutCodex({ codexHome, context: PAGINATED_THREAD, evidence, paths });
+    await writeFile(path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(ARCHIVED_PLAIN)), await readFile(plain));
+    const result = await cutCodex({ codexHome, ...archived });
 
-    expect(result.lines.read).toBe(53);
+    expect(result.lines.read).toBe(28);
   });
 
   it('are searched for under $CODEX_HOME when neither a Codex home nor a transcript is given', async () => {
@@ -585,7 +689,7 @@ describe('archived and compressed sessions', () => {
     const bytes = readFixtureBytes(ARCHIVED_ZST);
     const file = path.join(dir, path.basename(ARCHIVED_ZST));
     await writeFile(file, bytes.subarray(0, Math.floor(bytes.length / 2)));
-    const result = await cutCodex({ transcript: file, context: PAGINATED_THREAD, evidence, paths });
+    const result = await cutCodex({ transcript: file, ...archived });
 
     expect(result.status).toBe('unreadable');
     expect(result.steps).toEqual([]);
@@ -820,6 +924,12 @@ describe('the reader', () => {
     [ROOT],
     [CHILD],
     [MCP_RESULTS],
+    [COMPACTED_LEGACY],
+    [LEGACY_ROOT],
+    [LEGACY_ROOT_CHILD],
+    [ARCHIVED_PLAIN],
+    [`${TX}/truncation/rollout-2026-10-11T07-31-18-01a1293a-c14b-7601-bf2e-28ea1a478573.jsonl`],
+    [`${TX}/truncation-unknown-model/rollout-2026-10-11T07-50-49-01a1294c-9ea6-72f2-b265-a826f6fb4334.jsonl`],
   ])('knows every line, item and event type Codex 0.162.1 wrote in %s', async (file) => {
     const read = await readCodexTranscript(fixturePath(file));
 
@@ -829,7 +939,7 @@ describe('the reader', () => {
   withZstd('knows every line, item and event type Codex 0.162.1 wrote in the archived, compressed session', async () => {
     const read = await readCodexTranscript(fixturePath(ARCHIVED_ZST));
 
-    expect(read.found && read.transcript.lines).toMatchObject({ read: 52, unknown: 0, malformed: 0 });
+    expect(read.found && read.transcript.lines).toMatchObject({ read: 27, unknown: 0, malformed: 0 });
   });
 
   it('names the grimoire operation of MCP calls, and marks exec_command calls that run the grimoire CLI', async () => {
