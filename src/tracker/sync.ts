@@ -2,7 +2,7 @@
 // explicit refspec, so a teammate's plain `git fetch` brings it. Failures come
 // back in the outcome, never as throws: the caller records them.
 import { GrimoireError } from '../errors';
-import { runGit } from '../git/run';
+import type { GitRun } from '../git/run';
 import { remoteTrackerRef, TRACKER_BRANCH } from './layout';
 import {
   classifyFailure,
@@ -64,6 +64,14 @@ export interface SyncOutcome {
 export interface SyncHost {
   /** The checkout's top level. */
   readonly root: string;
+  /** Runs a local git in the checkout: GitStalledError (BUSY) when it gets stuck. */
+  git(args: readonly string[]): Promise<GitRun>;
+  /**
+   * Moves `ref` from `old` (null: it must not exist) to `next` with a
+   * compare-and-set; a lost one is no error. Cleans up after a git that gets
+   * stuck on it, and then throws.
+   */
+  updateRef(ref: string, next: string, old: string | null): Promise<void>;
   /** The local tracker tip and every remote-tracking tracker tip, by remote name, resolved fresh. */
   trackerRefs(): Promise<TrackerRefs>;
   /** Whether the tracker's history is shallow in this clone. */
@@ -93,8 +101,11 @@ interface SyncConfig {
   readonly sshChosen: boolean;
 }
 
-async function readSyncConfig(root: string): Promise<SyncConfig> {
-  const run = await runGit(root, [
+/** A local git in the checkout. */
+type LocalGit = SyncHost['git'];
+
+async function readSyncConfig(git: LocalGit): Promise<SyncConfig> {
+  const run = await git([
     'config',
     '-z',
     '--get-regexp',
@@ -133,16 +144,16 @@ function chooseRemote(config: SyncConfig, withTracker: readonly string[]): strin
 }
 
 /** `git merge-base --is-ancestor`: false too when either commit is missing. */
-async function isAncestor(root: string, ancestor: string, descendant: string): Promise<boolean> {
+async function isAncestor(git: LocalGit, ancestor: string, descendant: string): Promise<boolean> {
   if (ancestor === descendant) return true;
-  const run = await runGit(root, ['merge-base', '--is-ancestor', ancestor, descendant]);
+  const run = await git(['merge-base', '--is-ancestor', ancestor, descendant]);
   return run.code === 0;
 }
 
 /** Objects of `commits`' trees (and the commits themselves) missing from this partial clone. */
-async function missingObjects(root: string, commits: readonly string[]): Promise<string[]> {
+async function missingObjects(git: LocalGit, commits: readonly string[]): Promise<string[]> {
   if (commits.length === 0) return [];
-  const run = await runGit(root, ['rev-list', '--objects', '--missing=print', '--no-walk', ...commits]);
+  const run = await git(['rev-list', '--objects', '--missing=print', '--no-walk', ...commits]);
   // A commit itself is missing: fetch it, and everything under it, whole.
   if (run.code !== 0) return [...commits];
   return run.stdout
@@ -168,7 +179,8 @@ function parseListing(stdout: Buffer): { head: string | null; tracker: string | 
 /** Fetches, folds and pushes the tracker. Network and remote failures come back in the outcome. */
 export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncOutcome> {
   const { root } = host;
-  const config = await readSyncConfig(root);
+  const git = (args: readonly string[]) => host.git(args);
+  const config = await readSyncConfig(git);
   let refs = await host.trackerRefs();
   const remote = chooseRemote(config, [...refs.remotes.keys()]);
   const url = remote === null ? null : recordable(stripUserinfo(config.urls.get(remote) ?? remote));
@@ -216,7 +228,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     const current = await host.trackerRefs();
     const tips = [current.local, current.remotes.get(remote) ?? null].filter((tip): tip is string => tip !== null);
     if (tips.length < 2 || tips[0] === tips[1]) return [...new Set(tips)];
-    const bases = await runGit(root, ['merge-base', '--all', ...tips]);
+    const bases = await git(['merge-base', '--all', ...tips]);
     return [...tips, ...bases.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '')];
   };
 
@@ -247,7 +259,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     // 3. A partial clone: backfill the objects the tips need.
     if (config.partial) {
       for (let backfill = 0; backfill < BACKFILL_ROUNDS; backfill++) {
-        const missing = await missingObjects(root, await tipCommits());
+        const missing = await missingObjects(git, await tipCommits());
         if (missing.length === 0) break;
         const run = await net(
           [
@@ -281,7 +293,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
           fold = folded.commit;
           local = folded.commit;
         }
-      } else if (!(await isAncestor(root, local, remoteTip)) && !(await isAncestor(root, remoteTip, local))) {
+      } else if (!(await isAncestor(git, local, remoteTip)) && !(await isAncestor(git, remoteTip, local))) {
         throw new GrimoireError('NO_GIT_IDENTITY', `git user.email is not set in ${root}, so the fetched tracker can't be folded`, {
           name: spec.identity?.name ?? null,
           email: spec.identity?.email ?? null,
@@ -292,14 +304,16 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
 
     // 5. Push, unless the remote holds the local tip already.
     if (local === null) return outcome({ state: 'in-sync' });
-    if (tracker !== null && (await isAncestor(root, local, tracker))) return outcome({ state: 'in-sync' });
+    if (tracker !== null && (await isAncestor(git, local, tracker))) return outcome({ state: 'in-sync' });
     // Never the first branch of an empty remote: it would become the default branch.
     if (head === null) return outcome({ state: 'pending', reason: 'no-default-branch' });
     const push = await net(['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-recurse-submodules', remote, `${local}:${TRACKER_BRANCH}`]);
     if (push.code === 0 && !push.timedOut) {
       // git updates the remote-tracking ref only when a fetch refspec maps the branch. A
-      // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile.
-      await runGit(root, ['update-ref', tracking, local, tracked ?? '']);
+      // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile. It is
+      // only a record of what the remote holds, which the next fetch sets right, so a git
+      // stuck on it takes nothing from the push, which landed.
+      await host.updateRef(tracking, local, tracked).catch(() => {});
       remoteTip = local;
       return outcome({ state: 'pushed' });
     }

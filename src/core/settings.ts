@@ -66,8 +66,8 @@ const linkBase: Pick<SettingSpec, 'parse' | 'why'> = {
  * Every setting this release knows, by key. The part of grimoire a setting
  * governs adds it here, with whatever a change must do in the same commit
  * (the excerpt mode, the loop pause and the chore and proposal thresholds come
- * with their tickets; turning `skills.delivery` off removes copies and stubs
- * once generated output exists). A tracker's keys this release
+ * with the parts that use them; turning `skills.delivery` off removes copies
+ * and stubs once generated output exists). A tracker's keys this release
  * doesn't know are still shown and kept.
  */
 const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(Object.entries({
