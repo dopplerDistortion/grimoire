@@ -10,6 +10,7 @@ import type { UpdateResult } from './update';
 import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, ReopenResult } from './human-ops';
 import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
+import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -119,4 +120,6 @@ export interface OpResults {
   resolve: ResolveResult;
   outcome_set: OutcomeSetResult;
   settings_set: SettingsSetResult;
+  sync: SyncResult;
+  sync_status: SyncStatusResult;
 }
