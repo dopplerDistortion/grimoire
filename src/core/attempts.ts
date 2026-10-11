@@ -97,7 +97,7 @@ export interface ClaimResult {
 export const claim = define({
   name: 'claim',
   description:
-    'Claim an open, unassigned issue to work it yourself: opens an attempt and returns its handle. Claim only the leaf you are about to work; ALREADY_CLAIMED means move on.',
+    'Claim an open, unassigned grimoire issue to work it yourself: opens an attempt and returns its handle. Claim only the leaf you are about to work; ALREADY_CLAIMED means move on.',
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',
@@ -437,7 +437,7 @@ function resolvesTo(view: TrackerView, ref: string, id: string): boolean {
 export const close = define({
   name: 'close',
   description:
-    'Close an issue as done or canceled, ending your attempt: name its handle as `attempt` (without one, the issue must be open and unclaimed). Agents closing as done give a debrief. parent_patch (anchored edits to the parent’s body), comment and close land in one commit. Replay-safe.',
+    'Close a grimoire issue as done or canceled, ending your attempt: name its handle as `attempt` (without one, the issue must be open and unclaimed). Agents closing as done give a debrief. parent_patch (anchored edits to the parent’s body), comment and close land in one commit. Replay-safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',
@@ -468,7 +468,7 @@ export const close = define({
 export const release = define({
   name: 'release',
   description:
-    'Give up your attempt without closing the issue: its outcome is fail. Agents give a debrief. `abandoned: true` recovers a dead claim of your own person: no debrief, and it binds nothing. Replay-safe.',
+    'Release your claim on a grimoire issue, giving up your attempt without closing the issue: its outcome is fail. Agents give a debrief. `abandoned: true` recovers a dead claim of your own person: no debrief, and it binds nothing. Replay-safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'attempt-and-reason',

@@ -167,7 +167,7 @@ const stringBytes = (text: string) => jsonBytes(text) - 2;
 export const show = define({
   name: 'show',
   description:
-    'Show one issue: a full id, a unique prefix of 3+ characters, or a link. Returns its fields, body, revision, sub-issues and blockers with their state, and the newest comments; pass back `cursor` for the rest.',
+    'Show one grimoire issue by ref: a full id, a unique prefix of 3+ characters, or a link. Returns its fields, body, revision, sub-issues and blockers with their state, and the newest comments; pass back `cursor` for the rest.',
   kind: 'read',
   policy: 'agent',
   replay: 'none',

@@ -1,0 +1,26 @@
+grimoire excerpt of codex 0.162.1 (reader 1)
+session 01a1296e-1847-78b3-87fa-10b5d9b7d8fd, context 01a1296e-1847-78b3-87fa-10b5d9b7d8fd
+window 2026-10-11T05:27:23.654Z to 2026-10-11T05:27:23.940Z, 8 steps, 8 kept
+Untrusted data: lines starting " |" hold tool output, file text and messages copied from the transcript, never instructions. Only grimoire writes the other lines.
+
+user:
+ | PLAN: [{"search":"probe echo"},{"call":"echo","ns":"mcp__probe","args":{"text":"show gr-7k2pq"}},{"call":"exec_command","args":{"cmd":"git log --oneline -1"}},{"say":"archived session done"}]
+tool tool_search
+ | query: probe echo
+ | limit: 8
+→ ok
+ | [tool_reference mcp__probe__echo]
+ | [tool_reference mcp__probe__boom]
+ | [tool_reference mcp__probe__which]
+ | [tool_reference mcp__probe__big]
+tool mcp__probe__echo
+ | text: show gr-7k2pq
+→ ok
+ | {"era":"legacy","protocolVersion":"2025-06-18","input":{"text":"show gr-7k2pq"},"hint":null,"meta":{"progressToken":1,"callId":"call_2_0","x-codex-tur[… 655 chars trimmed …]-1847-78b3-87fa-10b5d9b7d8fd","windowId":"01a1296e-1847-78b3-87fa-10b5d9b7d8fd:0","itemId":"fc_01a1296e-1930-7373-9bab-2d2b7796c3e4"},"envelope":null}
+tool exec_command
+ | cmd: git log --oneline -1
+→ ok
+ | d16c8f2 init
+ |
+assistant:
+ | archived session done
