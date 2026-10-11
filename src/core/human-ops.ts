@@ -3,8 +3,9 @@
 // surface gate admits them only from the dashboard and from a person's own
 // terminal (checkSurface in op.ts).
 import { GrimoireError, invalid } from '../errors';
-import { parseWriteRef, type AttemptRecord, type TrackerDraft } from '../tracker';
+import { parseWriteRef, type AttemptRecord, type IssueRecord, type TrackerDraft, type TrackerView } from '../tracker';
 import { checkClaimable, parseHandle, recordedActor, sealOpenAttempt } from './attempts';
+import { afterSeal, cutForEnding, sealCaptures, type EndingCapture } from './capture';
 import { fieldConflict, issueConflict, namesIssue, openAttemptsOf, relatedIssue, stateConflict } from './derive';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
@@ -67,25 +68,21 @@ export const reassign = define({
   policy: 'human-only',
   replay: 'none',
   input: s.object({ id: idInput, assignee: personInput }),
-  async run(input, { ctx, tracker, actor }): Promise<ReassignResult> {
+  async run(input, env): Promise<ReassignResult> {
+    const { ctx, tracker, actor } = env;
     const author = writer(ctx);
     const by = recordedActor(author.email, actor);
     const ref = parseWriteRef(input.id, 'id');
     const assignee = parseAssignee(input.assignee);
-    const write = await tracker.transact({ op: 'reassign', author, actor }, (draft) => {
-      const id = draft.resolveWrite(ref, 'id');
-      const open = openAttemptsOf(draft, id);
-      if (open.length === 0) throw invalid({ id: `nobody holds ${id}; assign it instead` });
-      if (open.length > 1) {
-        // A reassign ends one attempt and opens another (spec §19); which claim yields is the human's call.
-        const holders = open.map((attempt) => `${attempt.record.id} (${attempt.assignee})`).join(', ');
-        throw new GrimoireError(
-          'STATE_CONFLICT',
-          `${id} has ${open.length} open attempts, claimed on different clones: ${holders}; release one as abandoned first, then reassign the other`,
-          { conflict: issueConflict(draft, id, open) },
-        );
-      }
-      const ending = open[0]!.record;
+    // Validate without writing, cut the bound contexts, then commit once (spec §14 Cut at attempt end).
+    const view = await tracker.read();
+    const checked = reassignable(view, ref);
+    const capture = await cutForEnding(env, view, { issue: checked.id, attempt: checked.ending, op: 'reassign', binds: true });
+    let sealed: { handle: string; keys: string[] } | null = null;
+    const write = await tracker.transact({ op: 'reassign', author, actor }, async (draft) => {
+      sealed = null;
+      const { id, ending } = reassignable(draft, ref);
+      if (ending.id === checked.ending.id) sealed = { handle: ending.id, keys: await sealCaptures(draft, ending.id, capture) };
       // An ending call binds (spec §14 Binding): the commit names the attempt it ended, never the one it opens.
       sealOpenAttempt(draft, ending.id, { ended: 'reassign', by, binds: true });
       checkClaimable(draft, id, author.email);
@@ -96,9 +93,28 @@ export const reassign = define({
         attempt: ending.id,
       };
     });
+    const done = sealed as { handle: string; keys: string[] } | null;
+    if (done) await afterSeal(env, done.handle, capture, done.keys, write.commit);
     return write.result;
   },
 });
+
+/** The one open attempt a reassign ends; INVALID with none, STATE_CONFLICT with two (claims made on different clones). */
+function reassignable(view: TrackerView, ref: string): { id: string; ending: AttemptRecord } {
+  const id = view.resolveWrite(ref, 'id');
+  const open = openAttemptsOf(view, id);
+  if (open.length === 0) throw invalid({ id: `nobody holds ${id}; assign it instead` });
+  if (open.length > 1) {
+    // A reassign ends one attempt and opens another (spec §19); which claim yields is the human's call.
+    const holders = open.map((attempt) => `${attempt.record.id} (${attempt.assignee})`).join(', ');
+    throw new GrimoireError(
+      'STATE_CONFLICT',
+      `${id} has ${open.length} open attempts, claimed on different clones: ${holders}; release one as abandoned first, then reassign the other`,
+      { conflict: issueConflict(view, id, open) },
+    );
+  }
+  return { id, ending: open[0]!.record };
+}
 
 /** An issue a reopen makes wait again. */
 export interface Reblocked {
@@ -141,19 +157,28 @@ export const reopen = define({
     id: idInput,
     comment: s.string({ nonBlank: true, description: 'why it is reopened (required)' }),
   }),
-  async run(input, { ctx, tracker, actor }): Promise<ReopenResult> {
+  async run(input, env): Promise<ReopenResult> {
+    const { ctx, tracker, actor } = env;
     const author = writer(ctx);
     const by = recordedActor(author.email, actor);
     const ref = parseWriteRef(input.id, 'id');
-    const write = await tracker.transact({ op: 'reopen', author, actor }, (draft) => {
-      const id = draft.resolveWrite(ref, 'id');
-      const issue = draft.issue(id)!;
-      if (issue.status === 'open') throw invalid({ id: `${id} is already open` });
-      // A reopen writes status: a status the fold set aside is resolved first (spec §4).
-      const conflict = fieldConflict(draft, id);
-      if (conflict?.fields.includes('status')) throw stateConflict(id, conflict, 'it can’t be reopened');
-      // Open and unassigned with no attempt: an attempt left open on the closed issue (after a fold) is superseded.
-      for (const open of openAttemptsOf(draft, id)) sealOpenAttempt(draft, open.record.id, { ended: 'superseded', by, binds: false });
+    // An attempt left open on the closed issue (after a fold) is superseded: it is cut first, like any ending (spec §14).
+    const view = await tracker.read();
+    const checked = reopenable(view, ref);
+    const captures = new Map<string, EndingCapture>();
+    for (const open of openAttemptsOf(view, checked.id)) {
+      captures.set(open.record.id, await cutForEnding(env, view, { issue: checked.id, attempt: open.record, op: 'reopen', binds: false }));
+    }
+    const sealed: { handle: string; keys: string[] }[] = [];
+    const write = await tracker.transact({ op: 'reopen', author, actor }, async (draft) => {
+      sealed.length = 0;
+      const { id, issue } = reopenable(draft, ref);
+      // Open and unassigned with no attempt.
+      for (const open of openAttemptsOf(draft, id)) {
+        const capture = captures.get(open.record.id);
+        if (capture) sealed.push({ handle: open.record.id, keys: await sealCaptures(draft, open.record.id, capture) });
+        sealOpenAttempt(draft, open.record.id, { ended: 'superseded', by, binds: false });
+      }
       const closing = closingAttempt(draft, id);
       let outcome: ReopenResult['outcome'] = null;
       // A human's override beats every rule, the reopen flip included.
@@ -171,9 +196,21 @@ export const reopen = define({
       if (parent?.status === 'open') reblocked.push({ id: parent.id, title: parent.title, via: 'parent' });
       return { result: { id, status: 'open' as const, comment: comment.id, outcome, reblocked }, issue: id };
     });
+    for (const { handle, keys } of sealed) await afterSeal(env, handle, captures.get(handle)!, keys, write.commit);
     return write.result;
   },
 });
+
+/** The closed issue a reopen opens again: INVALID when it is open, STATE_CONFLICT when a fold set its status aside (spec §4). */
+function reopenable(view: TrackerView, ref: string): { id: string; issue: IssueRecord } {
+  const id = view.resolveWrite(ref, 'id');
+  const issue = view.issue(id)!;
+  if (issue.status === 'open') throw invalid({ id: `${id} is already open` });
+  // A reopen writes status: a status the fold set aside is resolved first (spec §4).
+  const conflict = fieldConflict(view, id);
+  if (conflict?.fields.includes('status')) throw stateConflict(id, conflict, 'it can’t be reopened');
+  return { id, issue };
+}
 
 export interface DeleteResult {
   id: string;

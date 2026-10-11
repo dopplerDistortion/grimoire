@@ -10,7 +10,10 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
 import { sessionKey } from '../../src/capture/seen-here';
+import { registerSweep } from '../../src/capture/sweeps';
+import { recordRevealedRoot } from '../../src/capture/transcript-roots';
 import type { CallContext, Core, CoreOptions } from '../../src/core';
+import { MachineLocalStore } from '../../src/machine-local';
 import { createScanner } from '../../src/scanner';
 import { openTracker } from '../../src/tracker';
 import { commitToTracker, coreTest, TRACKER_REF, trackerFile, trackerTip } from './support';
@@ -369,5 +372,157 @@ describe('a stored record', () => {
     expect(record!.name).toBe(`${key}.md`);
     expect(record!.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['source: pending'], reach: { at: '2026-10-11T03:27:16.000Z', ref: 'b' } });
     expect(record!.body).toBe('user:\n | an earlier excerpt\n');
+  });
+});
+
+/** Codex's spike-E subagent session: the root thread spawned one child thread, both under a scripted model. */
+const CODEX_ROOT = '01a12947-11cf-7fd1-8ece-b3d7fe5a6e72';
+const CODEX_CHILD = '01a12947-16a2-7152-be00-4e4b1e12a4d8';
+const CODEX_TX = 'codex/transcripts/subagent';
+
+/** A Codex MCP call from `thread` of the root session, as call `callId` (Codex runs no grimoire hook: `_meta` only). */
+function codexCall(base: CallContext, thread: string, callId: string): CallContext {
+  return {
+    ...base,
+    client: { name: 'codex-mcp-client', version: '0.162.1' },
+    evidence: {},
+    mcp: { era: 'legacy', hint: null, meta: { sessionId: CODEX_ROOT, threadId: thread, callId } },
+    nonce: 'nonce-codex',
+  };
+}
+
+describe('Codex', () => {
+  test('each thread that passed the handle is cut from its own rollout, found by thread id in the Codex home a hook revealed', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    // The rollouts live in a Codex home only a hook's transcript_path names: the default home is elsewhere.
+    const codexHome = await makeTempDir('grimoire-codex-home-');
+    const day = path.join(codexHome, 'sessions', '2026', '10', '11');
+    await mkdir(day, { recursive: true });
+    const rootFile = `rollout-2026-10-11T07-44-45-${CODEX_ROOT}.jsonl`;
+    await cp(fixturePath(`${CODEX_TX}/${rootFile}`), path.join(day, rootFile));
+    await cp(fixturePath(`${CODEX_TX}/rollout-2026-10-11T07-44-47-${CODEX_CHILD}.jsonl`), path.join(day, `rollout-2026-10-11T07-44-47-${CODEX_CHILD}.jsonl`));
+    try {
+      const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+      await recordRevealedRoot(machine, { client: 'codex', session: CODEX_ROOT, transcriptPath: path.join(day, rootFile) });
+      const core = capture.makeCore();
+      capture.at('2026-10-11T04:44:47.100Z');
+      const id = await created(core, grimoire.ctx, 'Codex work');
+      const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_2_0'));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const { attempt } = claim.result;
+      capture.at('2026-10-11T04:44:47.340Z');
+      await core.call('update', { id, labels_add: ['read'], attempt }, codexCall(grimoire.ctx, CODEX_CHILD, 'call_5_0'));
+      capture.at('2026-10-11T04:44:47.800Z');
+
+      const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_8_0'));
+
+      expect(closed).toMatchObject({ ok: true });
+      const records = await sessionRecords(world.a, id, attempt);
+      expect(records).toHaveLength(2);
+      const root = records.find((r) => r.fields.context === CODEX_ROOT)!;
+      const child = records.find((r) => r.fields.context === CODEX_CHILD)!;
+      expect(root.fields).toMatchObject({ client: 'codex', client_version: '0.162.1', session: CODEX_ROOT, source: 'meta', excerpt: 'cut', excerpt_notes: [] });
+      expect(child.fields).toMatchObject({ session: CODEX_ROOT, source: 'meta', excerpt: 'cut', reach: { at: '2026-10-11T04:44:47.685Z', ref: expect.stringMatching(/^\d+$/) } });
+      // The seam-2 goldens: the root keeps the child only as its launch, result and wait. (How much a trim cuts
+      // depends on the paths the goldens rewrote: the spike's home and repo, not this test's.)
+      const trims = (text: string) => text.replace(/\[… \d+ chars trimmed …\]/g, '[… trimmed …]');
+      expect(trims(root.body)).toBe(trims(golden('codex/subagent-root')));
+      expect(trims(child.body)).toBe(trims(golden('codex/subagent')));
+    } finally {
+      await removeDir(codexHome);
+    }
+  });
+});
+
+describe('the other attempt-ending ops', () => {
+  test('a human’s abandoned release binds nothing, so only the bound agent contexts are cut', async ({ world, grimoire, capture }) => {
+    const core = capture.makeCore();
+    const human: CallContext = { ...grimoire.ctx, surface: 'cli', client: null, evidence: {}, tty: true, nonce: 'nonce-human' };
+    const id = await created(core, grimoire.ctx, 'Abandoned');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    const released = await core.call('release', { id, attempt, abandoned: true }, human);
+
+    expect(released).toMatchObject({ ok: true, result: { ended: 'release-abandoned', outcome: 'fail' } });
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.map((r) => [r.fields.context, r.fields.excerpt]).sort()).toEqual([
+      ['aa0434c9616245e9e', 'cut'],
+      ['main', 'cut'],
+    ]);
+  });
+
+  test('a reassign cuts the bound contexts, and its own binding context, a person’s terminal, gets a record with no transcript', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const core = capture.makeCore();
+    const human: CallContext = { ...grimoire.ctx, surface: 'cli', client: null, evidence: {}, tty: true, nonce: 'nonce-human' };
+    const id = await created(core, grimoire.ctx, 'Handed over');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    const reassigned = await core.call('reassign', { id, assignee: world.b.identity.email }, human);
+
+    expect(reassigned).toMatchObject({ ok: true, result: { ended: attempt } });
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.map((r) => [r.fields.client, r.fields.context, r.fields.excerpt, r.fields.facts]).sort()).toEqual([
+      ['claude-code', 'main', 'cut', 'scanned'],
+      ['cli', null, 'no_transcript', 'events_only'],
+    ]);
+    // The attempt it opened has no bound context yet.
+    const opened = (reassigned as { ok: true; result: { attempt: string } }).result.attempt;
+    expect(await sessionRecords(world.a, id, opened)).toEqual([]);
+  });
+});
+
+describe('which contexts are cut', () => {
+  test('a bound context with no seen-here row on this machine isn’t cut: the seal writes a placeholder naming no roots', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const core = capture.makeCore();
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const id = await created(core, grimoire.ctx, 'Elsewhere');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    // The subagent's row is gone (as if it had bound on another machine).
+    const subagentKey = sessionKey({ client: 'claude-code', session: CLAUDE_SESSION, context: CLAUDE_AGENT, nonce: 'nonce-claude' });
+    expect(await machine.coordination.remove('seen-here', `${attempt}/${subagentKey}`)).toBe(true);
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+
+    const records = await sessionRecords(world.a, id, attempt);
+    expect(records.find((r) => r.name === `${subagentKey}.md`)!.fields).toMatchObject({
+      context: CLAUDE_AGENT,
+      excerpt: 'not_found',
+      facts: 'not_found',
+      roots: [],
+      reach: null,
+    });
+    expect(records.find((r) => r.fields.context === 'main')!.fields).toMatchObject({ excerpt: 'cut' });
+  });
+
+  test('an attempt-ending call cancels the sweeps running in its process before it cuts', async ({ grimoire, capture }) => {
+    const core = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Swept');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    let cancelled = 0;
+    const done = registerSweep(() => void cancelled++);
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+    done();
+
+    expect(cancelled).toBe(1);
   });
 });
