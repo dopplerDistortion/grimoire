@@ -92,7 +92,8 @@ export class FairnessLock {
       });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EACCES' || code === 'EROFS') {
+      // EPERM: a Windows ACL (a sandbox's read-only .git/) refuses it (spike F).
+      if (code === 'EACCES' || code === 'EROFS' || code === 'EPERM') {
         throw new GrimoireError('NOT_WRITABLE', `this process can't write the live store (${code})`, {});
       }
       throw error;

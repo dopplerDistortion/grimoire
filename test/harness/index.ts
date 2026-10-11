@@ -27,3 +27,4 @@ export {
   readFixtureBytes,
   readFixtureJson,
 } from './fixtures';
+export { makeUnwritable, permissionsApply } from './permissions';

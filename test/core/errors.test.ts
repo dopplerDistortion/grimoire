@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import { makeTempDir, removeDir } from '#harness';
+import { makeTempDir, makeUnwritable, permissionsApply, removeDir } from '#harness';
 import { agentContext, coreTest as test, expectRefUnmoved, trackerTip } from './support';
 
 describe('error envelope: an error means nothing changed', () => {
@@ -84,5 +84,31 @@ describe('error envelope: an error means nothing changed', () => {
     const outcome = await grimoire.core.call('labels', {}, ctx);
 
     expect(outcome).toMatchObject({ ok: false, error: { code: 'NO_REPO', details: { root: sub } } });
+  });
+
+  test.skipIf(!permissionsApply)(
+    'a write when the process can’t write the git directory gives NOT_WRITABLE; the ref is unmoved and reads still work',
+    async ({ world, grimoire }) => {
+      const restore = await makeUnwritable(path.join(world.a.dir, '.git'));
+      try {
+        const write = await expectRefUnmoved(world.a, () => grimoire.core.call('create', { title: 'x' }, grimoire.ctx));
+        expect(write).toEqual({ ok: false, error: { code: 'NOT_WRITABLE', message: expect.any(String), retryable: false, details: {} } });
+        expect(await grimoire.core.call('labels', {}, grimoire.ctx)).toEqual({ ok: true, result: { labels: [] } });
+      } finally {
+        await restore();
+      }
+    },
+  );
+
+  test.skipIf(!permissionsApply)('a ref the process can’t move gives NOT_WRITABLE at once, not BUSY', async ({ world, grimoire }) => {
+    const restore = await makeUnwritable(path.join(world.a.dir, '.git', 'refs'));
+    try {
+      const started = Date.now();
+      const write = await expectRefUnmoved(world.a, () => grimoire.core.call('create', { title: 'x' }, grimoire.ctx));
+      expect(write).toMatchObject({ ok: false, error: { code: 'NOT_WRITABLE' } });
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      await restore();
+    }
   });
 });

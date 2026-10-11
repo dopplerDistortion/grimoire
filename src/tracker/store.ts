@@ -574,6 +574,11 @@ class GitTrackerStore implements TrackerStore {
     if (run.code === 0) return { moved: true };
     const stderr = run.stderr;
     if (/but expected|reference already exists|unable to resolve reference/i.test(stderr)) return { moved: false };
+    // A ref directory this process may not write (a sandboxed shell) is no lock to wait out.
+    if (/permission denied|operation not permitted|read-only file system/i.test(stderr)) {
+      const reason = stderr.trim().split('\n').pop()?.trim() ?? '';
+      throw new GrimoireError('NOT_WRITABLE', `this process can't write grimoire's live store: git could not update ${TRACKER_REF} (${reason})`, {});
+    }
     const lockPath =
       /Unable to create '([^']+\.lock)'/.exec(stderr)?.[1] ??
       (/cannot lock references/i.test(stderr)

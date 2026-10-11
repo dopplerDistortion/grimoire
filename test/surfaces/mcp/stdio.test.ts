@@ -53,9 +53,14 @@ describe('grimoire mcp over stdio', () => {
       // are "listed" until the model searches: the fallback must wait for the search (spike E).
       ['the CLI only when no tools are listed, even through tool search', /CLI only when no grimoire tools are listed or found by tool search/i],
       ['when no tools are listed, run status', /`node \.grimoire\/run\.cjs status`/],
+      // Spike F: Codex's sandboxes keep .git/ read-only for the agent's shell; the server runs outside them.
+      ['CLI writes fail in sandboxed shells', /CLI writes fail in sandboxed shells/],
       ['hand-written skills outrank evolved skills', /hand-written skills outrank evolved skills \(`skill_list`, `skill_read`\)/i],
     ];
     for (const [item, pattern] of contract) expect(head, item).toMatch(pattern);
+    // The contract paragraph itself fits the budget, so no client cuts a sentence of it.
+    expect(SERVER_INSTRUCTIONS.indexOf('\n\n')).toBeLessThanOrEqual(512);
+    expect(SERVER_INSTRUCTIONS).toMatch(/write with these tools.*sandbox.*outside/is);
   });
 
   gitTest('annotations mark reads read-only and writes local and non-destructive; only close and release are idempotent', async ({
