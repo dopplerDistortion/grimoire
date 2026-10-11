@@ -10,7 +10,7 @@ import type { CallContext } from './context';
 export const PACKAGE = '@goksening/grimoire';
 
 export interface Remedy {
-  readonly kind: 'rebase' | 'upgrade' | 'join' | 'init';
+  readonly kind: 'rebase' | 'upgrade' | 'join' | 'init' | 'restart';
   readonly text: string;
   readonly command?: string;
 }
@@ -65,7 +65,18 @@ export async function completeUpgradeDetails(
   const requires = typeof details.requires === 'string' ? details.requires : null;
   const pin = ctx.repo.pin;
   const remedies: Remedy[] = [];
-  if (why === 'newer') {
+  if (details.marker === 'install') {
+    // The checkout's own files are newer or older than this process: the release
+    // the checkout pins is the one that understands them (spec §5).
+    remedies.push({
+      kind: 'restart',
+      text: `restart this session, so it runs the release this checkout pins${pin ? ` (grimoire ${pin})` : ''}`,
+    });
+    if (pin && (!commonDir || !(await hasCopy(commonDir, pin)))) {
+      const join = `npx ${PACKAGE}@${pin} init`;
+      remedies.push({ kind: 'join', command: join, text: `join grimoire ${pin} on this machine first: \`${join}\`` });
+    }
+  } else if (why === 'newer') {
     const onDefault = await defaultBranchPin(ctx.repo.root);
     const rebase = onDefault && requires && compareSemver(onDefault.pin, requires) >= 0 ? onDefault : null;
     if (rebase) {

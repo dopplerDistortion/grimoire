@@ -1,6 +1,6 @@
 // The error envelope (spec §9). Every module throws GrimoireError; the core turns
 // it into `{error: {code, message, retryable, details}}`. An error always means
-// nothing changed.
+// nothing changed, except INTERNAL (ADR 0012).
 
 export type ErrorCode =
   | 'NOT_FOUND'
@@ -30,7 +30,11 @@ export type ErrorCode =
   | 'RUN_SUPERSEDED'
   | 'PENDING_LIMIT'
   | 'BASE_MOVED'
-  | 'NO_SESSION';
+  | 'NO_SESSION'
+  // Not in the spec's table (ADR 0012): a surface's answer to a bug (an
+  // unexpected throw), so a client gets the envelope rather than a protocol
+  // error. Unlike every other code, it can't promise that nothing changed.
+  | 'INTERNAL';
 
 /** Only BUSY is worth retrying unchanged (spec §9). */
 const RETRYABLE: ReadonlySet<ErrorCode> = new Set<ErrorCode>(['BUSY']);
