@@ -134,6 +134,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   if (handle !== null) {
     for (const target of targets) if ((await input.view.sessionRecord(handle, target.key)) !== null) pending.add(target.key);
   }
+  const purged = handle === null ? new Set<string>() : await input.view.purgedSessions(handle).catch(() => new Set<string>());
   const rank = (t: Target) => (t.calling ? 0 : pending.has(t.key) ? 2 : 1);
   const ordered = [...targets].sort((a, b) => rank(a) - rank(b));
 
@@ -141,14 +142,13 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   const claimed: string[] = [];
   const cutAt = input.call.at;
   for (const target of ordered) {
-    if (handle !== null && (await input.view.sessionPurged(handle, target.key).catch(() => false))) continue;
+    if (purged.has(target.key)) continue;
     if (!target.calling && !target.row) {
       captures.push({ key: target.key, record: placeholder(target, cutAt), cut: false, row: false });
       continue;
     }
     const cut = new ContextCut(input, target, deadline, claimed);
-    const work = target.calling ? cut.waitingForFlush(started) : cut.once();
-    const record = await withinDeadline(work, deadline);
+    const record = Date.now() >= deadline ? null : await withinDeadline(target.calling ? cut.waitingForFlush(started) : cut.once(), deadline);
     const captured = record ?? budgetRecord(target, cutAt);
     if (cut.callIds) claimed.push(...cut.callIds);
     captures.push({ key: target.key, record: captured, cut: true, row: target.row });
@@ -511,8 +511,9 @@ export async function sealSessionRecords(
     draft.putSessionRecord(handle, key, serializeSessionRecord(mode === 'excerpts' ? record : withoutText(record)));
     written.push(key);
   };
+  const purged = await draft.purgedSessions(handle);
   for (const capture of captures) {
-    if (await draft.sessionPurged(handle, capture.key)) continue;
+    if (purged.has(capture.key)) continue;
     const stored = await draft.sessionRecord(handle, capture.key);
     const pending = stored === null ? null : parseSessionRecord(stored);
     if (pending === null) put(capture.key, capture.record);

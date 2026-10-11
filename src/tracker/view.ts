@@ -51,8 +51,8 @@ import {
   OUTCOMES_DIR,
   SESSION_KEY_PATTERN,
   sessionFile,
-  sessionPurgeFile,
   SESSIONS_DIR,
+  PURGES_DIR,
   SETTINGS_FILE,
   skillVersionFile,
 } from './layout';
@@ -112,8 +112,8 @@ export interface TrackerView {
   skillVersion(version: string): Promise<Buffer | null>;
   /** One session record of the attempt `handle` (spec §3: `sessions/<session-key>.md`), or null when it has none. */
   sessionRecord(handle: string, key: string): Promise<Buffer | null>;
-  /** Whether a tombstone (`purges/<handle>/<key>.md`) purged that session record: no write may recreate it (spec §3). */
-  sessionPurged(handle: string, key: string): Promise<boolean>;
+  /** The session keys of `handle` whose records a tombstone (`purges/<handle>/<key>.md`) purged: no write may recreate them (spec §3). */
+  purgedSessions(handle: string): Promise<ReadonlySet<string>>;
   /** The wiki (spec §17): pages, their set-aside sides and the human wiki edits, read on first use. */
   readonly wiki: WikiView;
   /** Quarantine marks and clears (spec §17, §18), read on first use. */
@@ -197,7 +197,7 @@ export interface TrackerDraft extends TrackerView {
   /**
    * Writes one session record of the attempt `handle` (spec §14). The caller
    * decides whether it may replace the stored one, and never writes one a
-   * tombstone purged (`sessionPurged`).
+   * tombstone purged (`purgedSessions`).
    */
   putSessionRecord(handle: string, key: string, bytes: Buffer): void;
   /** The wiki as this round changes it; page writes regenerate the derived index and log. */
@@ -396,9 +396,10 @@ export class Snapshot implements TrackerView {
     return oid === undefined ? null : this.source.blob(oid);
   }
 
-  async sessionPurged(handle: string, key: string): Promise<boolean> {
-    if (!ATTEMPT_PATTERN.test(handle) || !SESSION_KEY_PATTERN.test(key)) return false;
-    return (await this.source.entryAt(this.rootTree, sessionPurgeFile(handle, key))) !== null;
+  async purgedSessions(handle: string): Promise<ReadonlySet<string>> {
+    if (!ATTEMPT_PATTERN.test(handle)) return new Set();
+    const entries = await this.source.dirAt(this.rootTree, `${PURGES_DIR}/${handle}`);
+    return new Set(entries.filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md')).map((e) => e.name.slice(0, -3)));
   }
 }
 
@@ -597,8 +598,8 @@ export class Draft implements TrackerDraft {
     return this.sessionsHere.get(handle)?.get(key) ?? this.base.sessionRecord(handle, key);
   }
 
-  sessionPurged(handle: string, key: string): Promise<boolean> {
-    return this.base.sessionPurged(handle, key);
+  purgedSessions(handle: string): Promise<ReadonlySet<string>> {
+    return this.base.purgedSessions(handle);
   }
 
   putSessionRecord(handle: string, key: string, bytes: Buffer): void {
