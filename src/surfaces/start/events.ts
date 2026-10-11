@@ -8,15 +8,19 @@
 //   data: {"tips": {local, remote}, "issues": [...], "attempts": [...],
 //          "knowledge", "settings", "sync", "machine", "instance", "agent"}
 //
-//   event: reload   after a large jump, a fold, a new or rewritten history
+//   event: reload   refetch everything: after a large jump, a fold, a purge, an
+//                   op this release doesn't list, a new or rewritten history, or
+//                   when the commits between the tips can't be read
 //   event: ready    on connect, carrying the current id
 //   event: heartbeat  every 15 s
 //
 // The change set comes from the `Grimoire-Issue`, `Grimoire-Attempt`,
-// `Grimoire-Op` and `Grimoire-Actor` trailers of the commits between the old
-// and the new tips. `<stamp>` hashes the machine-local store and the pin, so a
-// browser that reconnects with `Last-Event-ID` learns everything that changed
-// while it was away (or gets `reload` when that id is unknown here).
+// `Grimoire-Op` (through the op table, src/tracker/ops.ts) and
+// `Grimoire-Actor` trailers of the commits between the old and the new tips.
+// `<stamp>` hashes the machine-local store and the pin, so a browser that
+// reconnects with `Last-Event-ID` learns everything that changed while it was
+// away (or gets `reload` when that id is unknown here). A stream whose first
+// read fails is ended, and the browser reconnects after `retry`.
 import { createHash } from 'node:crypto';
 import { readdir, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';

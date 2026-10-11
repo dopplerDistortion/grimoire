@@ -13,7 +13,15 @@
 //
 // stdout is one JSON object, as for every verb: `start` prints it once it
 // serves (`{"started": …}`) or once it signed a browser in to the running one
-// (`{"running": …}`); errors are `{"error": …}` with exit 1.
+// (`{"running": …}`); errors are `{"error": …}` with exit 1. Beyond the
+// shared codes (HUMAN_ONLY, NO_REPO), the conditions §9 doesn't name use
+// (recorded for the spec's error table):
+//   NOT_FOUND {start: null}  `open` with no live `start` for this clone
+//   BUSY                     no port free of the 10 tried; a takeover whose
+//                            old `start` didn't stop within 20 s; another
+//                            `start` kept taking the lock (retrying may help)
+//   INTERNAL                 the live `start`'s control channel can't be
+//                            reached or refused; no browser could be opened
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { autoSync, createCore, syncRequestOf, type CallContext, type Identity } from '../../core';
