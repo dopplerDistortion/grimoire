@@ -2,11 +2,11 @@
 // `npm run build` builds it (CLI and dashboard), spawned against temporary
 // repos and driven over HTTP, SSE and its control channel.
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { expect } from 'vitest';
+import { expect, onTestFinished } from 'vitest';
 import { makeTempDir, removeDir, runCommand } from '#harness';
 import { cloneId, MachineLocalStore, START_LOCK, startLockData } from '../../../src/machine-local';
 import { callControl, controlPaths } from '../../../src/surfaces/start/control';
@@ -37,16 +37,28 @@ export async function buildFull(version?: string, target: 'all' | 'cli' = 'all')
 
 /**
  * A person's environment for `start` in a test world: no agent marker, the
- * control channel's secret under the world's own LOCALAPPDATA, and a browser
- * that only records the URLs it is asked to open.
+ * control channel's files in a directory of the test's own (the world's
+ * LOCALAPPDATA on Windows, a short 0700 XDG_RUNTIME_DIR under /tmp elsewhere,
+ * removed after the test), and a browser that only records the URLs it is
+ * asked to open.
  */
 export async function startEnv(worldRoot: string, extra: NodeJS.ProcessEnv = {}): Promise<{ env: NodeJS.ProcessEnv; opened: (count?: number) => Promise<string[]> }> {
   await mkdir(worldRoot, { recursive: true });
   const recorder = path.join(worldRoot, 'browser.mjs');
   const urls = path.join(worldRoot, 'opened.txt');
   await writeFile(recorder, "import { appendFileSync } from 'node:fs';\nappendFileSync(process.argv[2], process.argv[3] + '\\n');\n");
+  let runtime: NodeJS.ProcessEnv = {};
+  if (process.platform !== 'win32') {
+    // Short: a socket path has ~104 bytes, and a world's root may be long (macOS' os.tmpdir()).
+    const dir = await mkdtemp('/tmp/grt-');
+    await chmod(dir, 0o700);
+    // After every fixture's cleanup, so after the starts it spawned have stopped.
+    onTestFinished(() => removeDir(dir));
+    runtime = { XDG_RUNTIME_DIR: dir };
+  }
   const env = humanEnv({
     LOCALAPPDATA: path.join(worldRoot, 'localappdata'),
+    ...runtime,
     GRIMOIRE_BROWSER: JSON.stringify([process.execPath, recorder, urls]),
     ...extra,
   });

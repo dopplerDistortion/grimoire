@@ -7,9 +7,11 @@
 //
 // Transport: a Windows named pipe, `\\.\pipe\grimoire-<clone>-<nonce>`, or a
 // Unix socket `<clone>-<nonce>.sock` in a 0700 directory with a short path
-// (`$XDG_RUNTIME_DIR/grimoire`, else `/tmp/grimoire-<uid>`). `<clone>` is the
-// first 12 hex digits of the per-clone id and `<nonce>` the live `start`
-// lock's nonce, so a client reaches only the instance the lock names.
+// (`$XDG_RUNTIME_DIR/grimoire`, else `/tmp/grimoire-<uid>`; a client also
+// looks in `/run/user/<uid>/grimoire` and `/tmp/grimoire-<uid>`, trusting
+// only a directory that is its user's own and 0700). `<clone>` is the first
+// 12 hex digits of the per-clone id and `<nonce>` the live `start` lock's
+// nonce, so a client reaches only the instance the lock names.
 //
 // Authentication (spike D's R5 verdict): a pipe's default DACL lets Everyone
 // read it and Node can't narrow it, so every request proves knowledge of a
@@ -60,25 +62,61 @@ export interface ControlPaths {
   readonly dir: string;
 }
 
-/** Where the control channel's files live for this user (uninstall removes the clone's). */
+/**
+ * Outside Windows, the directories a process of user `uid` may keep the
+ * control channel in, its own choice (by `env`) first: `$XDG_RUNTIME_DIR/grimoire`,
+ * else `/tmp/grimoire-<uid>` (short on purpose: a socket path has ~104 bytes,
+ * and macOS' os.tmpdir() is too long), then where another process of the
+ * same user would put it: `/run/user/<uid>/grimoire` (systemd's runtime
+ * directory) and `/tmp/grimoire-<uid>`.
+ */
+export function posixControlDirs(env: NodeJS.ProcessEnv, uid: number): string[] {
+  const runtime = env.XDG_RUNTIME_DIR;
+  const own = runtime && path.posix.isAbsolute(runtime) ? path.posix.join(runtime, 'grimoire') : `/tmp/grimoire-${uid}`;
+  return [...new Set([own, `/run/user/${uid}/grimoire`, `/tmp/grimoire-${uid}`])];
+}
+
+/** Where `start` keeps the control channel's files for this user (uninstall removes the clone's). */
 export function controlDir(env: NodeJS.ProcessEnv = process.env): string {
   if (process.platform === 'win32') {
     const local = env.LOCALAPPDATA && path.isAbsolute(env.LOCALAPPDATA) ? env.LOCALAPPDATA : path.join(os.homedir(), 'AppData', 'Local');
     return path.join(local, 'grimoire', 'control');
   }
-  const runtime = env.XDG_RUNTIME_DIR;
-  if (runtime && path.isAbsolute(runtime)) return path.join(runtime, 'grimoire');
-  // Short on purpose: a socket path has ~104 bytes (macOS' os.tmpdir() is too long).
-  return path.join('/tmp', `grimoire-${os.userInfo().uid}`);
+  return posixControlDirs(env, os.userInfo().uid)[0]!;
 }
 
-/** The control channel of the `start` whose lock holds `nonce`, for the clone `cloneId` names. */
-export function controlPaths(cloneId: string, nonce: string, env: NodeJS.ProcessEnv = process.env): ControlPaths {
-  const dir = controlDir(env);
+function pathsIn(dir: string, cloneId: string, nonce: string): ControlPaths {
   const secretFile = path.join(dir, `${cloneId.slice(0, 16)}.secret`);
   const name = `${cloneId.slice(0, 12)}-${nonce}`;
   const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\grimoire-${name}` : path.join(dir, `${name}.sock`);
   return { endpoint, secretFile, dir };
+}
+
+/** The control channel `start` opens for its lock's `nonce`, for the clone `cloneId` names. */
+export function controlPaths(cloneId: string, nonce: string, env: NodeJS.ProcessEnv = process.env): ControlPaths {
+  return pathsIn(controlDir(env), cloneId, nonce);
+}
+
+/** Whether `dir` is a directory only this user can use (0700, its own): outside Windows, the only kind a client trusts. */
+async function onlyMine(dir: string): Promise<boolean> {
+  const info = await lstat(dir).catch(() => null);
+  return info !== null && info.isDirectory() && info.uid === os.userInfo().uid && (info.mode & 0o077) === 0;
+}
+
+/**
+ * The control channel of the running `start` whose lock holds `nonce`, as a
+ * client finds it: on Windows the pipe; elsewhere the first directory of
+ * posixControlDirs that only this user can use and that holds the socket
+ * (the `start` may run with another XDG_RUNTIME_DIR than this process).
+ * Null when none does.
+ */
+export async function findControlPaths(cloneId: string, nonce: string, env: NodeJS.ProcessEnv = process.env): Promise<ControlPaths | null> {
+  if (process.platform === 'win32') return controlPaths(cloneId, nonce, env);
+  for (const dir of posixControlDirs(env, os.userInfo().uid)) {
+    const paths = pathsIn(dir, cloneId, nonce);
+    if ((await onlyMine(dir)) && (await lstat(paths.endpoint).then((info) => info.isSocket(), () => false))) return paths;
+  }
+  return null;
 }
 
 function mac(secret: string, parts: readonly (string | number)[]): string {

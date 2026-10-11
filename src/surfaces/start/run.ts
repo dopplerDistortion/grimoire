@@ -31,7 +31,7 @@ import { agentMarkersIn } from '../cli/shell';
 import { terminalOn } from '../cli/wiki';
 import { errorBodyOf } from '../internal';
 import { openBrowser } from './browser';
-import { callControl, ControlError, controlPaths, removeStaleSockets, serveControl, type ControlAnswer } from './control';
+import { callControl, ControlError, controlPaths, findControlPaths, removeStaleSockets, serveControl, type ControlAnswer, type ControlOp } from './control';
 import { LiveEvents } from './events';
 import { createDashboardServer, listenOnLoopback } from './server';
 import { SignIns } from './sign-in';
@@ -164,13 +164,19 @@ interface SignedIn {
   readonly pid: number;
 }
 
+/** Sends `op` to the running `start`, wherever this user's process put its control channel. */
+async function ask(clone: Clone, running: RunningStart, io: CliIo, op: ControlOp, args: Record<string, unknown> = {}): Promise<unknown> {
+  const paths = await findControlPaths(clone.cloneId, running.nonce, io.env);
+  if (paths === null) throw new ControlError('grimoire start has no control channel this user can reach', 'unreachable');
+  return callControl(paths, op, args);
+}
+
 /** Asks the running `start` for a sign-in URL, waiting a moment for one that is still opening its control channel. */
 async function signInTo(clone: Clone, running: RunningStart, io: CliIo, ref: string | null): Promise<SignedIn> {
-  const paths = controlPaths(clone.cloneId, running.nonce, io.env);
   const deadline = Date.now() + 5_000;
   for (;;) {
     try {
-      const answer = (await callControl(paths, 'sign-in', ref === null ? {} : { ref })) as Partial<SignedIn> | null;
+      const answer = (await ask(clone, running, io, 'sign-in', ref === null ? {} : { ref })) as Partial<SignedIn> | null;
       if (!answer || typeof answer.url !== 'string' || typeof answer.port !== 'number') throw new ControlError('the running grimoire start answered sign-in without a URL', 'failed');
       return {
         url: answer.url,
@@ -255,7 +261,7 @@ async function secondStart(clone: Clone, running: RunningStart, command: StartCo
 }
 
 async function stopRunning(clone: Clone, running: RunningStart, io: CliIo): Promise<void> {
-  await callControl(controlPaths(clone.cloneId, running.nonce, io.env), 'stop');
+  await ask(clone, running, io, 'stop');
   const deadline = Date.now() + TAKEOVER_WAIT_MS;
   while ((await clone.store.locks.inspect(START_LOCK, { staleIf: startStaleness() })).status === 'held') {
     if (Date.now() > deadline) throw new GrimoireError('BUSY', `the running grimoire start (pid ${running.pid}) didn't stop within ${TAKEOVER_WAIT_MS / 1000} s`, {});
