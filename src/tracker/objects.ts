@@ -32,8 +32,18 @@ export class BoundedMap<K, V> extends Map<K, V> {
   }
 }
 
-/** A change to one file path: new bytes, or null to remove it. */
-export type FileEdits = ReadonlyMap<string, Uint8Array | null>;
+/** An existing blob, placed at another path without rewriting it. */
+export interface BlobRef {
+  readonly oid: string;
+}
+
+/** A change to one file: new bytes, an existing blob, or null to remove it. */
+export type FileEdit = Uint8Array | BlobRef | null;
+export type FileEdits = ReadonlyMap<string, FileEdit>;
+
+function isBlobRef(edit: FileEdit): edit is BlobRef {
+  return edit !== null && !(edit instanceof Uint8Array);
+}
 
 export class TrackerObjects {
   private readonly reader: ObjectReader;
@@ -150,12 +160,13 @@ export class TrackerObjects {
    */
   async editTree(base: string | null, edits: FileEdits): Promise<string | null> {
     const entries = new Map((base ? await this.tree(base) : []).map((e) => [e.name, e]));
-    const nested = new Map<string, Map<string, Uint8Array | null>>();
+    const nested = new Map<string, Map<string, FileEdit>>();
     const writes: Promise<void>[] = [];
     for (const [path, content] of edits) {
       const slash = path.indexOf('/');
       if (slash < 0) {
         if (content === null) entries.delete(path);
+        else if (isBlobRef(content)) entries.set(path, { mode: BLOB_MODE, name: path, oid: content.oid });
         else {
           writes.push(this.writeBlob(content).then((oid) => void entries.set(path, { mode: BLOB_MODE, name: path, oid })));
         }

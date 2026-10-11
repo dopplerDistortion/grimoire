@@ -1,10 +1,23 @@
 // Derivations over the tracker view (spec §2.1: the core owns every
-// derivation; surfaces only render them): children, blocker states, ready, and
-// the relation cycles writes refuse.
-import type { IssueRecord, TrackerView } from '../tracker';
+// derivation; surfaces only render them): children, blocker states, open
+// attempts and their assignees, stale claims, ready, and the relation cycles
+// writes refuse.
+import type { AttemptRecord, IssueRecord, TrackerView } from '../tracker';
 
 /** A blocker's state as a reader sees it: a dangling id reads as `unknown`, and it blocks. */
 export type RelationState = 'open' | 'done' | 'canceled' | 'unknown';
+
+/** What a reader learns about one open attempt. */
+export interface OpenAttemptFacts {
+  readonly record: AttemptRecord;
+  /** The person holding it. */
+  readonly assignee: string;
+  readonly since: string;
+  /** The latest write on the issue during the attempt (its opening at the least). */
+  readonly lastActivityAt: string;
+  /** The clients of its binding writes: the opening, and every write that named the handle. */
+  readonly clientsSeen: readonly string[];
+}
 
 /** Facts derived for one live issue. */
 export interface Derived {
@@ -13,11 +26,13 @@ export interface Derived {
   readonly openChildCount: number;
   /** Blockers that block: open, or unknown (dangling). */
   readonly openBlockerCount: number;
-  /** People holding an open attempt (none until claims land). */
+  /** Open attempts, in the order they opened (two only after a cross-clone fold). */
+  readonly openAttempts: readonly OpenAttemptFacts[];
+  /** People holding an open attempt. */
   readonly assignees: readonly string[];
   /** Has an open attempt. */
   readonly claimed: boolean;
-  /** An open attempt has shown no activity past the stale threshold. */
+  /** An open attempt has shown no activity since the stale cutoff. */
   readonly stale: boolean;
   /** The fold conflict, or null (`{fields, theirs, base}` once folds land). */
   readonly conflict: null;
@@ -30,17 +45,49 @@ export interface Derivations {
   state(id: string): RelationState;
 }
 
-const memo = new WeakMap<TrackerView, Derivations>();
-
 function stateOf(issue: IssueRecord | undefined): RelationState {
   if (!issue) return 'unknown';
   return issue.status === 'done' || issue.status === 'canceled' ? issue.status : 'open';
 }
 
-/** The derivations of a view, computed once per view (views are immutable). */
-export function derivations(view: TrackerView): Derivations {
-  let found = memo.get(view);
-  if (found) return found;
+/** The facts of an open attempt. */
+export function openAttemptFacts(record: AttemptRecord): OpenAttemptFacts {
+  let lastActivityAt = record.start.at;
+  const clients = new Set<string>();
+  const client = record.start.actor.client;
+  if (typeof client === 'string') clients.add(client);
+  for (const entry of record.activity) {
+    if (entry.at > lastActivityAt) lastActivityAt = entry.at;
+    const by = entry.detail?.actor.client;
+    if (entry.detail?.attempt === record.id && typeof by === 'string') clients.add(by);
+  }
+  return {
+    record,
+    assignee: record.start.assignee,
+    since: record.start.at,
+    lastActivityAt,
+    clientsSeen: [...clients].sort(),
+  };
+}
+
+/** The issue's open attempts, in the order they opened. */
+export function openAttemptsOf(view: TrackerView, id: string): OpenAttemptFacts[] {
+  return view
+    .attempts(id)
+    .filter((attempt) => attempt.end === null)
+    .map(openAttemptFacts);
+}
+
+const memo = new WeakMap<TrackerView, { staleBefore: number; derivations: Derivations }>();
+
+/**
+ * The derivations of a view (views are immutable, so they are computed once
+ * per view and cutoff). An open attempt is stale when its last activity is
+ * before `staleBefore` (epoch ms; by default nothing is stale).
+ */
+export function derivations(view: TrackerView, staleBefore = Number.NEGATIVE_INFINITY): Derivations {
+  const found = memo.get(view);
+  if (found && found.staleBefore === staleBefore) return found.derivations;
   const children = new Map<string, IssueRecord[]>();
   for (const issue of view.issues()) {
     if (issue.parent === null) continue;
@@ -50,11 +97,11 @@ export function derivations(view: TrackerView): Derivations {
   }
   const cache = new Map<string, Derived>();
   const state = (id: string) => stateOf(view.issue(id));
-  found = {
+  const derived: Derivations = {
     state,
     of(id) {
-      let derived = cache.get(id);
-      if (derived) return derived;
+      let facts = cache.get(id);
+      if (facts) return facts;
       const issue = view.issue(id);
       const kids = children.get(id) ?? [];
       const openChildCount = kids.filter((kid) => stateOf(kid) === 'open').length;
@@ -62,8 +109,9 @@ export function derivations(view: TrackerView): Derivations {
         const s = state(b);
         return s === 'open' || s === 'unknown';
       }).length;
-      // Attempts and fold conflicts arrive with later slices; until then nothing is claimed or conflicted.
-      const claimed = false;
+      const openAttempts = openAttemptsOf(view, id);
+      const claimed = openAttempts.length > 0;
+      // Fold conflicts arrive with the fold slice; until then nothing is conflicted.
       const conflict = null;
       const ready =
         issue !== undefined &&
@@ -72,13 +120,23 @@ export function derivations(view: TrackerView): Derivations {
         conflict === null &&
         openChildCount === 0 &&
         openBlockerCount === 0;
-      derived = { children: kids, openChildCount, openBlockerCount, assignees: [], claimed, stale: false, conflict, ready };
-      cache.set(id, derived);
-      return derived;
+      facts = {
+        children: kids,
+        openChildCount,
+        openBlockerCount,
+        openAttempts,
+        assignees: [...new Set(openAttempts.map((a) => a.assignee))],
+        claimed,
+        stale: openAttempts.some((a) => Date.parse(a.lastActivityAt) < staleBefore),
+        conflict,
+        ready,
+      };
+      cache.set(id, facts);
+      return facts;
     },
   };
-  memo.set(view, found);
-  return found;
+  memo.set(view, { staleBefore, derivations: derived });
+  return derived;
 }
 
 /**

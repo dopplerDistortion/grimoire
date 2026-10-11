@@ -11,9 +11,21 @@ export {
   type WriteResult,
   type Person,
 } from './store';
-export type { TrackerView, TrackerDraft, NewComment } from './view';
+export type { TrackerView, TrackerDraft, NewComment, NewAttempt, NewEnd, NewOutcome } from './view';
 export type { IssueComment, CommentEntry } from './comment';
 export type { IssueRecord, IssueLink } from './record';
+export type {
+  ActivityDetail,
+  ActivityEntry,
+  AttemptEnd,
+  AttemptEnding,
+  AttemptOpening,
+  AttemptOutcome,
+  AttemptRecord,
+  AttemptStart,
+  Verdict,
+} from './attempt';
+export { ATTEMPT_PATTERN } from './attempt';
 export { issueRevision, sortedUnique } from './record';
 export { keyHash, type Idempotency } from './keys';
 export { parseWriteRef, ID_PATTERN } from './ids';

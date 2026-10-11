@@ -11,10 +11,42 @@ import {
   type CommentEntry,
   type IssueComment,
 } from './comment';
-import { COMMENTS_DIR, commentFile, DELETED_DIR, FORMAT_FILE, FORWARDS_DIR, ISSUES_DIR, issueFile, SETTINGS_FILE } from './layout';
+import {
+  ATTEMPT_PATTERN,
+  parseActivity,
+  parseEnd,
+  parseOutcome,
+  parseStart,
+  randomAttemptHandle,
+  serializeEnd,
+  serializeOutcome,
+  serializeStart,
+  serializeUpdateActivity,
+  type ActivityEntry,
+  type AttemptEnd,
+  type AttemptOutcome,
+  type AttemptRecord,
+  type AttemptStart,
+} from './attempt';
+import {
+  ACTIVITY_DIR,
+  activityFile,
+  attemptDir,
+  ATTEMPTS_DIR,
+  COMMENTS_DIR,
+  commentFile,
+  DELETED_DIR,
+  FORMAT_FILE,
+  FORWARDS_DIR,
+  ISSUES_DIR,
+  issueFile,
+  outcomeFile,
+  OUTCOMES_DIR,
+  SETTINGS_FILE,
+} from './layout';
 import { lineValue, parseLines } from './lines';
 import { parseMarker, type Marker } from './marker';
-import { BoundedMap, type TrackerObjects } from './objects';
+import { BoundedMap, type FileEdit, type TrackerObjects } from './objects';
 import { parseIssue, serializeIssue, type IssueRecord } from './record';
 
 /** What every read sees: the tracker at one tip. */
@@ -38,6 +70,10 @@ export interface TrackerView {
   comments(id: string): readonly CommentEntry[];
   /** One comment of the issue, read in full. */
   readComment(issue: string, comment: string): Promise<IssueComment>;
+  /** The issue's attempts, open and ended, in the order they opened (then by handle). */
+  attempts(issue: string): readonly AttemptRecord[];
+  /** The attempt with this handle, on any issue, or undefined. */
+  attempt(handle: string): AttemptRecord | undefined;
 }
 
 /** A comment a write adds; the draft picks its id and time. */
@@ -49,6 +85,13 @@ export interface NewComment {
   /** sha256 of the idempotency key. */
   readonly key?: string;
 }
+
+/** An attempt a write opens; the draft adds its time and start commit. */
+export type NewAttempt = Omit<AttemptStart, 'at' | 'start_commit' | 'extra'>;
+/** The seal a write puts on an open attempt; the draft adds its time. */
+export type NewEnd = Omit<AttemptEnd, 'at' | 'extra'>;
+/** A verdict a write records; the draft adds its time. */
+export type NewOutcome = Omit<AttemptOutcome, 'at' | 'extra'>;
 
 /** A view a write round edits; its edits become that round's one commit. */
 export interface TrackerDraft extends TrackerView {
@@ -63,33 +106,58 @@ export interface TrackerDraft extends TrackerView {
   /**
    * Adds a write-once comment to a live issue. Its time is the round's instant,
    * forced past the issue's latest comment and the latest comment time this
-   * store wrote; comments added in one round share it and are ordered by `n`.
+   * store wrote; comments added in one round are ordered by `n`. Every attempt
+   * open on the issue gets the same blob in its `activity/`.
    */
   addComment(issue: string, comment: NewComment): IssueComment;
+  /**
+   * Records a field change on the issue in the `activity/` of every attempt
+   * open on it: who changed which fields, and the handle the write named.
+   */
+  addActivity(issue: string, entry: { actor: Readonly<Record<string, unknown>>; attempt?: string; fields: readonly string[] }): void;
+  /**
+   * Opens an attempt on a live issue under a fresh `at-` handle: `start.md`,
+   * and `issue-at-start.md` holding the issue as it stands in this draft.
+   */
+  openAttempt(issue: string, start: NewAttempt): AttemptRecord;
+  /** Writes the open attempt's `end.md`. */
+  sealAttempt(handle: string, end: NewEnd): void;
+  /** Writes the attempt's outcome record. */
+  putOutcome(handle: string, outcome: NewOutcome): void;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
   return a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
+function byOpening(a: AttemptRecord, b: AttemptRecord): number {
+  return a.start.at < b.start.at ? -1 : a.start.at > b.start.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 export class Snapshot implements TrackerView {
   private readonly ordered: readonly IssueRecord[];
   readonly ids: ReadonlySet<string>;
+  private readonly attemptsById = new Map<string, AttemptRecord>();
 
   constructor(
     readonly tip: string,
     readonly rootTree: string,
     readonly marker: Marker | null,
     private readonly records: ReadonlyMap<string, IssueRecord>,
+    /** Each live issue's `issue.md` blob. */
+    private readonly issueBlobs: ReadonlyMap<string, string>,
     private readonly settings: ReadonlyMap<string, unknown>,
     /** Ids gone from the live view but never reused: deleted and forwarded. */
     readonly retiredIds: ReadonlySet<string>,
     /** Each issue's comment files, in comment order. */
     private readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>,
+    /** Each issue's attempts, in opening order. */
+    private readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>,
     private readonly readBlob: (oid: string) => Promise<Buffer>,
   ) {
     this.ordered = [...records.values()].sort(byOrder);
     this.ids = new Set(records.keys());
+    for (const list of attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -98,6 +166,11 @@ export class Snapshot implements TrackerView {
 
   issues(): readonly IssueRecord[] {
     return this.ordered;
+  }
+
+  /** The live issue's `issue.md` blob. */
+  issueBlob(id: string): string | undefined {
+    return this.issueBlobs.get(id);
   }
 
   resolveRead(ref: string, field = 'ref'): string {
@@ -124,16 +197,42 @@ export class Snapshot implements TrackerView {
     if (!stored) throw new Error(`no comment ${comment} on ${issue}`);
     return parseComment(stored.id, await this.readBlob(stored.oid));
   }
+
+  attempts(issue: string): readonly AttemptRecord[] {
+    return this.attemptLists.get(issue) ?? [];
+  }
+
+  attempt(handle: string): AttemptRecord | undefined {
+    return this.attemptsById.get(handle);
+  }
 }
 
 interface StoredComment extends CommentEntry {
   readonly oid: string;
 }
 
+interface OpenedAttempt {
+  readonly issue: string;
+  readonly start: AttemptStart;
+  readonly issueAtStart: FileEdit;
+}
+
+interface DraftActivity {
+  readonly issue: string;
+  readonly entry: ActivityEntry;
+  /** An update entry's own bytes; a comment's entry reuses the comment's blob. */
+  readonly bytes: Buffer | null;
+}
+
 export class Draft implements TrackerDraft {
   private readonly written = new Map<string, IssueRecord>();
   private readonly minted = new Set<string>();
   private readonly added = new Map<string, IssueComment[]>();
+  private readonly opened = new Map<string, OpenedAttempt>();
+  private readonly sealed = new Map<string, AttemptEnd>();
+  private readonly outcomes = new Map<string, AttemptOutcome>();
+  /** Activity entries this round adds, by attempt handle. */
+  private readonly activity = new Map<string, DraftActivity[]>();
   private commentMs: number | null = null;
   private commentN = 0;
 
@@ -145,6 +244,7 @@ export class Draft implements TrackerDraft {
     private readonly randomSuffix: (length: number) => string,
     /** The latest comment time this store has written, in epoch ms. */
     private readonly storeCommentMs = 0,
+    private readonly randomHandle: () => string = randomAttemptHandle,
   ) {}
 
   get tip(): string {
@@ -190,6 +290,47 @@ export class Draft implements TrackerDraft {
     return this.added.get(issue)?.find((c) => c.id === comment) ?? this.base.readComment(issue, comment);
   }
 
+  /** An attempt as this draft leaves it. */
+  private withEdits(record: AttemptRecord): AttemptRecord {
+    const end = this.sealed.get(record.id);
+    const outcome = this.outcomes.get(record.id);
+    const activity = this.activity.get(record.id);
+    if (!end && !outcome && !activity) return record;
+    return {
+      ...record,
+      end: end ?? record.end,
+      outcome: outcome ?? record.outcome,
+      activity: activity ? [...record.activity, ...activity.map((a) => a.entry)] : record.activity,
+    };
+  }
+
+  attempts(issue: string): readonly AttemptRecord[] {
+    const records = this.base.attempts(issue).map((record) => this.withEdits(record));
+    for (const [id, opened] of this.opened) {
+      if (opened.issue === issue) {
+        records.push(this.withEdits({ id, issue, start: opened.start, end: null, outcome: null, activity: [] }));
+      }
+    }
+    return records.sort(byOpening);
+  }
+
+  attempt(handle: string): AttemptRecord | undefined {
+    const opened = this.opened.get(handle);
+    if (opened) return this.attempts(opened.issue).find((a) => a.id === handle);
+    const record = this.base.attempt(handle);
+    return record ? this.withEdits(record) : undefined;
+  }
+
+  private openAttemptsOf(issue: string): AttemptRecord[] {
+    return this.attempts(issue).filter((attempt) => attempt.end === null);
+  }
+
+  private pushActivity(handle: string, item: DraftActivity): void {
+    let list = this.activity.get(handle);
+    if (!list) this.activity.set(handle, (list = []));
+    list.push(item);
+  }
+
   addComment(issue: string, comment: NewComment): IssueComment {
     if (!this.issue(issue)) throw notFound('id', issue);
     const existing = this.comments(issue);
@@ -208,7 +349,34 @@ export class Draft implements TrackerDraft {
     let list = this.added.get(issue);
     if (!list) this.added.set(issue, (list = []));
     list.push(added);
+    const entry: ActivityEntry = {
+      ...commentEntry(added.id)!,
+      detail: {
+        kind: added.kind,
+        actor: added.actor,
+        ...(added.attempt !== undefined ? { attempt: added.attempt } : {}),
+        fields: [],
+      },
+    };
+    for (const attempt of this.openAttemptsOf(issue)) this.pushActivity(attempt.id, { issue, entry, bytes: null });
     return added;
+  }
+
+  addActivity(
+    issue: string,
+    { actor, attempt, fields }: { actor: Readonly<Record<string, unknown>>; attempt?: string; fields: readonly string[] },
+  ): void {
+    const open = this.openAttemptsOf(issue);
+    if (open.length === 0) return;
+    const ms = this.commentMs ?? this.now.getTime();
+    const at = new Date(ms).toISOString();
+    const id = commentName(ms, this.commentN++);
+    const entry: ActivityEntry = {
+      ...commentEntry(id)!,
+      detail: { kind: 'update', actor, ...(attempt !== undefined ? { attempt } : {}), fields: [...fields] },
+    };
+    const bytes = serializeUpdateActivity({ actor, at, ...(attempt !== undefined ? { attempt } : {}), fields });
+    for (const record of open) this.pushActivity(record.id, { issue, entry, bytes });
   }
 
   /** The comment time this round used, in epoch ms, or null when it added none. */
@@ -241,12 +409,65 @@ export class Draft implements TrackerDraft {
     this.written.set(record.id, record);
   }
 
+  openAttempt(issue: string, start: NewAttempt): AttemptRecord {
+    if (!this.issue(issue)) throw notFound('id', issue);
+    let handle = this.randomHandle();
+    for (let tries = 0; this.base.attempt(handle) || this.opened.has(handle); tries++) {
+      if (tries > 16) throw new Error('could not mint a free attempt handle: the random source keeps repeating');
+      handle = this.randomHandle();
+    }
+    const written = this.written.get(issue);
+    const blob = this.base.issueBlob(issue);
+    const record: AttemptStart = { ...start, at: this.now.toISOString(), start_commit: this.base.tip, extra: {} };
+    this.opened.set(handle, {
+      issue,
+      start: record,
+      issueAtStart: written || !blob ? serializeIssue(this.issue(issue)!) : { oid: blob },
+    });
+    return this.attempt(handle)!;
+  }
+
+  sealAttempt(handle: string, end: NewEnd): void {
+    const attempt = this.attempt(handle);
+    if (!attempt || attempt.end) throw new Error(`attempt ${handle} is not open`);
+    this.sealed.set(handle, { ...end, at: this.now.toISOString(), extra: {} });
+  }
+
+  putOutcome(handle: string, outcome: NewOutcome): void {
+    const attempt = this.attempt(handle);
+    if (!attempt) throw new Error(`no attempt ${handle}`);
+    this.outcomes.set(handle, { ...outcome, at: this.now.toISOString(), extra: attempt.outcome?.extra ?? {} });
+  }
+
   /** The file edits this round's commit makes. */
-  edits(): Map<string, Uint8Array | null> {
-    const edits = new Map<string, Uint8Array | null>();
+  edits(): Map<string, FileEdit> {
+    const edits = new Map<string, FileEdit>();
     for (const record of this.written.values()) edits.set(issueFile(record.id), serializeIssue(record));
+    const commentBytes = new Map<string, Buffer>();
     for (const [issue, comments] of this.added) {
-      for (const { id, ...comment } of comments) edits.set(commentFile(issue, id), serializeComment(comment));
+      for (const { id, ...comment } of comments) {
+        const bytes = serializeComment(comment);
+        commentBytes.set(id, bytes);
+        edits.set(commentFile(issue, id), bytes);
+      }
+    }
+    for (const [handle, opened] of this.opened) {
+      const dir = attemptDir(opened.issue, handle);
+      edits.set(`${dir}/start.md`, serializeStart(opened.start));
+      edits.set(`${dir}/issue-at-start.md`, opened.issueAtStart);
+    }
+    for (const [handle, items] of this.activity) {
+      for (const { issue, entry, bytes } of items) {
+        // A comment's entry is the comment's own blob.
+        edits.set(activityFile(issue, handle, entry.id), bytes ?? commentBytes.get(entry.id)!);
+      }
+    }
+    for (const [handle, end] of this.sealed) {
+      const issue = this.attempt(handle)!.issue;
+      edits.set(`${attemptDir(issue, handle)}/end.md`, serializeEnd(end));
+    }
+    for (const [handle, outcome] of this.outcomes) {
+      edits.set(outcomeFile(this.attempt(handle)!.issue, handle), serializeOutcome(outcome));
     }
     return edits;
   }
@@ -254,7 +475,16 @@ export class Draft implements TrackerDraft {
 
 interface IssueEntry {
   readonly record: IssueRecord;
+  readonly oid: string;
   readonly comments: readonly StoredComment[];
+}
+
+type LoadedAttempt = Omit<AttemptRecord, 'outcome'>;
+
+interface LoadedOutcome {
+  readonly issue: string;
+  readonly attempt: string;
+  readonly outcome: AttemptOutcome;
 }
 
 /** Builds snapshots from tracker trees, memoizing every subtree by oid. */
@@ -262,6 +492,8 @@ export class SnapshotLoader {
   private readonly issuesByTree = new BoundedMap<string, readonly IssueEntry[]>(8_192);
   private readonly namesByTree = new BoundedMap<string, readonly string[]>(8_192);
   private readonly records = new BoundedMap<string, IssueRecord>(50_000);
+  private readonly attemptsByTree = new BoundedMap<string, readonly LoadedAttempt[]>(8_192);
+  private readonly outcomesByTree = new BoundedMap<string, readonly LoadedOutcome[]>(8_192);
 
   constructor(private readonly objects: TrackerObjects) {}
 
@@ -269,11 +501,17 @@ export class SnapshotLoader {
     const { tree } = await this.objects.commit(tip);
     const root = await this.objects.tree(tree);
     const find = (name: string) => root.find((entry) => entry.name === name);
-    const [issues, markerBytes, settingsBytes, retired] = await Promise.all([
-      this.issuesUnder(find(ISSUES_DIR)?.oid ?? null, 0),
+    const subtree = (name: string) => {
+      const entry = find(name);
+      return entry?.mode === TREE_MODE ? entry.oid : null;
+    };
+    const [issues, markerBytes, settingsBytes, retired, attempts, outcomes] = await Promise.all([
+      this.issuesUnder(subtree(ISSUES_DIR), 0),
       this.blobOf(find(FORMAT_FILE)),
       this.blobOf(find(SETTINGS_FILE)),
       this.retiredIn(tree),
+      this.sharded(subtree(ATTEMPTS_DIR), 0, this.attemptsByTree, (issue, oid) => this.attemptsOf(issue, oid)),
+      this.sharded(subtree(OUTCOMES_DIR), 0, this.outcomesByTree, (issue, oid) => this.outcomesOf(issue, oid)),
     ]);
     const settings = new Map<string, unknown>();
     if (settingsBytes) {
@@ -284,14 +522,24 @@ export class SnapshotLoader {
         }
       }
     }
+    const verdicts = new Map(outcomes.map((o) => [`${o.issue}/${o.attempt}`, o.outcome]));
+    const attemptLists = new Map<string, AttemptRecord[]>();
+    for (const loaded of attempts) {
+      let list = attemptLists.get(loaded.issue);
+      if (!list) attemptLists.set(loaded.issue, (list = []));
+      list.push({ ...loaded, outcome: verdicts.get(`${loaded.issue}/${loaded.id}`) ?? null });
+    }
+    for (const list of attemptLists.values()) list.sort(byOpening);
     return new Snapshot(
       tip,
       tree,
       markerBytes ? parseMarker(markerBytes.toString('utf8')) : null,
       new Map(issues.map(({ record }) => [record.id, record])),
+      new Map(issues.map(({ record, oid }) => [record.id, oid])),
       settings,
       retired,
       new Map(issues.map(({ record, comments }) => [record.id, comments])),
+      attemptLists,
       (oid) => this.objects.blob(oid),
     );
   }
@@ -333,11 +581,83 @@ export class SnapshotLoader {
       const file = entries.find((e) => e.name === 'issue.md' && e.mode !== TREE_MODE);
       const dir = entries.find((e) => e.name === COMMENTS_DIR && e.mode === TREE_MODE);
       records = file
-        ? [{ record: await this.record(file.oid), comments: dir ? await this.commentsIn(dir.oid) : [] }]
+        ? [{ record: await this.record(file.oid), oid: file.oid, comments: dir ? await this.commentsIn(dir.oid) : [] }]
         : [];
     }
     this.issuesByTree.set(memoKey, records);
     return records;
+  }
+
+  /**
+   * What `leaf` finds in each issue directory of a tree sharded like
+   * `attempts/` and `outcomes/`: `<root>` (depth 0), `<a>` (1), `<b>` (2),
+   * whose entries are the issue directories.
+   */
+  private async sharded<T>(
+    oid: string | null,
+    depth: number,
+    memo: BoundedMap<string, readonly T[]>,
+    leaf: (issue: string, oid: string) => Promise<readonly T[]>,
+  ): Promise<readonly T[]> {
+    if (!oid) return [];
+    const memoKey = `${depth}:${oid}`;
+    const cached = memo.get(memoKey);
+    if (cached) return cached;
+    const dirs = (await this.objects.tree(oid)).filter((e) => e.mode === TREE_MODE);
+    const found = await Promise.all(
+      dirs.map((e) => (depth < 2 ? this.sharded(e.oid, depth + 1, memo, leaf) : leaf(e.name, e.oid))),
+    );
+    const items = found.flat();
+    memo.set(memoKey, items);
+    return items;
+  }
+
+  /** The attempts in one issue's `attempts/<a>/<b>/<issue>/` directory. */
+  private async attemptsOf(issue: string, oid: string): Promise<readonly LoadedAttempt[]> {
+    const memoKey = `${issue}:${oid}`;
+    const cached = this.attemptsByTree.get(memoKey);
+    if (cached) return cached;
+    const dirs = (await this.objects.tree(oid)).filter((e) => e.mode === TREE_MODE && ATTEMPT_PATTERN.test(e.name));
+    const loaded = await Promise.all(dirs.map((e) => this.attemptAt(issue, e.name, e.oid)));
+    const attempts = loaded.filter((a): a is LoadedAttempt => a !== null);
+    this.attemptsByTree.set(memoKey, attempts);
+    return attempts;
+  }
+
+  private async attemptAt(issue: string, id: string, oid: string): Promise<LoadedAttempt | null> {
+    const entries = await this.objects.tree(oid);
+    const file = (name: string) => entries.find((e) => e.name === name && e.mode !== TREE_MODE);
+    const startFile = file('start.md');
+    if (!startFile) return null;
+    const endFile = file('end.md');
+    const [start, end] = await Promise.all([
+      this.objects.blob(startFile.oid).then(parseStart),
+      endFile ? this.objects.blob(endFile.oid).then(parseEnd) : null,
+    ]);
+    const dir = entries.find((e) => e.name === ACTIVITY_DIR && e.mode === TREE_MODE);
+    const activity: ActivityEntry[] = [];
+    for (const entry of dir ? await this.objects.tree(dir.oid) : []) {
+      const parsed = entry.mode !== TREE_MODE && entry.name.endsWith('.md') ? commentEntry(entry.name.slice(0, -3)) : null;
+      // An open attempt's entries are read, for its activity facts; a sealed one's only when a trace is viewed.
+      if (parsed) activity.push({ ...parsed, detail: end ? null : parseActivity(await this.objects.blob(entry.oid)) });
+    }
+    activity.sort(byCommentOrder);
+    return { id, issue, start, end, activity };
+  }
+
+  /** The outcome records in one issue's `outcomes/<a>/<b>/<issue>/` directory. */
+  private async outcomesOf(issue: string, oid: string): Promise<readonly LoadedOutcome[]> {
+    const memoKey = `${issue}:${oid}`;
+    const cached = this.outcomesByTree.get(memoKey);
+    if (cached) return cached;
+    const files = (await this.objects.tree(oid)).filter(
+      (e) => e.mode !== TREE_MODE && e.name.endsWith('.md') && ATTEMPT_PATTERN.test(e.name.slice(0, -3)),
+    );
+    const outcomes = await Promise.all(
+      files.map(async (e) => ({ issue, attempt: e.name.slice(0, -3), outcome: parseOutcome(await this.objects.blob(e.oid)) })),
+    );
+    this.outcomesByTree.set(memoKey, outcomes);
+    return outcomes;
   }
 
   /** A `comments/` directory's files, in comment order; names only, no blobs read. */

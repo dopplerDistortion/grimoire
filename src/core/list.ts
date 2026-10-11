@@ -5,7 +5,9 @@ import { parseWriteRef, type IssueRecord, type TrackerView } from '../tracker';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import type { CallContext } from './context';
 import { derivations, type Derivations } from './derive';
+import { listedOpenAttempt, type ListedOpenAttempt } from './attempts';
 import { define, oneLine } from './op';
+import { staleCutoff } from './stale';
 import { s } from './schema';
 
 export interface ListRow {
@@ -23,7 +25,8 @@ export interface ListRow {
   open_child_count: number;
   /** Claimable: open, unclaimed, unconflicted, unblocked and with no open sub-issue. */
   ready: boolean;
-  open_attempts: unknown[];
+  /** Open attempts (two only after a cross-clone fold). */
+  open_attempts: ListedOpenAttempt[];
   conflict: null;
   comment_count: number;
   last_comment_at: string | null;
@@ -80,7 +83,13 @@ function parentFilter(view: TrackerView, ref: string): string {
   }
 }
 
-function rowOf(view: TrackerView, d: ReturnType<Derivations['of']>, issue: IssueRecord): ListRow {
+function rowOf(
+  view: TrackerView,
+  d: ReturnType<Derivations['of']>,
+  issue: IssueRecord,
+  person: string | null,
+  staleBefore: number,
+): ListRow {
   const comments = view.comments(issue.id);
   return {
     id: issue.id,
@@ -94,7 +103,7 @@ function rowOf(view: TrackerView, d: ReturnType<Derivations['of']>, issue: Issue
     open_blocker_count: d.openBlockerCount,
     open_child_count: d.openChildCount,
     ready: d.ready,
-    open_attempts: [],
+    open_attempts: d.openAttempts.map((a) => listedOpenAttempt(a, person, staleBefore)),
     conflict: d.conflict,
     comment_count: comments.length,
     last_comment_at: comments.length > 0 ? comments[comments.length - 1]!.at : null,
@@ -128,7 +137,8 @@ export const list = define({
   async run(input, { ctx, tracker }): Promise<ListResult> {
     const start = input.cursor === undefined ? null : afterCursor(input.cursor);
     const view = await tracker.read();
-    const derived = derivations(view);
+    const staleBefore = await staleCutoff(tracker.location.commonDir, tracker.now());
+    const derived = derivations(view, staleBefore);
     const parent = input.parent === undefined ? undefined : parentFilter(view, input.parent);
     const assignee = assigneeFilter(input.assignee, ctx);
     const matches = view.issues().filter((issue) => {
@@ -152,7 +162,7 @@ export const list = define({
     // Room for the result's own fields, a cursor and `truncated`.
     let bytes = jsonBytes({ rows: [], total: matches.length, cursor: encodeCursor('list', [Number.MAX_SAFE_INTEGER, 'gr-xxxxxxxx']), truncated: true });
     for (const issue of page) {
-      let row = rowOf(view, derived.of(issue.id), issue);
+      let row = rowOf(view, derived.of(issue.id), issue, ctx.person.email, staleBefore);
       const size = jsonBytes(row) + (rows.length > 0 ? 1 : 0);
       if (bytes + size > RESULT_BUDGET) {
         if (rows.length > 0) break;

@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { keyHash, parseWriteRef } from '../tracker';
 import { jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
+import { heldAttempt, parseHandle, recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
 
@@ -13,6 +14,8 @@ export interface CommentResult {
   at: string;
   kind: string;
   actor: Record<string, unknown>;
+  /** The attempt handle the comment named. */
+  attempt?: string;
   body: string;
   /** True when an idempotency key replayed an earlier comment. */
   replayed?: true;
@@ -38,11 +41,13 @@ export const comment = define({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     body: s.string({ nonBlank: true, description: 'the comment, stored byte for byte' }),
     idempotency_key: s.optional(s.string(oneLine)),
+    attempt: s.optional(s.string({ ...oneLine, description: 'your open attempt’s handle: names the comment as work on it' })),
   }),
   async run(input, { ctx, tracker, actor }): Promise<CommentResult> {
     const author = writer(ctx);
     const id = parseWriteRef(input.id, 'id');
     const key = input.idempotency_key;
+    const attempt = input.attempt === undefined ? undefined : parseHandle(input.attempt);
     const bodyHash = createHash('sha256').update(input.body, 'utf8').digest('hex');
     const write = await tracker.transact(
       {
@@ -53,10 +58,12 @@ export const comment = define({
       },
       (draft) => {
         draft.resolveWrite(id, 'id');
+        if (attempt !== undefined) heldAttempt(draft, id, attempt, author.email);
         const added = draft.addComment(id, {
-          actor: { person: author.email, ...actor },
+          actor: recordedActor(author.email, actor),
           kind: 'comment',
           body: input.body,
+          ...(attempt !== undefined ? { attempt } : {}),
           ...(key ? { key: keyHash(key) } : {}),
         });
         const result: CommentResult = {
@@ -65,9 +72,10 @@ export const comment = define({
           at: added.at,
           kind: added.kind,
           actor: { ...added.actor },
+          ...(attempt !== undefined ? { attempt } : {}),
           body: added.body,
         };
-        return { result: withinBudget(result), issue: id };
+        return { result: withinBudget(result), issue: id, ...(attempt !== undefined ? { attempt } : {}) };
       },
     );
     return write.replayed ? { ...write.result, replayed: true } : write.result;
