@@ -159,7 +159,8 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
     const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling ? cut.waitingForFlush(started) : cut.once(), deadline, null);
     // A chores context's transcript is excluded from excerpts and fact scans (spec §14): it gets no record.
     if (cut.chores) continue;
-    const captured = record ?? budgetRecord(target, cutAt);
+    // A cut the deadline overtook keeps the last record it finished: the calling context's earlier cut.
+    const captured = record ?? cut.latest ?? budgetRecord(target, cutAt);
     if (cut.callIds) claimed.push(...cut.callIds);
     captures.push({ key: target.key, record: captured, cut: true, row: target.row });
   }
@@ -248,6 +249,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 class ContextCut {
   /** The call ids its window holds, once cut: no later excerpt of the trace may hold them. */
   callIds: readonly string[] | null = null;
+  /** The record of its last finished cut, for when the deadline overtakes the next one. */
+  latest: SessionRecord | null = null;
   /** Whether its transcript names it a `grimoire-chores` context, which is never captured. */
   chores = false;
   private readonly rewrite: (text: string) => string;
@@ -264,31 +267,41 @@ class ContextCut {
     this.rewrite = pathRewriter(this.paths);
   }
 
-  /** The calling context: cut again until its ending call reached the transcript, for up to the flush wait. */
+  /**
+   * The calling context: cut again until its ending call reached the
+   * transcript, for up to the flush wait. The budget bounds the wait: a cut
+   * the deadline overtakes leaves `latest`, the one before it.
+   */
   async waitingForFlush(started: number): Promise<SessionRecord> {
     const until = Math.min(started + (this.input.options?.flushWaitMs ?? FLUSH_WAIT_MS), this.deadline);
     let record = await this.once();
-    while (!this.chores && record.excerpt_notes.includes('tail_unflushed') && Date.now() + FLUSH_POLL_MS <= until) {
-      await sleep(FLUSH_POLL_MS);
+    while (!this.chores && record.excerpt_notes.includes('tail_unflushed') && Date.now() < until) {
+      await sleep(Math.min(FLUSH_POLL_MS, until - Date.now()));
       record = await this.once();
     }
     return record;
   }
 
   async once(): Promise<SessionRecord> {
+    const { record, callIds } = await this.cutOnce();
+    this.latest = record;
+    this.callIds = callIds;
+    return record;
+  }
+
+  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null }> {
     const { input, target } = this;
     const family = clientFamily(target.client);
-    if (input.mode === 'none') return this.factsOnly('off');
-    if (family !== 'claude-code' && family !== 'codex') return this.factsOnly('no_transcript');
+    if (input.mode === 'none') return { record: this.factsOnly('off'), callIds: null };
+    if (family !== 'claude-code' && family !== 'codex') return { record: this.factsOnly('no_transcript'), callIds: null };
     try {
       const { cut, roots, source } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
       if (isChoresContext(cut)) this.chores = true;
-      this.callIds = cut.callIds;
-      return this.fromCut(cut, source, roots);
+      return { record: this.fromCut(cut, source, roots), callIds: cut.callIds };
     } catch {
       // A reader that throws is one grimoire can't trust on this transcript.
       const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };
-      return this.fromCut(emptyCut(identity, 'unreadable'), target.source, []);
+      return { record: this.fromCut(emptyCut(identity, 'unreadable'), target.source, []), callIds: null };
     }
   }
 

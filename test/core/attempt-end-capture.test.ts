@@ -313,6 +313,31 @@ describe('capture problems are statuses, never errors', () => {
   });
 });
 
+describe('the hard budget', () => {
+  test('bounds the calling context’s flush wait: it keeps the cut it made, and the contexts after it get budget', async ({ world, grimoire, capture }) => {
+    // The ending call never reaches the transcript, and the flush wait outlasts the budget.
+    const budgetMs = 1_500;
+    const core = capture.makeCore({ capture: { budgetMs, flushWaitMs: 5_000 } });
+    const id = await created(core, grimoire.ctx, 'Tight budget');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    const started = Date.now();
+    const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+    const took = Date.now() - started;
+
+    expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+    expect(took).toBeGreaterThanOrEqual(budgetMs - 200);
+    expect(took).toBeLessThan(4_000);
+    const records = await sessionRecords(world.a, id, attempt);
+    // The calling context is cut first, and waits for its ending call only until the budget runs out.
+    expect(records.find((r) => r.fields.context === 'main')!.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['tail_unflushed'], facts: 'scanned' });
+    expect(records.find((r) => r.fields.context === CLAUDE_AGENT)!.fields).toMatchObject({ excerpt: 'budget', facts: 'budget', reach: null });
+  });
+});
+
 describe('replays', () => {
   test('replaying the close answers replayed: true without cutting again, and makes no second commit', async ({ world, grimoire, capture }) => {
     // The spec's 2 s flush wait: a cut of the calling context waits it out, since its close call never reaches the transcript.
