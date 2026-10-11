@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeTempDir, removeDir, runCommand } from '#harness';
 
@@ -35,6 +35,24 @@ describe('the build', () => {
   });
   afterAll(() => removeDir(packageRoot));
 
+  /**
+   * The code a file loads up front: its own and its static imports', followed
+   * transitively. Bare side-effect imports (`import "./chunks/chunk-X.mjs";`) count
+   * too; dynamic `import()`s don't.
+   */
+  const upFront = (entry: string): string => {
+    const loaded = new Set<string>();
+    const visit = (file: string) => {
+      if (loaded.has(file)) return;
+      loaded.add(file);
+      for (const [, spec] of readFileSync(file, 'utf8').matchAll(/^(?:import|export)\s(?:[^;]*?\sfrom\s*)?"(\.{1,2}\/[^"]+)"/gm)) {
+        visit(path.resolve(path.dirname(file), spec!));
+      }
+    };
+    visit(entry);
+    return [...loaded].map((file) => readFileSync(file, 'utf8')).join('\n');
+  };
+
   it('produces a self-contained bin that reports the package version', async () => {
     const bin = path.join(packageRoot, pkg.bin.grimoire);
     // Run from the temp root, far from the repo's node_modules.
@@ -47,23 +65,6 @@ describe('the build', () => {
 
   it('loads each verb’s code only for that verb: the SDK only for `mcp`, the core only after its opening', () => {
     const chunks = path.join(packageRoot, 'dist', 'chunks');
-    /**
-     * The code a file loads up front: its own and its static imports', followed
-     * transitively. Bare side-effect imports (`import "./chunks/chunk-X.mjs";`) count
-     * too; dynamic `import()`s don't.
-     */
-    const upFront = (entry: string): string => {
-      const loaded = new Set<string>();
-      const visit = (file: string) => {
-        if (loaded.has(file)) return;
-        loaded.add(file);
-        for (const [, spec] of readFileSync(file, 'utf8').matchAll(/^(?:import|export)\s(?:[^;]*?\sfrom\s*)?"(\.{1,2}\/[^"]+)"/gm)) {
-          visit(path.resolve(path.dirname(file), spec!));
-        }
-      };
-      visit(entry);
-      return [...loaded].map((file) => readFileSync(file, 'utf8')).join('\n');
-    };
     const serve = readdirSync(chunks).find((name) => name.startsWith('serve-'));
 
     const cli = upFront(path.join(packageRoot, pkg.bin.grimoire));
@@ -76,6 +77,25 @@ describe('the build', () => {
     expect(mcp).toContain('node_modules/@modelcontextprotocol/server/');
     expect(mcp).not.toContain('src/core/index.ts');
     expect(mcp).not.toContain('src/tracker/');
+  });
+
+  it('gives a version copy its entry, dist/launch.mjs, whose pre-tool-use hook loads neither the CLI, the core nor the SDK', async () => {
+    const dist = path.join(packageRoot, 'dist');
+    const chunks = path.join(dist, 'chunks');
+    const chunk = (prefix: string) => {
+      const name = readdirSync(chunks).find((file) => file.startsWith(prefix));
+      expect(name, prefix).toBeDefined();
+      return path.join(chunks, name!);
+    };
+
+    const entry = (await import(pathToFileURL(path.join(dist, 'launch.mjs')).href)) as { launch?: unknown };
+    expect(typeof entry.launch).toBe('function');
+    // Everything `hook pre-tool-use` loads: the entry, the hook dispatch and its own chunk.
+    const hook = [upFront(path.join(dist, 'launch.mjs')), upFront(chunk('run-hook-')), upFront(chunk('pre-tool-use-'))].join('\n');
+    expect(hook).toContain('src/surfaces/hooks/pre-tool-use.ts');
+    for (const heavy of ['src/surfaces/cli/run.ts', 'src/core/', 'src/tracker/', 'node_modules/@modelcontextprotocol/']) {
+      expect(hook, heavy).not.toContain(heavy);
+    }
   });
 
   it('produces the dashboard as hashed static assets with no inline code', () => {

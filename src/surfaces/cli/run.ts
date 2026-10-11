@@ -7,6 +7,9 @@
 // the core once.
 //
 // Exit codes: 0 success; 1 stdout carries an `error` object; 2 usage error.
+// 3 (grimoire isn't set up on this machine for the pin) never comes from here:
+// the launcher, the shell shim or the bin's delegation (../delegate.ts) says
+// it before any of this loads.
 import path from 'node:path';
 import { createCore, runBackgroundSync, spawnedAutoSync, type CallContext, type Core, type Outcome } from '../../core';
 import { humanSurface } from '../../core/context';
@@ -34,6 +37,11 @@ export interface CliOptions {
   /** The path of the running `grimoire.mjs`: the detached sync child runs it. */
   readonly bin: string;
   readonly io?: CliIo;
+  /**
+   * Where the host repo search starts when the command names no `--from`
+   * (default: the cwd). Through the shell shim it is the shim's own checkout.
+   */
+  readonly startDir?: string;
 }
 
 /** stdout: one JSON object, indented for a person's terminal. */
@@ -68,9 +76,9 @@ async function inputOf(command: Command, io: CliIo): Promise<Record<string, unkn
 }
 
 /** The call context of a CLI call (spec §7): the host repo from the start directory, the person, and what the shell shows. */
-function contextOf(command: Command, io: CliIo): Promise<CallContext> {
+function contextOf(command: Command, io: CliIo, startDir: string | undefined): Promise<CallContext> {
   return cliContext({
-    cwd: command.from === null ? io.cwd : path.resolve(io.cwd, command.from),
+    cwd: command.from === null ? (startDir ?? io.cwd) : path.resolve(io.cwd, command.from),
     env: io.env,
     tty: io.stdin.isTTY === true && io.stdout.isTTY === true,
   });
@@ -177,7 +185,7 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
     }
     command = parsed;
     const input = await inputOf(parsed, io);
-    const ctx = await contextOf(parsed, io);
+    const ctx = await contextOf(parsed, io, options.startDir);
     if (parsed.background) {
       printJson(io, await runBackgroundSync(ctx));
       return 0;
