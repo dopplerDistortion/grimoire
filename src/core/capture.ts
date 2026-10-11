@@ -6,7 +6,14 @@
 // record's status.
 import { captureAtEnd, sealSessionRecords, type CaptureMode, type ContextCapture, type SkillReadEvent } from '../capture/end';
 import { observedEvidence } from '../capture/evidence';
-import { cutSucceeded } from '../capture/session-record';
+import {
+  cutSucceeded,
+  parseSessionRecord,
+  type FactsStatus,
+  type RecordExcerptStatus,
+  type RecordNote,
+} from '../capture/session-record';
+import type { StepOrigin } from '../capture/steps';
 import { noteCutReach } from '../capture/seen-here';
 import { cancelSweeps } from '../capture/sweeps';
 import { MachineLocalStore } from '../machine-local';
@@ -115,4 +122,77 @@ export async function afterSeal(env: OpEnv, handle: string, capture: EndingCaptu
   } catch {
     // A row is only a hint.
   }
+}
+
+/** One bound context as a trace shows it: its session record's entry and facts. */
+export interface CaptureEntry {
+  /** The session key: the record's name. */
+  key: string;
+  client: string;
+  client_version: string | null;
+  reader_version: number | null;
+  session: string | null;
+  context: string | null;
+  /** Which identity source settled the session. */
+  source: string | null;
+  window: { start: StepOrigin; end: StepOrigin } | null;
+  counts: { steps: number; kept: number; characters: number };
+  excerpt: { status: RecordExcerptStatus; notes: RecordNote[] };
+  facts: FactsStatus;
+  skills_read: unknown[];
+  commits: unknown[];
+}
+
+/** What a trace captured (spec §3, §14): derived on read from the frozen session records, never from `end.md`. */
+export interface TraceCapture {
+  /** One entry per bound context with a record, purged ones included (status `purged`). */
+  contexts: CaptureEntry[];
+  /** True only when every bound context's facts were `scanned`; scorecards read false as "read unknown". */
+  facts_complete: boolean;
+}
+
+/** The capture of attempt `handle`, read from its session records and their purge tombstones. */
+export async function traceCapture(view: TrackerView, handle: string): Promise<TraceCapture> {
+  const record = view.attempt(handle);
+  if (!record) return { contexts: [], facts_complete: false };
+  const purged = await view.purgedSessions(handle);
+  const contexts: CaptureEntry[] = [];
+  for (const key of [...record.sessions.keys()].sort()) {
+    const bytes = await view.sessionRecord(handle, key);
+    if (bytes === null || purged.has(key)) continue;
+    const stored = parseSessionRecord(bytes);
+    contexts.push({
+      key,
+      client: stored.client,
+      client_version: stored.client_version,
+      reader_version: stored.reader_version,
+      session: stored.session,
+      context: stored.context,
+      source: stored.source,
+      window: stored.window_start && stored.window_end ? { start: stored.window_start, end: stored.window_end } : null,
+      counts: { steps: stored.steps, kept: stored.steps_kept, characters: stored.characters },
+      excerpt: { status: stored.excerpt, notes: [...stored.excerpt_notes] },
+      facts: stored.facts,
+      skills_read: [...stored.skills_read],
+      commits: [...stored.commits],
+    });
+  }
+  for (const key of [...purged].sort()) {
+    contexts.push({
+      key,
+      client: 'unknown',
+      client_version: null,
+      reader_version: null,
+      session: null,
+      context: null,
+      source: null,
+      window: null,
+      counts: { steps: 0, kept: 0, characters: 0 },
+      excerpt: { status: 'purged', notes: [] },
+      facts: 'purged',
+      skills_read: [],
+      commits: [],
+    });
+  }
+  return { contexts, facts_complete: contexts.length > 0 && contexts.every((entry) => entry.facts === 'scanned') };
 }

@@ -5,7 +5,7 @@
 // transcripts from the seam-2 fixtures stand in for the clients' transcripts:
 // their tool-use ids stand in for the ids of the grimoire calls the tests make.
 import { existsSync, readFileSync } from 'node:fs';
-import { cp, mkdir } from 'node:fs/promises';
+import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { FIXTURES_DIR, fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
@@ -13,6 +13,8 @@ import { sessionKey } from '../../src/capture/seen-here';
 import { registerSweep } from '../../src/capture/sweeps';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
 import type { CallContext, Core, CoreOptions } from '../../src/core';
+import { traceCapture, type TraceCapture } from '../../src/core/capture';
+import { putMachineSetting } from '../../src/core/settings';
 import { MachineLocalStore } from '../../src/machine-local';
 import { createScanner } from '../../src/scanner';
 import { openTracker } from '../../src/tracker';
@@ -105,6 +107,16 @@ async function sessionRecords(checkout: Checkout, id: string, attempt: string): 
   if (listed.code !== 0) return [];
   const names = listed.stdout.split('\n').filter(Boolean);
   return Promise.all(names.map(async (name) => parseRecord(name, await trackerFile(checkout, tip, `${dir}/${name}`))));
+}
+
+/** The capture of `attempt` as the core derives it from the tracker in `checkout`. */
+async function captureOf(checkout: Checkout, attempt: string): Promise<TraceCapture> {
+  const tracker = await openTracker(checkout.dir);
+  try {
+    return await traceCapture(await tracker.read(), attempt);
+  } finally {
+    await tracker.close();
+  }
 }
 
 async function created(core: Core, ctx: CallContext, title: string): Promise<string> {
@@ -201,6 +213,15 @@ describe('closing an attempt', () => {
     const end = await trackerFile(world.a, tip, `${attemptDir(id, attempt)}/end.md`);
     const endKeys = end.split('\n').filter((line) => line.includes(': ')).map((line) => line.slice(0, line.indexOf(':')));
     expect(endKeys).toEqual(['ended', 'ended_by', 'at', 'debrief', 'worker_kind', 'wiki_exposed', 'field_changes']);
+    // Per-context entries and facts_complete are read from the session records.
+    const trace = await captureOf(world.a, attempt);
+    expect(trace.contexts.map((c) => [c.context, c.excerpt.status, c.facts])).toEqual(
+      expect.arrayContaining([
+        ['main', 'cut', 'scanned'],
+        [CLAUDE_AGENT, 'cut', 'scanned'],
+      ]),
+    );
+    expect(trace.facts_complete).toBe(true);
   });
 });
 
@@ -237,6 +258,8 @@ describe('capture problems are statuses, never errors', () => {
       roots: [`~${path.sep}${path.basename(capture.configDir)}${path.sep}projects`],
     });
     expect(record!.body).toBe('');
+    // A context whose facts weren't scanned leaves the trace's facts incomplete: read unknown.
+    expect((await captureOf(world.a, claim.result.attempt)).facts_complete).toBe(false);
   });
 
   test('a scanner that can’t run drops the excerpt with status unscanned; the rest of the record is written and the close succeeds', async ({
@@ -605,5 +628,94 @@ describe('identity checked against the transcript at cut time', () => {
 
     expect(trusted!.fields).toMatchObject({ session: PLAIN_SESSION, source: 'spawn-env', excerpt: 'cut' });
     expect(wrong!.fields).toMatchObject({ session: CLAUDE_SESSION, source: 'spawn-env', excerpt: 'unmatched', facts: 'unmatched', reach: null });
+  });
+});
+
+describe('modes that open no transcript, or commit no text', () => {
+  test('in none mode no transcript is opened: facts-only records, reaching the context’s latest skill_read event plus the event count', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    await setExcerptMode(world.a, 'none');
+    // No transcript anywhere: a cut that looked would say not_found.
+    const core = capture.makeCore({ capture: { claudeConfigDir: path.join(capture.configDir, 'nothing-here') } });
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const id = await created(core, grimoire.ctx, 'No transcripts');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    // Two skill_read events of the claiming context (the shape skill_read appends), and one of another session.
+    const actor = { kind: 'agent', client: 'claude-code', session: CLAUDE_SESSION, context: 'main', call: 'toolu_read', nonce: 'nonce-claude' };
+    await machine.records.append('skill-reads', { skill: 'fix-redirects', version: 'a'.repeat(64), at: '2026-10-11T03:27:18.000Z', actor, nonce: 'nonce-claude' });
+    await machine.records.append('skill-reads', { skill: 'fix-redirects', version: 'a'.repeat(64), at: '2026-10-11T03:27:21.000Z', actor, nonce: 'nonce-claude' });
+    await machine.records.append('skill-reads', {
+      skill: 'other',
+      version: 'b'.repeat(64),
+      at: '2026-10-11T03:27:25.000Z',
+      actor: { ...actor, session: 'someone-else' },
+      nonce: 'nonce-other',
+    });
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+
+    const [record] = await sessionRecords(world.a, id, attempt);
+    expect(record!.fields).toMatchObject({
+      session: CLAUDE_SESSION,
+      context: 'main',
+      excerpt: 'off',
+      excerpt_notes: [],
+      facts: 'events_only',
+      reader_version: null,
+      window_start: null,
+      reach: { at: '2026-10-11T03:27:21.000Z', ref: '2' },
+    });
+    expect(record!.body).toBe('');
+  });
+
+  test('this machine’s capture.excerpts_max lowers the store’s mode for its own cuts: status off, noted capped', async ({ world, grimoire, capture }) => {
+    await putMachineSetting(path.join(world.a.dir, '.git'), 'capture.excerpts_max', 'facts');
+    const core = capture.makeCore();
+    const id = await created(core, grimoire.ctx, 'Capped');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:30.000Z');
+
+    await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+
+    const [record] = await sessionRecords(world.a, id, attempt);
+    expect(record!.fields).toMatchObject({ excerpt: 'off', excerpt_notes: ['tail_unflushed', 'capped'], facts: 'scanned', characters: 0 });
+    expect(record!.body).toBe('');
+  });
+});
+
+describe('the calling context', () => {
+  test('waits for its ending call to reach its transcript, then cuts it whole', async ({ world, grimoire, capture }) => {
+    const codexHome = await makeTempDir('grimoire-codex-home-');
+    const day = path.join(codexHome, 'sessions', '2026', '10', '11');
+    await mkdir(day, { recursive: true });
+    const name = `rollout-2026-10-11T07-44-45-${CODEX_ROOT}.jsonl`;
+    const lines = readFileSync(fixturePath(`${CODEX_TX}/${name}`), 'utf8').split('\n');
+    // Codex has flushed the rollout up to the ending call (`echo`, call_8_0, line 25): the rest lands while the close waits.
+    const ending = lines.findIndex((line) => line.includes('"call_id":"call_8_0"') && line.includes('"function_call"'));
+    expect(ending).toBeGreaterThan(0);
+    await writeFile(path.join(day, name), `${lines.slice(0, ending).join('\n')}\n`);
+    try {
+      const core = capture.makeCore({ capture: { codexHome, flushWaitMs: 2_000 } });
+      capture.at('2026-10-11T04:44:47.100Z');
+      const id = await created(core, grimoire.ctx, 'Flushing');
+      const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_2_0'));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      capture.at('2026-10-11T04:44:47.800Z');
+      const flushed = setTimeout(() => void appendFile(path.join(day, name), lines.slice(ending).join('\n')), 400);
+
+      const closed = await core.call('close', { id, reason: 'done', attempt: claim.result.attempt, debrief: DEBRIEF }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_8_0'));
+      clearTimeout(flushed);
+
+      expect(closed).toMatchObject({ ok: true });
+      const [record] = await sessionRecords(world.a, id, claim.result.attempt);
+      expect(record!.fields).toMatchObject({ context: CODEX_ROOT, excerpt: 'cut', excerpt_notes: [] });
+      expect(record!.body).toContain('text: root closes gr-7k2pq');
+    } finally {
+      await removeDir(codexHome);
+    }
   });
 });
