@@ -1,0 +1,19 @@
+# The only global git config the test processes see (GIT_CONFIG_GLOBAL points
+# here; GIT_CONFIG_NOSYSTEM hides the system file). It carries no identity:
+# each repo the harness creates gets its own user.name and user.email.
+# Tests must never run `git config --global`.
+[init]
+	defaultBranch = main
+[core]
+	autocrlf = false
+	fsmonitor = false
+[commit]
+	gpgsign = false
+[tag]
+	gpgsign = false
+[gc]
+	auto = 0
+[maintenance]
+	auto = false
+[advice]
+	detachedHead = false

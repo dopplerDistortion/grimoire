@@ -1,0 +1,5 @@
+# Line endings are LF in the repo and in every checkout, Windows included.
+* text=auto eol=lf
+
+# Client-contract fixtures are real artifacts: keep their bytes exactly.
+test/fixtures/** -text
