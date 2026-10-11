@@ -1,7 +1,9 @@
 // node appserver-turn.mjs <codex-home> <cwd> <history-mode> <prompt>
 // Drives `codex app-server` over stdio: initialize (experimental API on),
-// thread/start with an explicit historyMode, one turn/start with <prompt>,
-// waits for turn/completed, then exits. Prints the thread id.
+// thread/start with an explicit historyMode, then one turn/start per turn of
+// <prompt> (turns are separated by a line '---TURN---'). Each turn waits for
+// this thread's turn/completed; a subagent thread's own turn/completed is
+// ignored. Exits after the last turn. Prints the thread id and each turn's status.
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 
@@ -63,7 +65,7 @@ console.log(JSON.stringify({ threadId, historyMode: started.thread.historyMode ?
 for (const text of prompt.split(/\r?\n---TURN---\r?\n/)) {
   const done = new Promise((resolve) => {
     onNotification = (msg) => {
-      if (msg.method === 'turn/completed') resolve(msg.params);
+      if (msg.method === 'turn/completed' && msg.params?.threadId === threadId) resolve(msg.params);
     };
   });
   await request('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] });
