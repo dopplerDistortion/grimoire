@@ -22,7 +22,7 @@ npm ci              # install the dev toolchain (grimoire has no runtime depende
 npm run check       # the full local check, the CI equivalent (below)
 npm test            # Vitest only
 npm run typecheck   # tsc, for the Node side and the dashboard
-npm run build       # dist/grimoire.mjs (esbuild) and dist/dashboard/ (Vite)
+npm run build       # dist/grimoire.mjs + dist/chunks/ (esbuild) and dist/dashboard/ (Vite)
 ```
 
 `npm run check` runs four steps in order and prints a summary: `typecheck`,
@@ -34,7 +34,10 @@ it before every commit.
 and `check:deps` fails if one appears, or if `optionalDependencies`,
 `peerDependencies` or `bundleDependencies` appears. Everything the package uses
 is a devDependency, bundled into `dist/` at build time. The CLI build also fails
-if the bundle imports anything other than a Node builtin.
+if the bundle imports anything other than a Node builtin. Each verb's heavy code
+is a dynamic `import()`, which esbuild splits into `dist/chunks/`, so a verb
+loads only its own code: `--version` never loads the MCP SDK, and `grimoire mcp`
+answers its opening before the core loads.
 
 ### Layout
 

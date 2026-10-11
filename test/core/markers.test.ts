@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { VERSION } from '../../src/version';
 import { commitToTracker, coreTest as test, expectRefUnmoved, trackerFile, trackerTip, TRACKER_REF } from './support';
@@ -123,5 +125,72 @@ describe('the tracker ref and its format marker', () => {
     expect(created).toMatchObject({ ok: true, result: { created: true } });
     const tip = await trackerTip(world.a);
     expect(await trackerFile(world.a, tip!, 'format')).toBe('format: 4\ncompat: 1\nrequires: "1.0.0"\nnew_field: true\n');
+  });
+});
+
+describe("the checkout's install_format", () => {
+  test('one this release does not know gives UPGRADE_REQUIRED (marker install): restart, then join the pin', async ({
+    world,
+    grimoire,
+  }) => {
+    const ctx = { ...grimoire.ctx, repo: { ...grimoire.ctx.repo, pin: '2.3.0', installFormat: 2 } };
+
+    const write = await expectRefUnmoved(world.a, () => grimoire.core.call('create', { title: 'x' }, ctx));
+    const read = await grimoire.core.call('labels', {}, ctx);
+
+    const expected = {
+      ok: false,
+      error: {
+        code: 'UPGRADE_REQUIRED',
+        message: expect.stringContaining('relay the remedies'),
+        retryable: false,
+        details: {
+          marker: 'install',
+          why: 'newer',
+          running: VERSION,
+          pin: '2.3.0',
+          requires: '2.3.0',
+          remedies: [
+            { kind: 'restart', text: expect.stringContaining('restart') },
+            { kind: 'join', command: 'npx @goksening/grimoire@2.3.0 init', text: expect.any(String) },
+          ],
+        },
+      },
+    };
+    expect(write).toEqual(expected);
+    expect(read).toEqual(expected);
+  });
+
+  test('on a machine that already has the pinned copy, the only remedy is the restart', async ({ world, grimoire }) => {
+    await mkdir(path.join(world.a.dir, '.git', 'grimoire', 'pkg', '2.3.0'), { recursive: true });
+    await writeFile(path.join(world.a.dir, '.git', 'grimoire', 'pkg', '2.3.0', '.complete'), '');
+    const ctx = { ...grimoire.ctx, repo: { ...grimoire.ctx.repo, pin: '2.3.0', installFormat: 2 } };
+
+    const outcome = await grimoire.core.call('labels', {}, ctx);
+
+    // toMatchObject matches arrays at their full length: the restart, and no join.
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: { code: 'UPGRADE_REQUIRED', details: { marker: 'install', remedies: [{ kind: 'restart' }] } },
+    });
+  });
+
+  test('an older or unreadable install_format is refused too; the current one, or none read, runs', async ({ grimoire }) => {
+    const withFormat = (installFormat: number | null | undefined) => ({
+      ...grimoire.ctx,
+      repo: { ...grimoire.ctx.repo, pin: '1.0.0', installFormat },
+    });
+
+    expect(await grimoire.core.call('labels', {}, withFormat(0))).toMatchObject({
+      ok: false,
+      error: { code: 'UPGRADE_REQUIRED', details: { marker: 'install', why: 'older' } },
+    });
+    expect(await grimoire.core.call('labels', {}, withFormat(Number.NaN))).toMatchObject({
+      ok: false,
+      error: { code: 'UPGRADE_REQUIRED', details: { marker: 'install', why: 'newer' } },
+    });
+    for (const installFormat of [1, null, undefined]) {
+      expect(await grimoire.core.call('labels', {}, withFormat(installFormat))).toMatchObject({ ok: true });
+    }
   });
 });
