@@ -48,8 +48,8 @@ export const create = define({
           : {}),
       },
       async (draft) => {
-        if (parent) draft.resolveWrite(parent, 'parent');
-        for (const blocker of blockers) draft.resolveWrite(blocker.id, blocker.field);
+        const parentId = parent ? draft.resolveWrite(parent, 'parent') : null;
+        const blockerIds = blockers.map((blocker) => draft.resolveWrite(blocker.id, blocker.field));
         const id = await draft.mintIssueId();
         const at = draft.now.toISOString();
         draft.putIssue({
@@ -58,8 +58,8 @@ export const create = define({
           title: input.title,
           status: 'open',
           labels: sortedUnique(input.labels ?? []),
-          parent,
-          blocked_by: sortedUnique(blockers.map((b) => b.id)),
+          parent: parentId,
+          blocked_by: sortedUnique(blockerIds),
           links: [],
           created_at: at,
           created_by: author.email,

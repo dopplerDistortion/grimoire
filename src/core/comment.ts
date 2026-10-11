@@ -45,7 +45,7 @@ export const comment = define({
   }),
   async run(input, { ctx, tracker, actor }): Promise<CommentResult> {
     const author = writer(ctx);
-    const id = parseWriteRef(input.id, 'id');
+    const ref = parseWriteRef(input.id, 'id');
     const key = input.idempotency_key;
     const attempt = input.attempt === undefined ? undefined : parseHandle(input.attempt);
     const bodyHash = createHash('sha256').update(input.body, 'utf8').digest('hex');
@@ -54,10 +54,10 @@ export const comment = define({
         op: 'comment',
         author,
         actor,
-        ...(key ? { idempotency: { key, fingerprint: { issue: id, body: bodyHash } } } : {}),
+        ...(key ? { idempotency: { key, fingerprint: { issue: ref, body: bodyHash } } } : {}),
       },
       (draft) => {
-        draft.resolveWrite(id, 'id');
+        const id = draft.resolveWrite(ref, 'id');
         if (attempt !== undefined) heldAttempt(draft, id, attempt, author.email);
         const added = draft.addComment(id, {
           actor: recordedActor(author.email, actor),

@@ -1,8 +1,10 @@
 // The body fold (spec §4, Fold rules: body, hunk by hunk): a three-way merge of
 // line hunks against the base. Concurrent insertions at one place both stay, in
 // a deterministic order; concurrent deletions remove their union; any other
-// overlap is a conflict. Nothing depends on which side is which, so the merge
-// is symmetric.
+// overlap is a conflict, settled for that group of hunks alone by the side the
+// caller prefers, while every other hunk still merges. Nothing else depends on
+// which side is which, so swapping the sides and the preference gives the same
+// text.
 
 /** A change to the base: its lines [start, end) replaced by `lines` (start = end: a pure insertion). */
 interface Hunk {
@@ -11,7 +13,11 @@ interface Hunk {
   readonly lines: readonly string[];
 }
 
-export type TextMerge = { readonly clean: true; readonly text: string } | { readonly clean: false };
+export interface TextMerge {
+  readonly text: string;
+  /** True when hunks overlapped and only the preferred side's changes to them were kept. */
+  readonly conflicted: boolean;
+}
 
 /** Beyond this many edits between two versions, the diff gives up on detail: one hunk spans the difference. */
 const MAX_EDITS = 4_000;
@@ -143,11 +149,15 @@ function resolveCluster(sides: readonly [readonly Hunk[], readonly Hunk[]]): str
   return null;
 }
 
-/** Folds the texts `a` and `b` over `base`, hunk by hunk. */
-export function mergeText(base: string, a: string, b: string): TextMerge {
-  if (a === b) return { clean: true, text: a };
-  if (a === base) return { clean: true, text: b };
-  if (b === base) return { clean: true, text: a };
+/**
+ * Folds the texts `a` and `b` over `base`, hunk by hunk. A group of hunks that
+ * overlap and don't resolve takes only the `prefer` side's changes; the rest of
+ * the text merges as usual.
+ */
+export function mergeText(base: string, a: string, b: string, prefer: 'a' | 'b'): TextMerge {
+  if (a === b) return { text: a, conflicted: false };
+  if (a === base) return { text: b, conflicted: false };
+  if (b === base) return { text: a, conflicted: false };
   const baseLines = splitLines(base);
   const hunks = [diffHunks(baseLines, splitLines(a)), diffHunks(baseLines, splitLines(b))] as const;
   // Group hunks that overlap across the sides, transitively.
@@ -173,12 +183,23 @@ export function mergeText(base: string, a: string, b: string): TextMerge {
   const ordered = [...clusters.values()].sort((x, y) => x.start - y.start || x.end - y.end);
   const out: string[] = [];
   let at = 0;
+  let conflicted = false;
   for (const cluster of ordered) {
+    out.push(...baseLines.slice(at, cluster.start));
     const lines = resolveCluster(cluster.sides);
-    if (lines === null) return { clean: false };
-    out.push(...baseLines.slice(at, cluster.start), ...lines);
+    if (lines !== null) out.push(...lines);
+    else {
+      // The preferred side's own hunks, over the base text the group spans.
+      conflicted = true;
+      let inside = cluster.start;
+      for (const h of cluster.sides[prefer === 'a' ? 0 : 1]) {
+        out.push(...baseLines.slice(inside, h.start), ...h.lines);
+        inside = h.end;
+      }
+      out.push(...baseLines.slice(inside, cluster.end));
+    }
     at = cluster.end;
   }
   out.push(...baseLines.slice(at));
-  return { clean: true, text: out.join('') };
+  return { text: out.join(''), conflicted };
 }

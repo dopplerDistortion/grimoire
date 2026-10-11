@@ -78,3 +78,18 @@ configured as a custom provider (`wire_api = "responses"`, model slug
   time; each line's `timestamp` is UTC.
 - The fix-pass files needed no replacing, so they are Codex's bytes unchanged.
   That includes the `.zst`: it is Codex's own zstd frame.
+
+## Spike F (GOK-131): provenance and sanitizing
+
+Findings, verdicts and the probe kit are in
+`docs/research/spikes/codex-skills-role-exec.md` and
+`test/spikes/codex-skills-role-exec/`. The verdicts are encoded against these
+files in `test/spikes/codex-skills-role-exec.test.ts`. Same client, OS and date
+as spike E, also **captured under a scripted model** (the kit's own stand-in,
+`scripted-responses.mjs`), except `exec-json/runner/not-logged-in.jsonl`, which
+had no stand-in at all. Spike F's files sit in their own subfolders
+(`exec-json/runner/`, `transcripts/skill-stub-read/`, `transcripts/skill-roots/`,
+`transcripts/chore-role/`, `mcp/chore-role/`), each with a README giving its
+run, provenance and sanitizing: the user name became `USER` and the time zone
+`Etc/UTC` (unlike Spike E's re-staged files, which keep the real zone), with
+the package name `@goksening/grimoire` kept.

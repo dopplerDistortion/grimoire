@@ -3,7 +3,8 @@
 // tracker, and fold(A, B) and fold(B, A) must build identical trees. Later
 // rounds fold folds, so their merge bases criss-cross (a recursive virtual base).
 //
-// GRIMOIRE_FOLD_SEEDS=<n> runs more generated histories.
+// GRIMOIRE_FOLD_SEEDS=<n> runs more generated histories. Ids come from the seed
+// too, so a failing seed replays the same history; its message lists the ops.
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import { openTracker } from '../../src/tracker';
@@ -14,6 +15,7 @@ import {
   coreTest as test,
   fetchTracker,
   fetchTrackerFrom,
+  issuePath,
   pushTracker,
   T0,
   trackerTip,
@@ -36,6 +38,8 @@ function random(seed: number): () => number {
   };
 }
 
+const CROCKFORD = '0123456789abcdefghjkmnpqrstvwxyz';
+
 interface Clone {
   readonly name: string;
   readonly checkout: Checkout;
@@ -45,6 +49,8 @@ interface Clone {
   tick: number;
   /** Open attempts this clone's person holds: issue id → handle. */
   readonly held: Map<string, string>;
+  /** The next id suffix to mint, when a round wants both clones to mint the same id. */
+  forcedSuffix: string | null;
 }
 
 const DEBRIEF = { asked: 'a', tried: 'b', failed: 'none', worked: 'c', next: 'none' };
@@ -60,19 +66,44 @@ interface Counter {
   n: number;
   /** Where each comment a clone made lives: `/<id>/comments/<comment>.md`. */
   readonly comments: string[];
+  /** Every generated op, in order: a failing seed's message lists them. */
+  readonly ops: string[];
+}
+
+/** The tracker file at `file` on the clone's local tip, or null. */
+async function localFile(clone: Clone, file: string): Promise<string | null> {
+  const tip = await trackerTip(clone.checkout);
+  const read = tip ? await clone.checkout.gitResult(['cat-file', 'blob', `${tip}:${file}`]) : null;
+  return read && read.code === 0 ? read.stdout : null;
+}
+
+/** The files under `dir` on the clone's local tip. */
+async function localFiles(clone: Clone, dir: string): Promise<string[]> {
+  const tip = await trackerTip(clone.checkout);
+  const listed = tip ? await clone.checkout.git(['ls-tree', '-r', '--name-only', tip, '--', dir]) : '';
+  return listed.split('\n').filter((line) => line !== '');
+}
+
+/** `key: <JSON>` lines with one key set (the settings and marker line format). */
+function withLine(text: string | null, key: string, raw: string): string {
+  const lines = (text ?? '').split('\n').filter((line) => line !== '' && !line.startsWith(`${key}: `));
+  return `${[...lines, `${key}: ${raw}`].join('\n')}\n`;
 }
 
 async function edit(clone: Clone, rand: () => number, counter: Counter): Promise<void> {
   const pick = <T>(items: readonly T[]): T | undefined => items[Math.floor(rand() * items.length)];
   // Two instants only, so both clones often stamp the same `updated_at` and the byte tie-breaks decide.
   clone.tick = rand() < 0.5 ? 0 : 1;
+  const at = new Date(T0.getTime() + clone.tick * 1000).toISOString();
   const all = await ids(clone);
   const id = pick(all);
   const n = counter.n++;
   const call = (op: string, input: Record<string, unknown>) => clone.core.call(op, input, clone.ctx);
   // Few issues, many edits each: concurrent edits of one record are the point.
   // Retitles (1, 12, 13) are weighted up: a scalar collision needs both sides on one field of one issue.
-  const choice = id === undefined || (all.length < 3 && rand() < 0.3) ? 0 : 1 + Math.floor(rand() * 14);
+  const choice = id === undefined || (all.length < 3 && rand() < 0.3) ? 0 : 1 + Math.floor(rand() * 24);
+  const attempts = id ? `attempts/${id[3]}/${id[4]}/${id}` : '';
+  counter.ops.push(`${clone.name} #${n}: ${choice} on ${id ?? '-'} at +${clone.tick}s`);
   switch (choice) {
     case 0:
       await call('create', {
@@ -124,6 +155,7 @@ async function edit(clone: Clone, rand: () => number, counter: Counter): Promise
       return;
     }
     case 10: {
+      // Ending your own handle, by the id it was claimed by (even after a collision moved it).
       const [issue, attempt] = pick([...clone.held]) ?? [];
       if (!issue) return;
       clone.held.delete(issue);
@@ -134,10 +166,103 @@ async function edit(clone: Clone, rand: () => number, counter: Counter): Promise
     case 11:
       await call('update', { id, blocked_by_add: [pick(all)!] });
       return;
+    case 14:
+      // An unclaimed close: closes on both clones leave a status conflict.
+      await call('close', { id, reason: rand() < 0.5 ? 'canceled' : 'done', debrief: DEBRIEF });
+      return;
+    case 15:
+      await call('update', { id, parent: rand() < 0.2 ? null : pick(all) });
+      return;
+    case 16:
+      await call('update', { id, links_add: [{ target: `https://forge.example/${pick(['a', 'b', 'c'])}`, title: clone.name }] });
+      return;
+    case 17: {
+      // A store setting, written raw: settings fold per key.
+      const key = pick(['link_base', 'future_setting'])!;
+      const value = key === 'link_base' ? `https://${clone.name}.example/${n}/` : n;
+      const raw = JSON.stringify({ value, at, by: `${clone.name}@example.com` });
+      await commitToTracker(clone.checkout, { 'settings.yml': withLine(await localFile(clone, 'settings.yml'), key, raw) });
+      return;
+    }
+    case 18: {
+      // A newer release's key in the format marker: markers fold to the field-wise maximum.
+      const key = pick(['wiki', 'skills'])!;
+      await commitToTracker(clone.checkout, { format: withLine(await localFile(clone, 'format'), key, String(n)) });
+      return;
+    }
+    case 19: {
+      // A newer release's frontmatter key, written into the issue raw.
+      const record = await localFile(clone, issuePath(id!));
+      if (!record) return;
+      const close = record.indexOf('\n---\n', 3);
+      if (close < 0) return;
+      const key = pick(['priority', 'estimate'])!;
+      const front = record.slice(0, close).split('\n').filter((line) => !line.startsWith(`${key}: `));
+      const next = `${[...front, `${key}: ${JSON.stringify(`${clone.name} ${n}`)}`].join('\n')}${record.slice(close)}`;
+      await commitToTracker(clone.checkout, { [issuePath(id!)]: next });
+      return;
+    }
+    case 20: {
+      // A delete (a human op): the issue directory goes and a tombstone stays.
+      if (all.length < 4) return;
+      const files = await localFiles(clone, issuePath(id!).replace(/\/issue\.md$/, ''));
+      if (files.length === 0) return;
+      await commitToTracker(clone.checkout, {
+        ...Object.fromEntries(files.map((file) => [file, null])),
+        [`deleted/${id}.md`]: `---\nby: "${clone.name}@example.com"\nat: "${at}"\n---\n`,
+      });
+      return;
+    }
+    case 21:
+    case 22:
+    case 23: {
+      // Attempt traces, written raw: purge an ended attempt (21), override its outcome as a human (22), or cut a session record of an open one (23).
+      const files = await localFiles(clone, attempts);
+      const ended = [...new Set(files.filter((f) => f.endsWith('/end.md')).map((f) => f.split('/')[4]!))];
+      const open = [...new Set(files.filter((f) => f.endsWith('/start.md')).map((f) => f.split('/')[4]!))].filter(
+        (handle) => !ended.includes(handle),
+      );
+      const outcome = (handle: string) => `outcomes/${id![3]}/${id![4]}/${id}/${handle}.md`;
+      if (choice === 23) {
+        const handle = pick(open);
+        if (!handle) return;
+        const reach = JSON.stringify({ at, ref: String(Math.floor(rand() * 20)) });
+        const record = `---\nreach: ${reach}\n---\n${clone.name} ${n}\n`;
+        await commitToTracker(clone.checkout, { [`${attempts}/${handle}/sessions/s${Math.floor(rand() * 2)}.md`]: record });
+        return;
+      }
+      const handle = pick(ended);
+      if (!handle) return;
+      if (choice === 21) {
+        await commitToTracker(clone.checkout, {
+          ...Object.fromEntries(files.filter((f) => f.split('/')[4] === handle).map((f) => [f, null])),
+          [outcome(handle)]: null,
+          [`purges/${handle}.md`]: `---\nby: "${clone.name}@example.com"\nat: "${at}"\nreason: "test"\n---\n`,
+        });
+      } else {
+        const verdict = pick(['pass', 'fail', 'none'])!;
+        await commitToTracker(clone.checkout, {
+          [outcome(handle)]: `---\nverdict: "${verdict}"\nreason: "${clone.name} ${n}"\nset_by: "human:${clone.name}@example.com"\nat: "${at}"\n---\n`,
+        });
+      }
+      return;
+    }
     default:
       // A newer release's file, written raw.
       await commitToTracker(clone.checkout, { [`future/${pick(['x', 'y', 'z'])}.json`]: `{"by":"${clone.name}","n":${n}}\n` });
   }
+}
+
+/** Both clones mint this id for records of their own: the fold must keep them apart. */
+const COLLIDED = 'c1m0x';
+
+async function mintTogether(clones: readonly Clone[], counter: Counter): Promise<void> {
+  for (const clone of clones) {
+    clone.forcedSuffix = COLLIDED;
+    await clone.core.call('create', { title: `${clone.name} collides`, body: `# ${clone.name} collides\n\n## Done\n` }, clone.ctx);
+    clone.forcedSuffix = null;
+  }
+  counter.ops.push(`both mint gr-${COLLIDED}`);
 }
 
 /**
@@ -146,10 +271,11 @@ async function edit(clone: Clone, rand: () => number, counter: Counter): Promise
  * line. So every round folds a scalar collision (often at one `updated_at`),
  * concurrent inserts that must merge, and overlapping hunks that must conflict.
  */
-async function collide(clones: readonly Clone[], rand: () => number, round: number): Promise<void> {
+async function collide(clones: readonly Clone[], rand: () => number, round: number, counter: Counter): Promise<void> {
   const shared = (await ids(clones[0]!)).sort();
   if (shared.length === 0) return;
   const [inserted, rewritten] = [shared[round % shared.length]!, shared[(round + 1) % shared.length]!];
+  counter.ops.push(`collide on ${inserted} and ${rewritten}`);
   for (const clone of clones) {
     clone.tick = rand() < 0.5 ? 0 : 1;
     const call = (op: string, input: Record<string, unknown>) => clone.core.call(op, input, clone.ctx);
@@ -180,19 +306,26 @@ async function commitFold(checkout: Checkout, clone: GitWorld['a']): Promise<voi
   }
 }
 
-function clonesOf(world: GitWorld, grimoire: Grimoire): [Clone, Clone] {
-  const make = (name: string, checkout: GitWorld['a'], ctx: CallContext): Clone => {
+function clonesOf(world: GitWorld, grimoire: Grimoire, seed: number): [Clone, Clone] {
+  const make = (name: string, checkout: GitWorld['a'], ctx: CallContext, k: number): Clone => {
+    // Ids from the seed, each clone's own first character so they clash only when a round forces it.
+    const draw = random(seed * 104_729 + k);
     const clone: Clone = {
       name,
       checkout,
       ctx,
       tick: 0,
       held: new Map(),
-      core: grimoire.makeCore({ clock: () => new Date(T0.getTime() + clone.tick * 1000) }),
+      forcedSuffix: null,
+      core: grimoire.makeCore({
+        clock: () => new Date(T0.getTime() + clone.tick * 1000),
+        randomIdSuffix: (length) =>
+          clone.forcedSuffix ?? name[0] + Array.from({ length: length - 1 }, () => CROCKFORD[Math.floor(draw() * 32)]).join(''),
+      }),
     };
     return clone;
   };
-  return [make('alice', world.a, grimoire.ctx), make('bob', world.b, agentContext(world.b))];
+  return [make('alice', world.a, grimoire.ctx, 1), make('bob', world.b, agentContext(world.b), 2)];
 }
 
 describe('fold order-independence', () => {
@@ -205,28 +338,36 @@ describe('fold order-independence', () => {
       await pushTracker(world.a);
       await fetchTracker(world.b);
       await world.b.git(['update-ref', 'refs/grimoire/tracker', 'refs/remotes/origin/grimoire/tracker']);
-      const [alice, bob] = clonesOf(world, grimoire);
-      const counter: Counter = { n: 0, comments: [] };
+      const [alice, bob] = clonesOf(world, grimoire, seed);
+      const counter: Counter = { n: 0, comments: [], ops: [] };
+      const history = () => `seed ${seed}, ops:\n${counter.ops.join('\n')}`;
 
       for (let round = 0; round < ROUNDS; round++) {
-        await collide([alice, bob], rand, round);
+        await collide([alice, bob], rand, round, counter);
         for (let i = 0; i < OPS_PER_ROUND; i++) {
           await edit(alice, rand, counter);
           await edit(bob, rand, counter);
         }
+        if (round === 1) await mintTogether([alice, bob], counter);
         await fetchTrackerFrom(world.a, world.b);
         await fetchTrackerFrom(world.b, world.a);
         const [aliceSees, bobSees] = await Promise.all([ids(alice), ids(bob)]);
         await commitFold(world.a, world.a);
         await commitFold(world.b, world.b);
 
-        expect(aliceSees.sort(), `round ${round}: the merged views list the same issues`).toEqual(bobSees.sort());
-        expect(await treeOf(world.a), `round ${round}: fold(A, B) and fold(B, A) differ`).toBe(await treeOf(world.b));
+        expect(aliceSees.sort(), `round ${round}: the merged views list the same issues (${history()})`).toEqual(bobSees.sort());
+        expect(await treeOf(world.a), `round ${round}: fold(A, B) and fold(B, A) differ (${history()})`).toBe(await treeOf(world.b));
+        if (round === 1) expect(aliceSees.filter((id) => id.startsWith(`gr-${COLLIDED}~`)), history()).toHaveLength(2);
+        counter.ops.push(`-- round ${round} folded`);
       }
-      // Every comment either clone made survived every fold.
-      const tree = (await world.a.git(['ls-tree', '-r', '--name-only', (await trackerTip(world.a))!])).split('\n');
+      // Every comment either clone made survived every fold, unless its issue was deleted.
+      const tip = (await trackerTip(world.a))!;
+      const tree = (await world.a.git(['ls-tree', '-r', '--name-only', tip])).split('\n');
+      const deleted = new Set(tree.filter((file) => file.startsWith('deleted/')).map((file) => file.slice(8, -3)));
       expect(counter.comments.length).toBeGreaterThan(0);
-      for (const comment of counter.comments) expect(tree.some((file) => file.endsWith(comment)), comment).toBe(true);
+      for (const comment of counter.comments) {
+        if (!deleted.has(comment.split('/')[1]!)) expect(tree.some((file) => file.endsWith(comment)), comment).toBe(true);
+      }
     }, 300_000);
   }
 });

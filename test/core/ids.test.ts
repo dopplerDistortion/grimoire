@@ -1,4 +1,5 @@
 import { describe, expect } from 'vitest';
+import { ID_PATTERN } from '../../src/tracker';
 import {
   agentContext,
   commitToTracker,
@@ -50,6 +51,12 @@ describe('issue ids', () => {
       const shown = await core.call('show', { ref }, grimoire.ctx);
       expect(shown.ok && shown.result.id, ref).toBe('gr-k1m0x');
     }
+  });
+
+  test('the detection regex finds ids in any text, as spec §3 fixes it: never a collision suffix', () => {
+    const text = 'gr-k1m0x~ab12 was split; see gr-abcdefgh, not gr-abcd, gr-abcdefghj or xgr-abcde';
+
+    expect(text.match(ID_PATTERN)).toEqual(['gr-k1m0x', 'gr-abcdefgh']);
   });
 
   test('reads accept a unique prefix of 3 or more characters, and refuse a shorter one', async ({ grimoire }) => {
