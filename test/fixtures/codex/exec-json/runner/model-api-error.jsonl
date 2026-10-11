@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a12964-269d-70f0-ac41-5d7fbeaca1e7"}
+{"type":"turn.started"}
+{"type":"error","message":"{\"error\":{\"message\":\"scripted model-side failure\",\"type\":\"invalid_request_error\",\"code\":null}}"}
+{"type":"turn.failed","error":{"message":"{\"error\":{\"message\":\"scripted model-side failure\",\"type\":\"invalid_request_error\",\"code\":null}}"}}
