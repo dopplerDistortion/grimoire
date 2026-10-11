@@ -65,3 +65,5 @@ ADR 0001 gives each trace excerpts cut from the transcripts of the agent work be
   - ADR 0005: skill versions are identified and matched on normalized text, and the offered record is the version matching the opening checkout's text.
   - ADR 0006: wiki exposure is checked at every binding write, not only at the claim.
   - ADR 0007: the actor and attempt trailers carry the capture evidence and the named handle. The end record keeps only attempt-level facts. A single session record can be purged with its own tombstone.
+
+_Amended by the Runtime decision (GOK-117): `excerpts` is the default only when a human chooses it at `init`. An `init` that runs without a human answering seeds `facts`. Each machine may also cap the mode lower for its own sessions (`capture.excerpts_max`), and every push and fold applies the merged mode, so unpushed text is dropped once a human turns excerpts off._

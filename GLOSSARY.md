@@ -14,6 +14,10 @@ _Avoid_: Target project, consumer project, workspace
 The `.grimoire/` directory at the root of a host repo's checkout, holding grimoire's install configuration, its manifest, and the files agents and humans read straight from the checkout, such as evolved skills; issue state lives in the live store instead.
 _Avoid_: Data dir, grimoire folder, store
 
+**Pinned version**:
+The exact grimoire release a checkout of a host repo runs, committed in its dotfolder so that it travels with branches; every grimoire process started from that checkout runs exactly this release, and only an upgrade sets a new one.
+_Avoid_: Installed version, current version, lock
+
 **Live store**:
 Grimoire's one working state for a host repo on one machine: the tracker branch plus never-committed machine-local data, both kept in the clone's git common directory so that every worktree reads and writes the same state.
 _Avoid_: Database, cache, data dir, dotfolder
@@ -25,6 +29,10 @@ _Avoid_: Sync branch, data branch, issues branch, ledger
 **Pointer file**:
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config
+
+**Upkeep**:
+Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files, done on the side by grimoire's own long-running processes rather than by any one command, and never by an LLM.
+_Avoid_: Housekeeping, maintenance, background job, daemon
 
 **Agent client**:
 A program that runs an AI agent's sessions on a developer's machine and through which the agent talks to grimoire, such as Claude Code or Codex.
