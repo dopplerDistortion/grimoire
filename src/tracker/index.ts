@@ -53,3 +53,4 @@ export {
   type WikiView,
 } from './wiki';
 export type { NewQuarantineRecord, QuarantineDraft, QuarantineRecord, QuarantineView } from './quarantine';
+export { isKnownOp, opEffect, type OpEffect } from './ops';

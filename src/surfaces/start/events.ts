@@ -22,7 +22,7 @@ import { readdir, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { runGit } from '../../git/run';
-import type { TrackerTips } from '../../tracker';
+import { opEffect, type TrackerTips } from '../../tracker';
 
 /** How often the tips are checked while a stream is open. */
 export const LIVE_CHECK_MS = 1_000;
@@ -57,6 +57,8 @@ export interface LiveEventsOptions {
   readonly pin: () => Promise<string | null>;
   readonly checkMs?: number;
   readonly heartbeatMs?: number;
+  /** More commits than this between two states is a large jump (default LARGE_JUMP). */
+  readonly largeJump?: number;
 }
 
 interface LiveState {
@@ -73,9 +75,6 @@ interface LiveState {
 type Outgoing = { readonly event: 'change'; readonly data: ChangeSet } | { readonly event: 'reload'; readonly data: { tips: TrackerTips } } | null;
 
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-const KNOWLEDGE_OP = /^(?:skill|wiki|proposal|chore|knowledge|ledger|purge)-|^(?:quarantine|unquarantine)$/;
-/** Ops after which the client reloads rather than refetching pieces. */
-const RELOAD_OPS = new Set(['fold', 'init']);
 
 function idOf(state: LiveState): string {
   return `${state.local ?? '0'}:${state.remote ?? '0'}:${state.stamp}`;
@@ -252,14 +251,15 @@ export class LiveEvents {
     let settings = false;
     let agent = false;
     for (const trailers of commits) {
-      const op = trailers.get('Grimoire-Op') ?? '';
-      if (RELOAD_OPS.has(op)) return { event: 'reload', data: { tips } };
+      // What each op changed (src/tracker/ops.ts): a fold, a purge or an op this release doesn't list reloads.
+      const effect = opEffect(trailers.get('Grimoire-Op') ?? '');
+      if (effect === 'reload') return { event: 'reload', data: { tips } };
       const issue = trailers.get('Grimoire-Issue');
       const attempt = trailers.get('Grimoire-Attempt');
       if (issue) issues.add(issue);
       if (attempt) attempts.add(attempt);
-      if (KNOWLEDGE_OP.test(op)) knowledge = true;
-      if (op === 'settings-set') settings = true;
+      if (effect === 'knowledge') knowledge = true;
+      if (effect === 'settings') settings = true;
       if (actorKind(trailers.get('Grimoire-Actor')) === 'agent') agent = true;
     }
     return {
@@ -279,12 +279,13 @@ export class LiveEvents {
     const old = [...new Set([from.local, from.remote].filter((tip): tip is string => tip !== null))];
     if (fresh.length === 0 || old.length === 0) return null;
     const { root } = this.options;
+    const largeJump = this.options.largeJump ?? LARGE_JUMP;
     const lost = await runGit(root, ['rev-list', '--count', ...old, '--not', ...fresh, '--']);
     if (lost.code !== 0 || lost.stdout.toString('utf8').trim() !== '0') return null;
-    const log = await runGit(root, ['log', '--no-color', `--max-count=${LARGE_JUMP + 1}`, '--format=%x1e%B', ...fresh, '--not', ...old, '--']);
+    const log = await runGit(root, ['log', '--no-color', `--max-count=${largeJump + 1}`, '--format=%x1e%B', ...fresh, '--not', ...old, '--']);
     if (log.code !== 0) return null;
     const messages = log.stdout.toString('utf8').split('\x1e').slice(1);
-    if (messages.length > LARGE_JUMP) return null;
+    if (messages.length > largeJump) return null;
     return messages.map(trailersOf);
   }
 }

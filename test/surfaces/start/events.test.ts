@@ -123,3 +123,95 @@ describe('live events when reading fails', () => {
     }
   });
 });
+
+type Git = (args: readonly string[], options?: { input?: string }) => Promise<string>;
+
+/** Makes commits in `git`'s repo whose messages carry `Grimoire-Op: <op>` and `trailers`, each on `parent` (or a root). */
+async function committer(git: Git): Promise<(parent: string | null, op: string, trailers?: Record<string, string>) => Promise<string>> {
+  const tree = await git(['mktree'], { input: '' });
+  return (parent, op, trailers = {}) => {
+    const lines = [`Grimoire-Op: ${op}`, ...Object.entries(trailers).map(([key, value]) => `${key}: ${value}`)];
+    return git(['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', [op, '', ...lines, ''].join('\n')]);
+  };
+}
+
+describe('live events: what a change carries', () => {
+  gitTest('each op names what the dashboard refetches: knowledge decisions set knowledge, settings set settings, issue writes name their issue', async ({ world }) => {
+    const machineDir = path.join(world.root, 'machine');
+    await mkdir(machineDir, { recursive: true });
+    const commit = await committer(world.a.git.bind(world.a));
+    let tip = await commit(null, 'init');
+    const served = await serveLive(world.a.dir, machineDir);
+    served.tips = { local: tip, remote: null };
+    try {
+      const events = await SseClient.connect(served.port, '');
+      await events.next((event) => event.event === 'ready');
+      const changeOf = async (op: string, trailers: Record<string, string> = {}) => {
+        const from = events.events.length;
+        tip = await commit(tip, op, trailers);
+        served.tips = { local: tip, remote: null };
+        const event = await events.next((candidate) => candidate.id?.startsWith(tip) === true, 10_000, from);
+        return { event: event.event, ...event.data };
+      };
+
+      // A knowledge decision carries no Grimoire-Issue: only the flag tells the Knowledge views.
+      const accepted = await changeOf('accept');
+      const settings = await changeOf('settings-set');
+      const deleted = await changeOf('delete', { 'Grimoire-Issue': 'gr-7k2pq' });
+      const claimed = await changeOf('claim', { 'Grimoire-Issue': 'gr-7k2pq', 'Grimoire-Attempt': 'at-abc234', 'Grimoire-Actor': '{"kind":"agent","client":"claude-code"}' });
+      events.close();
+
+      expect(accepted).toMatchObject({ event: 'change', knowledge: true, settings: false, issues: [] });
+      expect(settings).toMatchObject({ event: 'change', knowledge: false, settings: true, issues: [] });
+      expect(deleted).toMatchObject({ event: 'change', knowledge: false, settings: false, issues: ['gr-7k2pq'], agent: false });
+      expect(claimed).toMatchObject({ event: 'change', knowledge: false, issues: ['gr-7k2pq'], attempts: ['at-abc234'], agent: true });
+    } finally {
+      await served.close();
+    }
+  });
+
+  gitTest('a fold, a purge, an op this release doesn’t know or a large jump sends reload', async ({ world }) => {
+    const machineDir = path.join(world.root, 'machine');
+    await mkdir(machineDir, { recursive: true });
+    const commit = await committer(world.a.git.bind(world.a));
+    let tip = await commit(null, 'init');
+    const served = await serveLive(world.a.dir, machineDir, { largeJump: 3 });
+    served.tips = { local: tip, remote: null };
+    try {
+      const events = await SseClient.connect(served.port, '');
+      await events.next((event) => event.event === 'ready');
+      const after = async (ops: string[]) => {
+        const from = events.events.length;
+        for (const op of ops) tip = await commit(tip, op, { 'Grimoire-Issue': 'gr-7k2pq' });
+        served.tips = { local: tip, remote: null };
+        return (await events.next((candidate) => candidate.id?.startsWith(tip) === true, 10_000, from)).event;
+      };
+
+      const fold = await after(['update', 'fold']);
+      const purge = await after(['purge']);
+      const unknown = await after(['a-later-release-op']);
+      const small = await after(['update', 'update', 'update']);
+      const large = await after(['update', 'update', 'update', 'update']);
+      events.close();
+
+      expect({ fold, purge, unknown, small, large }).toEqual({ fold: 'reload', purge: 'reload', unknown: 'reload', small: 'change', large: 'reload' });
+    } finally {
+      await served.close();
+    }
+  });
+
+  gitTest('every stream gets a heartbeat', async ({ world }) => {
+    const machineDir = path.join(world.root, 'machine');
+    await mkdir(machineDir, { recursive: true });
+    const served = await serveLive(world.a.dir, machineDir, { heartbeatMs: 100 });
+    try {
+      const events = await SseClient.connect(served.port, '');
+      const heartbeat = await events.next((event) => event.event === 'heartbeat');
+      events.close();
+
+      expect(heartbeat.data).toEqual({});
+    } finally {
+      await served.close();
+    }
+  });
+});

@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs';
-import { rm, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { describe, expect } from 'vitest';
-import { openTracker } from '../../src/tracker';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, test as plainTest } from 'vitest';
+import { isKnownOp, opEffect, openTracker } from '../../src/tracker';
 import { VERSION } from '../../src/version';
 import { coreTest as test, expectRefUnmoved, trackerTip, TRACKER_REF } from './support';
 
@@ -119,5 +120,55 @@ describe('tracker commits', () => {
     } finally {
       await store.close();
     }
+  });
+});
+
+describe('the op table: what each Grimoire-Op changed', () => {
+  plainTest('every op a source file commits is listed', async () => {
+    const src = fileURLToPath(new URL('../../src', import.meta.url));
+    const files = (await readdir(src, { recursive: true })).filter((name) => name.endsWith('.ts') && !name.startsWith(`surfaces${path.sep}dashboard`));
+    const ops = new Set<string>();
+    for (const name of files) {
+      const text = await readFile(path.join(src, name), 'utf8');
+      // A write's spec names its op as a literal: { op: 'claim', author, … }; error details' { fields: { op: … } } aren't ops.
+      for (const match of text.matchAll(/(?<!fields: \{ )\bop: '([a-z][a-z-]*)'/g)) ops.add(match[1]!);
+    }
+
+    expect(ops.size).toBeGreaterThan(15);
+    expect([...ops].filter((op) => !isKnownOp(op))).toEqual([]);
+  });
+
+  plainTest('spec §3’s knowledge ops are knowledge; an issue’s ops name the issue; fold, init and purge reload, and so does an op this release doesn’t list', () => {
+    const effects = (ops: string[]) => Object.fromEntries(ops.map((op) => [op, opEffect(op)]));
+
+    expect(effects(['accept', 'reject', 'dismiss', 'reconsider', 'restore', 'skill-delete', 'eject', 'acknowledge', 'unblock', 'record', 'discard', 'compile', 'skill-edit', 'wiki-edit', 'quarantine', 'unquarantine'])).toEqual({
+      accept: 'knowledge',
+      reject: 'knowledge',
+      dismiss: 'knowledge',
+      reconsider: 'knowledge',
+      restore: 'knowledge',
+      'skill-delete': 'knowledge',
+      eject: 'knowledge',
+      acknowledge: 'knowledge',
+      unblock: 'knowledge',
+      record: 'knowledge',
+      discard: 'knowledge',
+      compile: 'knowledge',
+      'skill-edit': 'knowledge',
+      'wiki-edit': 'knowledge',
+      quarantine: 'knowledge',
+      unquarantine: 'knowledge',
+    });
+    expect(effects(['create', 'delete', 'outcome-set', 'settings-set', 'fold', 'init', 'purge', 'a-later-release-op', 'constructor'])).toEqual({
+      create: 'issue',
+      delete: 'issue',
+      'outcome-set': 'issue',
+      'settings-set': 'settings',
+      fold: 'reload',
+      init: 'reload',
+      purge: 'reload',
+      'a-later-release-op': 'reload',
+      constructor: 'reload',
+    });
   });
 });
