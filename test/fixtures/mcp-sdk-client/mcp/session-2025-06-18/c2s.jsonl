@@ -1,0 +1,5 @@
+{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-shaped-test-client","version":"0.0.0"}},"jsonrpc":"2.0","id":0}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"method":"tools/list","jsonrpc":"2.0","id":1}
+{"method":"tools/call","params":{"name":"echo","arguments":{"text":"no meta"}},"jsonrpc":"2.0","id":2}
+{"method":"tools/call","params":{"name":"echo","arguments":{"text":"with the reserved key","_grimoire":{"session_id":"00000000-0000-4000-8000-000000000001","transcript_path":"C:\\Users\\USER\\.claude\\projects\\C--repo\\00000000-0000-4000-8000-000000000001.jsonl","tool_use_id":"toolu_01ReservedKeyExample00000"}}},"jsonrpc":"2.0","id":3}
