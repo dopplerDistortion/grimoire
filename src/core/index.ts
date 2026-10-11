@@ -13,6 +13,8 @@ import { claim, close, release } from './attempts';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
 import { completeUpgradeDetails } from './upgrade';
+import { INSTALL_FORMAT_RANGE } from './host';
+import { VERSION } from '../version';
 
 export type {
   CallContext,
@@ -22,7 +24,10 @@ export type {
   ClientInfo,
   Evidence,
   Actor,
+  ReservedHint,
+  McpCallFacts,
 } from './context';
+export { findHostRoot, readCheckoutConfig, readPerson, INSTALL_FORMAT_RANGE, type CheckoutConfig } from './host';
 export type { OpResults, CreateResult, ShowResult, LabelsResult, SurfacePolicy } from './ops';
 export type { UpdateResult, Noop } from './update';
 export type { CommentResult } from './comment';
@@ -83,6 +88,23 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   close,
 ];
 
+/**
+ * The checkout's `install_format` must lie in this release's J..K (spec §5):
+ * otherwise UPGRADE_REQUIRED, marker `install`, requiring the checkout's pin.
+ * One that isn't a whole number was written by something newer.
+ */
+function checkInstallFormat(format: number | null, pin: string | null): void {
+  const { J, K } = INSTALL_FORMAT_RANGE;
+  if (format === null || (format >= J && format <= K)) return;
+  const why = format < J ? 'older' : 'newer';
+  const shown = Number.isNaN(format) ? 'an unreadable install_format' : `install_format ${format}`;
+  throw new GrimoireError(
+    'UPGRADE_REQUIRED',
+    `this checkout's .grimoire/config.yml has ${shown}, which grimoire ${VERSION} can't run against${pin ? ` (the checkout pins ${pin})` : ''}; stop grimoire work and relay the remedies to the user`,
+    { marker: 'install', why, requires: pin },
+  );
+}
+
 function annotationsOf(op: OpDefinition<unknown, unknown>): Record<string, boolean> {
   if (op.kind === 'read') return { readOnlyHint: true };
   // Only the ending ops replay on their own arguments; the rest need an idempotency key (spec §8).
@@ -125,6 +147,7 @@ export function createCore(options: CoreOptions = {}): Core {
       try {
         const op = ops.get(name);
         if (!op) throw new GrimoireError('INVALID', `there is no operation named ${name}`, { fields: { op: 'unknown' } });
+        checkInstallFormat(ctx.repo.installFormat ?? null, ctx.repo.pin);
         const parsed = parseInput(op.input, input);
         tracker = await trackerFor(ctx.repo.root);
         const result = await op.run(parsed, { ctx, tracker, actor: actorOf(ctx), scanner });

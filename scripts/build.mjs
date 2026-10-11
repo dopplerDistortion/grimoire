@@ -1,5 +1,6 @@
 // Builds the publishable package (spec §1):
-//   dist/grimoire.mjs  the CLI/server, bundled by esbuild into one self-contained file
+//   dist/grimoire.mjs  the CLI/server entry, bundled by esbuild, self-contained
+//   dist/chunks/       its lazily imported chunks (one verb's code loads only for that verb)
 //   dist/dashboard/    the Preact dashboard, built by Vite into hashed static assets
 //
 //   node scripts/build.mjs [cli|dashboard] [--out-dir <dir>]   (default: both, into dist/)
@@ -27,11 +28,18 @@ const outDir = path.resolve(values['out-dir'] ?? path.join(repoRoot, 'dist'));
 /** @param {string} dir */
 async function buildCli(dir) {
   const { version } = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
+  // Chunk names are content hashes: drop the previous build's, so none goes stale.
+  await rm(path.join(dir, 'chunks'), { recursive: true, force: true });
   const result = await esbuild.build({
     absWorkingDir: repoRoot,
     entryPoints: { grimoire: 'src/surfaces/cli/main.ts' },
     outdir: dir,
     outExtension: { '.js': '.mjs' },
+    // Dynamic imports become chunks, so a verb loads only its own code: the MCP
+    // SDK never loads for the other verbs, and `mcp` answers its opening before
+    // the core, tracker and git modules load (spec §8, cold start).
+    splitting: true,
+    chunkNames: 'chunks/[name]-[hash]',
     bundle: true,
     platform: 'node',
     format: 'esm',

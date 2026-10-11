@@ -9,6 +9,12 @@ export interface HostRepo {
   readonly root: string;
   /** The checkout's pinned version from `.grimoire/config.yml`, when known. */
   readonly pin: string | null;
+  /**
+   * The checkout's `install_format` from `.grimoire/config.yml`, when the
+   * surface read it: one outside this release's range gives UPGRADE_REQUIRED
+   * (marker `install`, spec §5). Null or absent: not checked.
+   */
+  readonly installFormat?: number | null;
 }
 
 /** The person: the host repo's git identity. A write needs `email` (else NO_GIT_IDENTITY). */
@@ -34,12 +40,46 @@ export interface Evidence {
   readonly choreExposure?: string;
 }
 
+/**
+ * The reserved hint key's value as an MCP call carried it (spec §8), filled by
+ * grimoire's Claude Code `PreToolUse` hook. Ids only: a `transcript_path` (the
+ * spike-era shape) or any other field is dropped. Unvalidated: it counts only
+ * once capture matches `tool_use_id` against `_meta["claudecode/toolUseId"]`.
+ */
+export interface ReservedHint {
+  readonly session_id: string;
+  readonly tool_use_id: string;
+  readonly agent_id?: string;
+  readonly agent_type?: string;
+}
+
+/**
+ * What one MCP call carried, as the server observed it, for the capture slices
+ * to turn into evidence (spec §8, §14). Nothing here has been validated.
+ */
+export interface McpCallFacts {
+  /** The connection's protocol era: `legacy` (2025-era `initialize`) or `modern` (2026-07-28). */
+  readonly era: 'legacy' | 'modern';
+  /** The reserved hint key, read from the raw arguments and stripped before parsing; null when absent or malformed. */
+  readonly hint: ReservedHint | null;
+  /**
+   * The call's client `_meta` keys with string, number or boolean values (ids:
+   * `claudecode/toolUseId`, Codex's `sessionId`, `threadId`, `callId`, …). The
+   * 2026-07-28 envelope keys are lifted out, and nested objects (Codex's
+   * `x-codex-turn-metadata`, which holds workspace paths) are dropped. Null when
+   * the call had no `_meta`.
+   */
+  readonly meta: Readonly<Record<string, string | number | boolean>> | null;
+}
+
 export interface CallContext {
   readonly surface: Surface;
   readonly repo: HostRepo;
   readonly person: Identity;
   readonly client?: ClientInfo | null;
   readonly evidence?: Evidence;
+  /** The raw per-call facts of an MCP call. */
+  readonly mcp?: McpCallFacts;
   /** This process's nonce. */
   readonly nonce: string;
 }

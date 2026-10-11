@@ -62,7 +62,7 @@ function changedFields(before: IssueRecord, after: IssueRecord): string[] {
 export const update = define({
   name: 'update',
   description:
-    'Edit an issue, all or nothing: title, the whole body (needs if_revision) or anchored body_patch ops, labels and blockers (add/remove deltas), parent, links (added as a set). Returns the new revision and the requested changes that were already in place.',
+    'Edit a grimoire issue, all or nothing: title, the whole body (needs if_revision) or anchored body_patch ops, labels and blockers (add/remove deltas), parent, links (added as a set). Returns the new revision and the requested changes that were already in place.',
   kind: 'write',
   policy: 'agent',
   replay: 'none',

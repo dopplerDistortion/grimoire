@@ -33,7 +33,7 @@ function withinBudget(result: CommentResult): CommentResult {
 export const comment = define({
   name: 'comment',
   description:
-    'Comment on an issue. Comments are write-once: never edited or deleted. Pass an idempotency_key to make retries safe.',
+    'Comment on a grimoire issue. Comments are write-once: never edited or deleted. Pass an idempotency_key to make retries safe.',
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',

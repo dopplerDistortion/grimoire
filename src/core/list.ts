@@ -118,7 +118,7 @@ const after = (issue: IssueRecord, seq: number, id: string) => issue.seq > seq |
 export const list = define({
   name: 'list',
   description:
-    'List issues in (seq, id) order. Filters combine (AND). `ready: true` is the frontier: open, unclaimed, unblocked issues with no open sub-issue. Pages by limit and cursor.',
+    'List grimoire issues in (seq, id) order. Filters combine (AND). `ready: true` is the frontier: open, unclaimed, unblocked issues with no open sub-issue. Pages by limit and cursor.',
   kind: 'read',
   policy: 'agent',
   replay: 'none',
