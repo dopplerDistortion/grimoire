@@ -891,6 +891,38 @@ describe('modes that open no transcript, or commit no text', () => {
   });
 });
 
+/**
+ * Appends `rest` to `file` `delayMs` after the next attempt-ending call
+ * starts its cut (it cancels this process's sweeps first): a cut that starts
+ * promptly reads the file short, so only its flush wait can see the rest.
+ */
+function flushOnceCutStarts(file: string, rest: string, delayMs: number): { stop: () => void } {
+  let timer: NodeJS.Timeout | undefined;
+  const unregister = registerSweep(() => {
+    timer = setTimeout(() => void appendFile(file, rest), delayMs);
+  });
+  return {
+    stop: () => {
+      unregister();
+      clearTimeout(timer);
+    },
+  };
+}
+
+/** How long after its cut starts the ending call's line lands: well inside the 2 s flush wait, well after a prompt first cut. */
+const FLUSH_DELAY_MS = 1_000;
+
+/** A config dir holding only the plain session, flushed up to its comment call (each line edited by `edit`): returns the rest. */
+async function plainFlushedToComment(edit: (line: string) => string = (line) => line): Promise<{ configDir: string; file: string; rest: string }> {
+  const configDir = await claudeConfigDir({ folder: 'claude-code/transcripts/plain', session: PLAIN_SESSION });
+  const file = path.join(configDir, 'projects', 'C--Users-user-proj', `${PLAIN_SESSION}.jsonl`);
+  const lines = readFileSync(file, 'utf8').split('\n').map(edit);
+  const call = lines.findIndex((line) => line.includes(PLAIN_COMMENT) && line.includes('"tool_use"'));
+  expect(call).toBeGreaterThan(0);
+  await writeFile(file, `${lines.slice(0, call).join('\n')}\n`);
+  return { configDir, file, rest: lines.slice(call).join('\n') };
+}
+
 describe('the calling context', () => {
   test('waits for its ending call to reach its transcript, then cuts it whole', async ({ world, grimoire, capture }) => {
     const codexHome = await makeTempDir('grimoire-codex-home-');
@@ -902,6 +934,7 @@ describe('the calling context', () => {
     const ending = lines.findIndex((line) => line.includes('"call_id":"call_8_0"') && line.includes('"function_call"'));
     expect(ending).toBeGreaterThan(0);
     await writeFile(path.join(day, name), `${lines.slice(0, ending).join('\n')}\n`);
+    const flush = flushOnceCutStarts(path.join(day, name), lines.slice(ending).join('\n'), FLUSH_DELAY_MS);
     try {
       const core = capture.makeCore({ capture: { codexHome, flushWaitMs: 2_000 } });
       capture.at('2026-10-11T04:44:47.100Z');
@@ -909,17 +942,78 @@ describe('the calling context', () => {
       const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_2_0'));
       if (!claim.ok) throw new Error(JSON.stringify(claim.error));
       capture.at('2026-10-11T04:44:47.800Z');
-      const flushed = setTimeout(() => void appendFile(path.join(day, name), lines.slice(ending).join('\n')), 400);
 
+      const started = Date.now();
       const closed = await core.call('close', { id, reason: 'done', attempt: claim.result.attempt, debrief: DEBRIEF }, codexCall(grimoire.ctx, CODEX_ROOT, 'call_8_0'));
-      clearTimeout(flushed);
+      const took = Date.now() - started;
 
       expect(closed).toMatchObject({ ok: true });
+      // It waited for the line to land.
+      expect(took).toBeGreaterThanOrEqual(FLUSH_DELAY_MS);
       const [record] = await sessionRecords(world.a, id, claim.result.attempt);
       expect(record!.fields).toMatchObject({ context: CODEX_ROOT, excerpt: 'cut', excerpt_notes: [] });
       expect(record!.body).toContain('text: root closes gr-7k2pq');
     } finally {
+      flush.stop();
       await removeDir(codexHome);
     }
+  });
+
+  /** An unclaimed close at the plain session's comment call, from a context `ctx` names only as given; returns its record. */
+  async function unclaimedCloseWhileFlushing(
+    capture: { makeCore: (extra?: CoreOptions) => Core; at: (iso: string) => void },
+    base: CallContext,
+    checkout: Checkout,
+    plain: { configDir: string; file: string; rest: string },
+    ctx: CallContext,
+  ): Promise<{ record: StoredRecord | undefined; took: number }> {
+    const flush = flushOnceCutStarts(plain.file, plain.rest, FLUSH_DELAY_MS);
+    try {
+      const core = capture.makeCore({ capture: { claudeConfigDir: plain.configDir, flushWaitMs: 2_000 } });
+      capture.at('2026-10-11T03:30:00.000Z');
+      const id = await created(core, base, 'Closed unclaimed');
+      // When grimoire saw the call: its PreToolUse hook ran, its result not yet written.
+      capture.at('2026-10-11T03:30:40.051Z');
+      const started = Date.now();
+      const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, ctx);
+      const took = Date.now() - started;
+      if (!closed.ok) throw new Error(JSON.stringify(closed.error));
+      const [record] = await sessionRecords(checkout, id, closed.result.attempt);
+      return { record, took };
+    } finally {
+      flush.stop();
+      await removeDir(plain.configDir);
+    }
+  }
+
+  test('known only by a _meta tool-use id that is its only binding call, it waits for the call to reach a transcript, then cuts it', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const plain = await plainFlushedToComment();
+    const ctx = plainCall(grimoire.ctx, { era: 'modern', hint: null, meta: { 'claudecode/toolUseId': PLAIN_COMMENT } });
+
+    const { record, took } = await unclaimedCloseWhileFlushing(capture, grimoire.ctx, world.a, plain, ctx);
+
+    expect(took).toBeGreaterThanOrEqual(FLUSH_DELAY_MS);
+    expect(record!.fields).toMatchObject({ session: PLAIN_SESSION, context: 'main', source: 'tool-use-id', excerpt: 'cut', excerpt_notes: [], facts: 'scanned' });
+    expect(record!.body).toContain('tool mcp__grimoire__comment');
+  });
+
+  test('known only by its spawn-env session, it waits for its ending call to reach that transcript before trusting it', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    // A connection with no _meta: the close is found by its operation and time, in a copy whose comment call is a close.
+    const plain = await plainFlushedToComment((line) => line.replaceAll('mcp__grimoire__comment', 'mcp__grimoire__close'));
+    const ctx = plainCall(grimoire.ctx, undefined, { spawnEnvId: PLAIN_SESSION });
+
+    const { record, took } = await unclaimedCloseWhileFlushing(capture, grimoire.ctx, world.a, plain, ctx);
+
+    expect(took).toBeGreaterThanOrEqual(FLUSH_DELAY_MS);
+    expect(record!.fields).toMatchObject({ session: PLAIN_SESSION, context: 'main', source: 'spawn-env', excerpt: 'cut', excerpt_notes: [], facts: 'scanned' });
+    expect(record!.body).toContain('tool mcp__grimoire__close');
   });
 });

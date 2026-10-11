@@ -269,13 +269,18 @@ class ContextCut {
 
   /**
    * The calling context: cut again until its ending call reached the
-   * transcript, for up to the flush wait. The budget bounds the wait: a cut
+   * transcript, for up to the flush wait. Until it has, a context known only
+   * by that call (its tool-use id, a pending hint naming it, its spawn-env
+   * session holding it) has no transcript yet, or none that holds the call:
+   * `not_found` and `unmatched` wait too. The budget bounds the wait: a cut
    * the deadline overtakes leaves `latest`, the one before it.
    */
   async waitingForFlush(started: number): Promise<SessionRecord> {
     const until = Math.min(started + (this.input.options?.flushWaitMs ?? FLUSH_WAIT_MS), this.deadline);
+    const unflushed = (record: SessionRecord) =>
+      record.excerpt_notes.includes('tail_unflushed') || record.excerpt === 'not_found' || record.excerpt === 'unmatched';
     let record = await this.once();
-    while (!this.chores && record.excerpt_notes.includes('tail_unflushed') && Date.now() < until) {
+    while (!this.chores && unflushed(record) && Date.now() < until) {
       await sleep(Math.min(FLUSH_POLL_MS, until - Date.now()));
       record = await this.once();
     }
