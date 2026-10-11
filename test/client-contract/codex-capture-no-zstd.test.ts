@@ -1,5 +1,5 @@
 // The Codex reader on a Node without zstd (before 22.15): a `.jsonl.zst`
-// rollout is unreadable, never misparsed (GOK-137; spec §14 Readers). Its own
+// transcript is unreadable, never misparsed (GOK-137; spec §14 Readers). Its own
 // file, because it replaces `node:zlib` for every module it loads.
 import path from 'node:path';
 import { writeFile, mkdir } from 'node:fs/promises';
@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 describe('without zstd support', () => {
-  it('a .jsonl.zst rollout is unreadable: no steps, no excerpt', async () => {
+  it('a .jsonl.zst transcript is unreadable: no steps, no excerpt', async () => {
     home = await makeTempDir('grimoire-codex-no-zstd-');
     await mkdir(path.join(home, 'archived_sessions'));
     await writeFile(path.join(home, 'archived_sessions', path.basename(ARCHIVED_ZST)), readFixtureBytes(ARCHIVED_ZST));
@@ -42,7 +42,7 @@ describe('without zstd support', () => {
     expect(read).toEqual({ found: false, file: fixturePath(ARCHIVED_ZST), unreadable: 'zstd_unavailable' });
   });
 
-  it('a plain rollout is still read', async () => {
+  it('a plain transcript is still read', async () => {
     const result = await cutCodex({ transcript: fixturePath(PAGINATED), context: THREAD, evidence, paths });
 
     expect(result.status).toBe('cut');

@@ -1,16 +1,19 @@
 import { readdir, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
-// Finding a Codex thread's rollout by its id (spec §14 Roots), under
+// Finding a Codex thread's transcript by its id (spec §14 Roots), under
 // `$CODEX_HOME` or `~/.codex` (spike E):
-// - live rollouts are `sessions/YYYY/MM/DD/rollout-<local time>-<thread>.jsonl`,
+// - a live transcript is `sessions/YYYY/MM/DD/rollout-<local time>-<thread>.jsonl`,
 //   in the folder of the day the thread was created, in local time;
 // - archiving moves the file, same name, into the flat `archived_sessions/`;
-// - a cold rollout becomes `….jsonl.zst` (Codex reads the plain file when both
+// - a cold transcript becomes `….jsonl.zst` (Codex reads the plain file when both
 //   exist), and a reverted thread `…-<thread>_<rollout id>.jsonl`.
 // Thread ids are UUIDv7, so the creation day is read from the id and searched
 // first (with the days either side, for the local time zone); then the archive;
 // then every other day folder up to the call's day, newest first.
+// This supersedes the spec's "date folders from the call date onward": spike E
+// found the folder is the thread's creation day, which is at or before the call's.
 
 export interface FindCodexTranscriptOptions {
   /** `$CODEX_HOME`, or `~/.codex`. */
@@ -30,16 +33,22 @@ export type FindCodexTranscriptResult =
 
 const DAY_MS = 86_400_000;
 
+/** The Codex home Codex itself uses: `$CODEX_HOME` when set, else `~/.codex`. */
+export function defaultCodexHome(env: NodeJS.ProcessEnv = process.env): string {
+  const set = env.CODEX_HOME;
+  return set !== undefined && set.trim() !== '' ? set : path.join(os.homedir(), '.codex');
+}
+
 export async function findCodexTranscript(options: FindCodexTranscriptOptions): Promise<FindCodexTranscriptResult> {
   const sessions = path.join(options.codexHome, 'sessions');
-  const isRollout = rolloutMatcher(options.context);
+  const isThreadTranscript = transcriptMatcher(options.context);
   const overrun = () => options.deadline !== undefined && Date.now() > options.deadline;
   const searched = new Set<string>();
 
   const lookIn = async (dir: string): Promise<string | null | 'budget'> => {
     if (overrun()) return 'budget';
     searched.add(dir);
-    return pick(dir, (await names(dir)).filter(isRollout));
+    return pick(dir, (await names(dir)).filter(isThreadTranscript));
   };
 
   const created = uuidV7Time(options.context);
@@ -69,14 +78,14 @@ export async function findCodexTranscript(options: FindCodexTranscriptOptions): 
   return { status: 'not_found' };
 }
 
-/** Matches the thread's rollout names: `rollout-…-<thread>[_<rollout id>].jsonl[.zst]`. */
-function rolloutMatcher(context: string): (name: string) => boolean {
+/** Matches the thread's transcript file names: `rollout-…-<thread>[_<rollout id>].jsonl[.zst]`. */
+function transcriptMatcher(context: string): (name: string) => boolean {
   const id = context.toLowerCase().replace(/[^0-9a-z-]/g, '');
   const pattern = new RegExp(`^rollout-.*-${id}(?:_[^.\\\\/]+)?\\.jsonl(?:\\.zst)?$`);
   return (name) => id !== '' && pattern.test(name.toLowerCase());
 }
 
-/** The file to read among a thread's rollouts in one folder: plain before `.zst`, then the latest written. */
+/** The file to read among a thread's transcripts in one folder: plain before `.zst`, then the latest written. */
 async function pick(dir: string, matches: string[]): Promise<string | null> {
   if (matches.length === 0) return null;
   const ranked = await Promise.all(

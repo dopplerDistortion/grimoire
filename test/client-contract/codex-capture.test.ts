@@ -1,11 +1,13 @@
 // Client contract for the Codex capture reader (GOK-137; spec §14 Readers,
 // Window, Roots, Statuses; §22 T4, T6; seam 2). Real, sanitized Codex 0.162.1
-// rollouts from spike E (GOK-130), captured under a scripted model, go in with
+// transcripts (`rollout-*.jsonl`) from spike E (GOK-130), captured under a scripted model, go in with
 // the binding evidence; steps, window, excerpt and status come out. Findings
 // behind the fixtures: docs/research/spikes/codex-mcp-hooks-transcripts.md.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import * as zlib from 'node:zlib';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fixturePath, makeTempDir, readFixture, readFixtureBytes, removeDir } from '#harness';
 import {
   cutCodex,
@@ -153,6 +155,30 @@ describe('a legacy session (scenario A)', () => {
     ]);
   });
 
+  it.each([
+    ['patch_apply_end with success false', 'call_6_0', (p: Record<string, unknown>) => void (p.success = false)],
+    // The fixture's `{"Ok": …}` is serde's Result; a failed call is its `Err` (shape inferred, not captured).
+    ['mcp_tool_call_end with an Err result', 'call_2_0', (p: Record<string, unknown>) => void (p.result = { Err: 'probe exploded' })],
+    [
+      'mcp_tool_call_end with an Ok result marked isError',
+      'call_2_0',
+      (p: Record<string, unknown>) => void ((p.result as { Ok: Record<string, unknown> }).Ok.isError = true),
+    ],
+  ])('flags a failure from the legacy structured record, over an output text that reads as success: %s', async (_, callId, fail) => {
+    const file = await editedCopy(LEGACY, (lines) =>
+      lines.map((line) =>
+        editJson(line, (l) => {
+          const payload = l.payload as Record<string, unknown>;
+          if (l.type === 'event_msg' && payload.call_id === callId && String(payload.type).endsWith('_end')) fail(payload);
+        }),
+      ),
+    );
+    const result = await cutLegacy(file, evidence);
+    const errors = result.steps.filter((s): s is ToolResultStep => s.kind === 'tool_result' && s.error).map((s) => s.id);
+
+    expect(errors).toEqual(['call_5_0', callId].sort());
+  });
+
   function cutLegacy(file: string, evidence: CutEvidence): Promise<Cut> {
     const paths = { home: HOME, repo: repo('l1'), tmp: TMP };
     return cutCodex({ transcript: file, context: LEGACY_THREAD, evidence, paths });
@@ -202,6 +228,21 @@ describe('failure flags', () => {
     // exec_command (still running) ok, write_stdin (saw it exit) error.
     expect(resultErrors(result).slice(-2)).toEqual([false, true]);
     expect(resultErrors(original).slice(-2)).toEqual([false, false]);
+  });
+
+  it('give the poll the exit code of the command it polled, not of a later command that reused its process id', async () => {
+    // A later one-shot command's record, under the long-running command's process id.
+    const file = await editedCopy(PAGINATED, (lines) => {
+      const at = lineOf(lines, '"call_id":"call_8_0","output"');
+      const later = editJson(lines[lineOf(lines, '"type":"CommandExecution","id":"call_7_0"')]!, (l) => {
+        const item = (l.payload as { item: Record<string, unknown> }).item;
+        Object.assign(item, { id: 'call_9_0', status: 'failed', exit_code: 1 });
+      });
+      return [...lines.slice(0, at + 1), later, ...lines.slice(at + 1)];
+    });
+    const result = await cutFile(file, PAGINATED_THREAD, evidence);
+
+    expect(resultErrors(result).slice(-2)).toEqual([false, false]);
   });
 
   it('come from the poll’s own text when there is no structured record (legacy)', async () => {
@@ -258,6 +299,24 @@ describe('a compacted session', () => {
     await expectGolden('compaction', result);
   });
 
+  it('knows the reply by its line’s compaction_output mark, even when another response item follows it', async () => {
+    // Codex marks every item the summarizer returns, so a reasoning item can sit between the reply and `compacted`.
+    const file = await editedCopy(COMPACTED, (lines) => {
+      const at = lineOf(lines, '"compaction_output":true');
+      const reasoning = editJson(lines[at]!, (l) => {
+        l.payload = { type: 'reasoning', id: 'rs_3', summary: [], content: null, encrypted_content: null };
+      });
+      return [...lines.slice(0, at + 1), reasoning, ...lines.slice(at + 1)];
+    });
+    const result = await cutCodex({ transcript: file, context: COMPACTED_THREAD, evidence, paths });
+    const original = await cutCodex({ transcript: fixturePath(COMPACTED), context: COMPACTED_THREAD, evidence, paths });
+
+    expect(result.steps.map(label)).toEqual(original.steps.map(label));
+    expect(result.steps.find((s) => s.kind === 'compaction')).toMatchObject({
+      text: 'SUMMARY: the user asked for scripted probe calls; all ran.',
+    });
+  });
+
   it('folds the reply as the last response item before the compacted line, even unmarked', async () => {
     const file = await editedCopy(COMPACTED, (lines) =>
       lines.map((line) =>
@@ -269,6 +328,47 @@ describe('a compacted session', () => {
 
     expect(readFixture(COMPACTED)).toContain('"compaction_output":true');
     expect(result.excerpt).toBe(original.excerpt);
+  });
+
+  it('as a fork_context subagent’s copied history, is skipped whole: the folded reply doesn’t shift where the subagent’s own records begin', async () => {
+    // Provisional, like the fork_context case below: records before ordinal 27 (`echo "after compaction"`)
+    // stand for the parent's copied history, which here holds the compaction and its unmarked reply.
+    const file = await editedCopy(COMPACTED, (lines) =>
+      lines.map((line) =>
+        editJson(line, (l) => {
+          const payload = l.payload as Record<string, unknown>;
+          if (l.type === 'session_meta') payload.subagent_history_start_ordinal = 27;
+          delete (l.metadata as { compaction_output?: unknown } | undefined)?.compaction_output;
+        }),
+      ),
+    );
+    const own = { id: 'call_4_0', at: '2026-10-11T04:38:06.883Z' };
+    const result = await cutCodex({ transcript: file, context: COMPACTED_THREAD, evidence: { ...evidence, bindingCalls: [own] }, paths });
+
+    expect(result.status).toBe('cut');
+    expect(result.steps.map(label)).toEqual(['call mcp__probe__echo', 'result ok', 'assistant']);
+    expect(result.window?.start.ref).toBe('27');
+  });
+
+  it('keeps an unmarked assistant message before the compacted line that isn’t its summary: post-turn and remote compaction record no reply', async () => {
+    // The turn's real last message, then a compaction whose summarizer reply Codex didn't record.
+    const file = await editedCopy(COMPACTED, (lines) =>
+      lines.map((line) =>
+        editJson(line, (l) => {
+          if (!(l.metadata as { compaction_output?: unknown } | undefined)?.compaction_output) return;
+          delete (l.metadata as { compaction_output?: unknown }).compaction_output;
+          const payload = l.payload as { content: { text: string }[] };
+          payload.content[0]!.text = 'echo ran before compaction';
+        }),
+      ),
+    );
+    const result = await cutCodex({ transcript: file, context: COMPACTED_THREAD, evidence, paths });
+
+    expect(result.steps.map(label).slice(4, 7)).toEqual(['result ok', 'assistant', 'compaction']);
+    expect(result.steps.find((s) => s.kind === 'assistant')).toMatchObject({ text: 'echo ran before compaction' });
+    expect(result.steps.find((s) => s.kind === 'compaction')).toMatchObject({
+      text: 'SUMMARY: the user asked for scripted probe calls; all ran.',
+    });
   });
 });
 
@@ -287,7 +387,7 @@ describe('a subagent thread (T4 confirmed)', () => {
   };
   const paths = { home: HOME, repo: repo('b1'), tmp: TMP };
 
-  it('that made the binding calls is cut from its own rollout, found by thread id under the Codex home', async () => {
+  it('that made the binding calls is cut from its own transcript, found by thread id under the Codex home', async () => {
     const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [ROOT, CHILD] });
     const result = await cutCodex({ codexHome, context: CHILD_THREAD, session: ROOT_THREAD, evidence, paths });
 
@@ -346,8 +446,11 @@ describe('a subagent thread (T4 confirmed)', () => {
   });
 
   it('spawned with its parent’s history (fork_context) is cut after the copied records, which subagent_history_start_ordinal marks', async () => {
-    // The field comes from Codex's source (spike E); spike E's run didn't fork, so it is set here by hand:
-    // the child's records before ordinal 12 (its prompt and tool_search) stand for the copied history.
+    // Provisional until a captured fork_context transcript replaces it: spike E's run didn't fork, so the
+    // field is set here by hand. Its place, a top-level session_meta payload field, is from Codex's source
+    // (codex-rs/protocol/src/protocol.rs, `SessionMeta.subagent_history_start_ordinal`, flattened into the
+    // session_meta line; Codex's own TUI tests set `payload.subagent_history_start_ordinal` the same way).
+    // The child's records before ordinal 12 (its prompt and tool_search) stand for the copied history.
     const file = await editedCopy(CHILD, (lines) =>
       lines.map((line) =>
         line.includes('"type":"session_meta"')
@@ -363,7 +466,7 @@ describe('a subagent thread (T4 confirmed)', () => {
     expect(result.window?.start.ref).toBe('12');
   });
 
-  it('with no rollout of its own gives not_found, naming the session and context', async () => {
+  it('with no transcript of its own gives not_found, naming the session and context', async () => {
     const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [ROOT] });
     const result = await cutCodex({ codexHome, context: CHILD_THREAD, session: ROOT_THREAD, evidence, paths });
 
@@ -371,6 +474,13 @@ describe('a subagent thread (T4 confirmed)', () => {
     expect(result).toMatchObject({ session: ROOT_THREAD, context: CHILD_THREAD, excerpt: null, steps: [] });
   });
 });
+
+/**
+ * Node reads zstd from 22.15; package.json allows any 22. Without it a
+ * `.jsonl.zst` is unreadable (codex-capture-no-zstd.test.ts), so the cases that
+ * read one are skipped.
+ */
+const withZstd = it.skipIf(typeof zlib.createZstdDecompress !== 'function');
 
 /** Scenario A's paginated session after `thread/archive` and `rollout/compress`. */
 const ARCHIVED_ZST = `${TX}/archived-zstd/archived_sessions/rollout-2026-10-11T07-44-07-${PAGINATED_THREAD}.jsonl.zst`;
@@ -383,7 +493,7 @@ describe('archived and compressed sessions', () => {
   };
   const paths = { home: HOME, repo: repo('a1'), tmp: TMP };
 
-  it('are found in archived_sessions/ by thread id, and a .jsonl.zst is read through Node’s zstd', async () => {
+  withZstd('are found in archived_sessions/ by thread id, and a .jsonl.zst is read through Node’s zstd', async () => {
     const codexHome = await codexHomeWith({ archived_sessions: [ARCHIVED_ZST] });
     const result = await cutCodex({ codexHome, context: PAGINATED_THREAD, evidence, paths });
     const live = await cut(PAGINATED, PAGINATED_THREAD, evidence);
@@ -394,7 +504,7 @@ describe('archived and compressed sessions', () => {
     await expectGolden('archived-zstd', result);
   });
 
-  it('are found from a hook’s transcript_path, in its extended \\\\?\\ spelling, after the file was archived and compressed', async () => {
+  withZstd('are found from a hook’s transcript_path, in its extended \\\\?\\ spelling, after the file was archived and compressed', async () => {
     const codexHome = await codexHomeWith({ archived_sessions: [ARCHIVED_ZST] });
     const hookPath = `\\\\?\\${path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(PAGINATED))}`;
     const result = await cutCodex({ transcript: hookPath, context: PAGINATED_THREAD, evidence, paths });
@@ -403,7 +513,7 @@ describe('archived and compressed sessions', () => {
     expect(result.reach?.ref).toBe('48');
   });
 
-  it('are read where they were compressed in place, from the plain name a hook gave', async () => {
+  withZstd('are read where they were compressed in place, from the plain name a hook gave', async () => {
     const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [ARCHIVED_ZST] });
     const hookPath = path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(PAGINATED));
     const result = await cutCodex({ transcript: hookPath, context: PAGINATED_THREAD, evidence, paths });
@@ -411,13 +521,31 @@ describe('archived and compressed sessions', () => {
     expect(result.status).toBe('cut');
   });
 
-  it('prefer the plain rollout when both a .jsonl and a .jsonl.zst exist, as Codex does', async () => {
+  it('prefer the plain transcript when both a .jsonl and a .jsonl.zst exist, as Codex does', async () => {
     const plain = await editedCopy(PAGINATED, (lines) => [...lines, lines.at(-1)!.replace('"ordinal":51', '"ordinal":52')]);
     const codexHome = await codexHomeWith({ 'sessions/2026/10/11': [ARCHIVED_ZST] });
     await writeFile(path.join(codexHome, 'sessions', '2026', '10', '11', path.basename(PAGINATED)), await readFile(plain));
     const result = await cutCodex({ codexHome, context: PAGINATED_THREAD, evidence, paths });
 
     expect(result.lines.read).toBe(53);
+  });
+
+  it('are searched for under $CODEX_HOME when neither a Codex home nor a transcript is given', async () => {
+    vi.stubEnv('CODEX_HOME', await codexHomeWith({ 'sessions/2026/10/11': [PAGINATED] }));
+    const result = await cutCodex({ context: PAGINATED_THREAD, evidence, paths });
+
+    expect(result.status).toBe('cut');
+  });
+
+  it('are searched for under ~/.codex when $CODEX_HOME isn’t set', async () => {
+    const home = await tempDir();
+    await codexHomeWith({ 'sessions/2026/10/11': [PAGINATED] }, path.join(home, '.codex'));
+    vi.stubEnv('CODEX_HOME', '');
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('HOME', home);
+    const result = await cutCodex({ context: PAGINATED_THREAD, evidence, paths });
+
+    expect(result.status).toBe('cut');
   });
 
   it('give not_found when the thread is in neither sessions/ nor archived_sessions/', async () => {
@@ -428,10 +556,20 @@ describe('archived and compressed sessions', () => {
   });
 
   it('are searched in every day folder up to the call’s day, newest first, when the thread’s own day doesn’t hold it', async () => {
-    const codexHome = await codexHomeWith({ 'sessions/2026/09/30': [PAGINATED], 'sessions/2026/10/20': [] });
+    // Three copies, told apart by their line count: past the call's day (skipped), the newest before it, an older one.
+    const withExtraLines = (extra: number) => (lines: string[]) => [
+      ...lines,
+      ...Array.from({ length: extra }, (_, i) => lines.at(-1)!.replace('"ordinal":51', `"ordinal":${52 + i}`)),
+    ];
+    const codexHome = await codexHomeWith({});
+    const day = (folder: string) => path.join(codexHome, 'sessions', ...folder.split('/'));
+    await editedCopy(PAGINATED, withExtraLines(2), { dir: day('2026/10/20') });
+    await editedCopy(PAGINATED, withExtraLines(1), { dir: day('2026/09/30') });
+    await editedCopy(PAGINATED, withExtraLines(0), { dir: day('2026/09/25') });
     const result = await cutCodex({ codexHome, context: PAGINATED_THREAD, evidence, paths });
 
     expect(result.status).toBe('cut');
+    expect(result.lines.read).toBe(53);
   });
 
   it('give budget when the search runs out of time, so the next sweep tries again', async () => {
@@ -442,7 +580,7 @@ describe('archived and compressed sessions', () => {
     expect(result.excerpt).toBeNull();
   });
 
-  it('are unreadable, never partly read, when the zstd frame is cut short', async () => {
+  withZstd('are unreadable, never partly read, when the zstd frame is cut short', async () => {
     const dir = await tempDir();
     const bytes = readFixtureBytes(ARCHIVED_ZST);
     const file = path.join(dir, path.basename(ARCHIVED_ZST));
@@ -472,7 +610,7 @@ describe('the format check', () => {
   };
 
   it('gives unreadable, with no excerpt and no steps, when a binding call id is missing inside the parsed range', async () => {
-    // A call grimoire saw while this rollout was being written, which isn't in it.
+    // A call grimoire saw while this transcript was being written, which isn't in it.
     const missing = { id: 'call_9_9', at: '2026-10-11T04:44:15.000Z' };
     const result = await cut(PAGINATED, PAGINATED_THREAD, { ...evidence, bindingCalls: [PAGINATED_ECHO, missing] });
 
@@ -682,11 +820,16 @@ describe('the reader', () => {
     [ROOT],
     [CHILD],
     [MCP_RESULTS],
-    [ARCHIVED_ZST],
   ])('knows every line, item and event type Codex 0.162.1 wrote in %s', async (file) => {
     const read = await readCodexTranscript(fixturePath(file));
 
     expect(read.found && read.transcript.lines).toMatchObject({ unknown: 0, malformed: 0 });
+  });
+
+  withZstd('knows every line, item and event type Codex 0.162.1 wrote in the archived, compressed session', async () => {
+    const read = await readCodexTranscript(fixturePath(ARCHIVED_ZST));
+
+    expect(read.found && read.transcript.lines).toMatchObject({ read: 52, unknown: 0, malformed: 0 });
   });
 
   it('names the grimoire operation of MCP calls, and marks exec_command calls that run the grimoire CLI', async () => {
@@ -727,7 +870,7 @@ describe('the reader', () => {
 });
 
 // Temp copies of real fixtures, for the cases a client writes only now and then
-// (a torn line, a line type from a newer version). Each copy is the real rollout
+// (a torn line, a line type from a newer version). Each copy is the real transcript
 // with the stated lines cut, inserted or edited, nothing else.
 
 /** The index of the first line containing `needle`. */
@@ -738,7 +881,7 @@ function lineOf(lines: readonly string[], needle: string): number {
 }
 
 /**
- * Copies a fixture rollout under its own name into `dir` (default: a fresh temp
+ * Copies a fixture transcript under its own name into `dir` (default: a fresh temp
  * folder), with `edit` applied to its lines.
  */
 async function editedCopy(
@@ -754,16 +897,19 @@ async function editedCopy(
   return file;
 }
 
-/** Parses a rollout line, lets `mutate` edit it, and writes it back as Codex does (compact JSON). */
+/** Parses a transcript line, lets `mutate` edit it, and writes it back as Codex does (compact JSON). */
 function editJson(line: string, mutate: (line: Record<string, unknown>) => void): string {
   const parsed = JSON.parse(line) as Record<string, unknown>;
   mutate(parsed);
   return JSON.stringify(parsed);
 }
 
-/** A fresh `CODEX_HOME` holding byte copies of fixture rollouts, by folder (`sessions/YYYY/MM/DD`, `archived_sessions`). */
-async function codexHomeWith(folders: Record<string, string[]>): Promise<string> {
-  const home = await tempDir();
+/**
+ * A fresh `CODEX_HOME` (default: a new temp folder) holding byte copies of
+ * fixture transcripts, by folder (`sessions/YYYY/MM/DD`, `archived_sessions`).
+ */
+async function codexHomeWith(folders: Record<string, string[]>, at?: string): Promise<string> {
+  const home = at ?? (await tempDir());
   for (const [folder, files] of Object.entries(folders)) {
     const dir = path.join(home, ...folder.split('/'));
     await mkdir(dir, { recursive: true });
@@ -775,6 +921,11 @@ async function codexHomeWith(folders: Record<string, string[]>): Promise<string>
 function cutFile(file: string, context: string, evidence: CutEvidence, extra: Partial<CodexCutInput> = {}): Promise<Cut> {
   return cutCodex({ transcript: file, context, evidence, paths: { home: HOME, repo: repo('a1'), tmp: TMP }, ...extra });
 }
+
+// A cut given no Codex home searches $CODEX_HOME: never the user's own, in a test.
+beforeEach(() => {
+  vi.stubEnv('CODEX_HOME', path.join(os.tmpdir(), 'grimoire-test-no-codex-home'));
+});
 
 // Temp folders made by a test, removed after it.
 let tempDirs: string[] = [];

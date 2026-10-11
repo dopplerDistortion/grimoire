@@ -6,7 +6,7 @@ import { grimoireTool, runsGrimoire } from '../grimoire-calls';
 import { jsonLines } from '../jsonl';
 import type { Step, Transcript } from '../steps';
 
-// Grimoire's own tolerant reader for Codex rollouts (spec §14 Readers), built
+// Grimoire's own tolerant reader for Codex transcripts (spec §14 Readers), built
 // against what Codex CLI 0.162.1 writes (spike E, GOK-130;
 // docs/research/spikes/codex-mcp-hooks-transcripts.md). No vendor SDK.
 //
@@ -25,7 +25,9 @@ import type { Step, Transcript } from '../steps';
 //   or "Exit code: N" with N other than 0. A long-running command's exit belongs
 //   to the `write_stdin` poll that saw it.
 // - The summarizer's reply before a `compacted` line is folded into the
-//   compaction step: it is not visible assistant text.
+//   compaction step: it is not visible assistant text. Codex marks it with
+//   `compaction_output` in the line's `metadata`; an unmarked one is known by
+//   holding the `compacted` line's summary.
 // - Unparsable lines are skipped and counted anywhere (Codex can leave a torn
 //   fragment mid-file); a torn last line is ignored.
 // - `.jsonl.zst` is read through Node's zstd (22.15+); without it, or on a bad
@@ -79,7 +81,7 @@ const HEADER_LINE = new RegExp(
 );
 const MAX_HEADER_LINES = 8;
 
-/** Reads one context's (thread's) rollout: `rollout-….jsonl`, or `rollout-….jsonl.zst`. */
+/** Reads one context's (thread's) transcript, Codex's `rollout-….jsonl` or `rollout-….jsonl.zst` file. */
 export async function readCodexTranscript(file: string): Promise<CodexReadResult> {
   const compressed = /\.zst$/i.test(file);
   if (compressed && typeof zlib.createZstdDecompress !== 'function') {
@@ -117,7 +119,7 @@ function decompressed(file: string): AsyncIterable<string> {
   return pipeline(createReadStream(file), decoder, () => {}) as AsyncIterable<string>;
 }
 
-/** The thread id at the end of a rollout file name: `rollout-<time>-<thread>[_<rollout>].jsonl[.zst]`. */
+/** The thread id at the end of a transcript's file name: `rollout-<time>-<thread>[_<rollout>].jsonl[.zst]`. */
 function threadOfFileName(file: string): string {
   const name = path.basename(file).replace(/\.zst$/i, '').replace(/\.jsonl$/i, '');
   const uuid = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[^_]*)?$/i.exec(name);
@@ -157,8 +159,10 @@ interface Parsed {
   results: { index: number; callId: string; header: Header }[];
   /** Per call id, whether its structured record says it failed. */
   structured: Map<string, boolean>;
-  /** Per unified exec process (session) id, whether its command failed. */
-  processes: Map<string, boolean>;
+  /** Per running unified exec session id, the call that started it: the last result reading "Process running with session ID N". */
+  running: Map<string, string>;
+  /** Per `write_stdin` call id, the call that started the session it polls. */
+  polled: Map<string, string>;
   /** Per `spawn_agent` call id, the thread it spawned. */
   spawned: Map<string, string>;
   /** The last response item, while it is an assistant message: a `compacted` line right after it folds it. */
@@ -172,6 +176,8 @@ interface Line {
   timestamp?: unknown;
   ordinal?: unknown;
   payload?: Record<string, unknown> & { type?: unknown };
+  /** Codex's own notes on the record, beside the payload: `compaction_output`, `user_input_order`, … */
+  metadata?: { compaction_output?: unknown } | null;
 }
 
 type Payload = Record<string, unknown>;
@@ -192,7 +198,8 @@ async function parseLines(lines: AsyncIterable<string>): Promise<Parsed> {
     calls: new Map(),
     results: [],
     structured: new Map(),
-    processes: new Map(),
+    running: new Map(),
+    polled: new Map(),
     spawned: new Map(),
     lastAssistant: null,
     summary: null,
@@ -242,7 +249,7 @@ function readLine(line: Line, lineIndex: number, parsed: Parsed): void {
       readSessionMeta(payload, parsed);
       break;
     case 'response_item':
-      readResponseItem(payload, at, ref, parsed);
+      readResponseItem(payload, at, ref, parsed, line.metadata?.compaction_output === true);
       break;
     case 'event_msg':
       readEvent(payload, at, ref, parsed);
@@ -273,12 +280,13 @@ function readSessionMeta(payload: Payload, parsed: Parsed): void {
   }
 }
 
-function readResponseItem(payload: Payload, at: string, ref: string, parsed: Parsed): void {
+/** `compactionOutput`: the line is marked as an item the compaction's summarizer returned. */
+function readResponseItem(payload: Payload, at: string, ref: string, parsed: Parsed, compactionOutput: boolean): void {
   const lastAssistant = parsed.lastAssistant;
   parsed.lastAssistant = null;
   switch (payload.type) {
     case 'message':
-      readMessage(payload, at, ref, parsed);
+      readMessage(payload, at, ref, parsed, compactionOutput);
       return;
     case 'reasoning':
       // Reasoning is dropped.
@@ -289,6 +297,10 @@ function readResponseItem(payload: Payload, at: string, ref: string, parsed: Par
       const name = flatName(payload.namespace, payload.name);
       const input = parseArguments(payload.arguments);
       parsed.calls.set(callId, { name, input });
+      if (name === POLL_TOOL) {
+        const started = parsed.running.get(String((input as { session_id?: unknown } | null)?.session_id));
+        if (started !== undefined) parsed.polled.set(callId, started);
+      }
       if (name === SPAWN_TOOL) {
         const agentType = (input as { agent_type?: unknown } | null)?.agent_type;
         parsed.steps.push({
@@ -327,6 +339,7 @@ function readResponseItem(payload: Payload, at: string, ref: string, parsed: Par
       if (typeof callId !== 'string') break;
       const { header, body } = splitHeader(outputText(payload.output, parsed));
       parsed.results.push({ index: parsed.steps.length, callId, header });
+      if (header.running !== undefined) parsed.running.set(header.running, callId);
       if (parsed.calls.get(callId)?.name === SPAWN_TOOL) {
         const agentId = spawnedAgent(body);
         parsed.steps.push({ kind: 'subagent_result', id: callId, agentId, error: false, text: body, at, ref });
@@ -353,7 +366,7 @@ function readResponseItem(payload: Payload, at: string, ref: string, parsed: Par
   parsed.unknown++;
 }
 
-function readMessage(payload: Payload, at: string, ref: string, parsed: Parsed): void {
+function readMessage(payload: Payload, at: string, ref: string, parsed: Parsed, compactionOutput: boolean): void {
   switch (payload.role) {
     case 'developer':
     case 'system':
@@ -366,8 +379,7 @@ function readMessage(payload: Payload, at: string, ref: string, parsed: Parsed):
       return;
     case 'assistant': {
       const text = contentText(payload.content, parsed);
-      const metadata = (payload as { metadata?: { compaction_output?: unknown } }).metadata;
-      if (metadata?.compaction_output === true) {
+      if (compactionOutput) {
         parsed.summary = text;
         return;
       }
@@ -424,9 +436,6 @@ function readStructured(item: Payload, parsed: Parsed): void {
   const failed =
     FAILED_STATUSES.has(item.status as string) || (typeof item.exit_code === 'number' && item.exit_code !== 0);
   parsed.structured.set(item.id, failed);
-  if (item.type === 'CommandExecution' && (typeof item.process_id === 'string' || typeof item.process_id === 'number')) {
-    parsed.processes.set(String(item.process_id), failed);
-  }
   if (item.type === 'CollabAgentToolCall' && item.tool === SPAWN_TOOL && Array.isArray(item.receiver_thread_ids)) {
     const [thread] = item.receiver_thread_ids as unknown[];
     if (typeof thread === 'string') parsed.spawned.set(item.id, thread);
@@ -434,16 +443,19 @@ function readStructured(item: Payload, parsed: Parsed): void {
 }
 
 function readCompacted(payload: Payload, at: string, ref: string, parsed: Parsed): void {
+  const message = typeof payload.message === 'string' ? payload.message.replace(SUMMARY_PREFIX, '') : null;
   let text = parsed.summary;
-  // The summarizer's reply is the last response item before the `compacted` line.
-  if (text === null && parsed.lastAssistant !== null) {
+  // An unmarked reply is the last response item before the `compacted` line,
+  // holding the line's own summary. Any other assistant message there is real:
+  // post-turn and remote compaction record no reply.
+  if (text === null && parsed.lastAssistant !== null && message !== null && message.trim() !== '') {
     const reply = parsed.steps[parsed.lastAssistant];
-    if (reply?.kind === 'assistant') {
+    if (reply?.kind === 'assistant' && reply.text.trim() === message.trim()) {
       text = reply.text;
       parsed.dropped.add(parsed.lastAssistant);
     }
   }
-  if (text === null && typeof payload.message === 'string') text = payload.message.replace(SUMMARY_PREFIX, '');
+  if (text === null) text = message;
   parsed.summary = null;
   parsed.lastAssistant = null;
   parsed.steps.push({ kind: 'compaction', text: text ?? '', at, ref });
@@ -462,7 +474,12 @@ function finish(parsed: Parsed): Parsed {
     const agentId = step.kind === 'subagent_result' ? (step.agentId ?? parsed.spawned.get(callId) ?? null) : null;
     parsed.steps[index] = step.kind === 'subagent_result' ? { ...step, error, agentId } : { ...step, error };
   }
-  if (parsed.dropped.size > 0) parsed.steps = parsed.steps.filter((_, i) => !parsed.dropped.has(i));
+  if (parsed.dropped.size > 0) {
+    // The copied history is the first steps: a step folded away there leaves one fewer.
+    const copied = parsed.copiedSteps;
+    for (const index of parsed.dropped) if (index < copied) parsed.copiedSteps--;
+    parsed.steps = parsed.steps.filter((_, i) => !parsed.dropped.has(i));
+  }
   return parsed;
 }
 
@@ -473,13 +490,10 @@ function finish(parsed: Parsed): Parsed {
  */
 function failed(callId: string, header: Header, parsed: Parsed): boolean {
   if (header.running !== undefined) return false;
-  const call = parsed.calls.get(callId);
-  const structured =
-    call?.name === POLL_TOOL
-      ? header.exited !== undefined
-        ? parsed.processes.get(String((call.input as { session_id?: unknown } | null)?.session_id))
-        : undefined
-      : parsed.structured.get(callId);
+  // A command's structured record is under the id of the call that started it.
+  const polled = parsed.calls.get(callId)?.name === POLL_TOOL;
+  const recordOf = polled ? (header.exited !== undefined ? parsed.polled.get(callId) : undefined) : callId;
+  const structured = recordOf === undefined ? undefined : parsed.structured.get(recordOf);
   if (structured !== undefined) return structured;
   if (header.exited !== undefined) return header.exited !== 0;
   if (header.exitCode !== undefined) return header.exitCode !== 0;
