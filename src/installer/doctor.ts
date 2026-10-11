@@ -4,6 +4,7 @@
 // in ./store-checks.ts, the install's in ./install-checks.ts), so later slices
 // add their own (capture statistics, knowledge facts, the runner) the same way.
 import { GrimoireError } from '../errors';
+import { ledgerRecordProblem } from '../knowledge';
 import { findGitDirs, MachineLocalStore, type GitDirs, type Lease } from '../machine-local';
 import { inspectTrees, openTracker, removeStaleRefLocks, trackerTips, type TrackerStore, type TrackerTips, type TrackerView, type TreeInspection } from '../tracker';
 import { holdWorktreeLease, noteRefreshed, operationInProgress, refreshNotice, upgradeInProgress, upgradeSkipNotice } from '../upkeep';
@@ -98,7 +99,7 @@ async function runChecks(options: DoctorOptions, dirs: GitDirs, config: Checkout
     config,
     env: options.env ?? process.env,
     tips: () => (tips ??= trackerTips(options.root)),
-    trees: () => (trees ??= input.tips().then((held) => inspectTrees(options.root, held))),
+    trees: () => (trees ??= input.tips().then((held) => inspectTrees(options.root, held, { ledgerRecord: ledgerRecordProblem }))),
     view: () => (view ??= (tracker ??= openTracker(options.root)).then((store) => store.read())),
   };
   const findings: Finding[] = [];

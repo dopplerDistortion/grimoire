@@ -60,6 +60,8 @@ export {
   removeStaleRefLocks,
   staleRefLocks,
   trackerTips,
+  type RecordFormats,
+  type RecordProblem,
   type RefLock,
   type StoreFinding,
   type StoreSeverity,

@@ -10,7 +10,8 @@ import type { GitWorld } from '#harness';
 import type { CallContext } from '../../src/core';
 import { DOCTOR_CHECKS, runDoctor, type DoctorReport } from '../../src/installer/doctor';
 import type { Finding } from '../../src/installer/health';
-import { agentContext, commitToTracker, coreTest as test, fetchTracker, issuePath, pushTracker, T0 } from '../core/support';
+import { openTracker } from '../../src/tracker';
+import { agentContext, commitToTracker, coreTest as test, fetchTracker, fetchTrackerFrom, issuePath, pushTracker, T0 } from '../core/support';
 
 async function ok<T>(outcome: Promise<{ ok: true; result: T } | { ok: false; error: unknown }>): Promise<T> {
   const settled = await outcome;
@@ -25,8 +26,41 @@ function found(report: DoctorReport, kind: string): Finding[] {
 
 const T1 = new Date(T0.getTime() + 60_000);
 
+const T2 = new Date(T0.getTime() + 120_000);
+
 /** The checks about refs and sync: the runs that only look at those skip the rest. */
 const REF_CHECKS = DOCTOR_CHECKS.filter((check) => ['store.ref-locks', 'store.sync', 'store.ref-names'].includes(check.name));
+/** The check of each record's bytes. */
+const RECORD_CHECKS = DOCTOR_CHECKS.filter((check) => check.name === 'store.records');
+
+/** A human at an interactive terminal: the CLI with no agent marker and a TTY. */
+function terminal(ctx: CallContext): CallContext {
+  return { ...ctx, surface: 'cli', client: null, evidence: {}, tty: true };
+}
+
+const PAGE = {
+  slug: 'flaky-port-binding',
+  title: 'Flaky port binding',
+  kind: 'failure',
+  summary: 'Tests fail when two servers race for one port.',
+  body: 'Bind to port 0.\nRead the port back.\nPass it to the client.\n',
+};
+
+const NOTES = [
+  '---',
+  'name: release-notes',
+  'description: Write a release note for a change. Use when the user asks to record a change in the notes.',
+  '---',
+  '# Release notes',
+  '',
+  'Create `changes/<slug>.md` with `kind:` and `summary:` lines.',
+  '',
+].join('\n');
+
+/** Every file of the local tracker tip. */
+async function trackerFiles(world: GitWorld): Promise<string[]> {
+  return (await world.a.git(['ls-tree', '-r', '--name-only', 'refs/grimoire/tracker'])).split('\n');
+}
 
 /** A remote pre-receive hook that rejects every push the way GitHub's rulesets do. */
 const REJECTING_HOOK = ['#!/bin/sh', 'echo "GH013: Repository rule violations found for refs/heads/grimoire/tracker." >&2', 'exit 1', ''].join('\n');
@@ -69,6 +103,64 @@ describe('store checks', SLOW, () => {
       expect.objectContaining({ section: 'store', severity: 'error', subject: file, fixable: false }),
     ]);
     expect(report.ok).toBe(false);
+  });
+
+  test('the knowledge records grimoire writes are canonical: pages, wiki edits, a fold’s set-aside side, quarantine marks, skill changes and versions', async ({ world, grimoire }) => {
+    const human = terminal(grimoire.ctx);
+    const created = await ok(grimoire.core.call('wiki_edit', { ...PAGE, base: null }, human));
+    await ok(grimoire.core.call('quarantine', { page: PAGE.slug, reason: 'cites a poisoned trace' }, human));
+    await ok(grimoire.core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, human));
+    // Both clones change one line of the page: the fold sets one side aside.
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    await world.b.git(['update-ref', 'refs/grimoire/tracker', 'refs/remotes/origin/grimoire/tracker']);
+    await ok(grimoire.makeCore({ clock: () => T1 }).call('wiki_edit', { slug: PAGE.slug, base: created.base, body: PAGE.body.replace('Read', 'Log') }, human));
+    await ok(grimoire.makeCore({ clock: () => T2 }).call('wiki_edit', { slug: PAGE.slug, base: created.base, body: PAGE.body.replace('Read', 'Ask for') }, terminal(agentContext(world.b))));
+    await fetchTrackerFrom(world.a, world.b);
+    const store = await openTracker(world.a.dir);
+    try {
+      await store.fold({ author: { ...world.a.identity }, actor: { kind: 'human', client: 'cli', nonce: 'fold' } });
+    } finally {
+      await store.close();
+    }
+    const files = await trackerFiles(world);
+
+    const report = await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS });
+
+    const kinds = ['knowledge/wiki/pages/', 'knowledge/wiki/edits/', 'knowledge/wiki/conflicts/', 'knowledge/ledger/', 'knowledge/skill-versions/'];
+    expect(kinds.filter((prefix) => !files.some((file) => file.startsWith(prefix)))).toEqual([]);
+    expect(report.findings).toEqual([]);
+  });
+
+  test('hand-edited knowledge and session records are reported: a page, a ledger record and a skill version whose bytes no longer hash to their names, a session record', async ({ world, grimoire }) => {
+    const human = terminal(grimoire.ctx);
+    await ok(grimoire.core.call('wiki_edit', { ...PAGE, base: null }, human));
+    await ok(grimoire.core.call('quarantine', { page: PAGE.slug, reason: 'cites a poisoned trace' }, human));
+    await ok(grimoire.core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, human));
+    const { id } = await ok(grimoire.core.call('create', { title: 'Traced' }, grimoire.ctx));
+    const { attempt } = await ok(grimoire.core.call('claim', { id }, grimoire.ctx));
+    const files = await trackerFiles(world);
+    const page = files.find((file) => file.startsWith('knowledge/wiki/pages/'))!;
+    const ledger = files.find((file) => file.startsWith('knowledge/ledger/'))!;
+    const version = files.find((file) => file.startsWith('knowledge/skill-versions/'))!;
+    const start = files.find((file) => file.endsWith(`/${attempt}/start.md`))!;
+    const session = start.replace(/start\.md$/, 'sessions/s1.md');
+    // A person's edits: the page's title moved below its kind; another reason in the mark; a changed line in the skill.
+    const lines = (await trackerText(world, page)).split('\n');
+    const title = lines.findIndex((line) => line.startsWith('title: '));
+    [lines[title], lines[title + 1]] = [lines[title + 1]!, lines[title]!];
+    await commitToTracker(world.a, {
+      [page]: `${lines.join('\n')}\n`,
+      [ledger]: `${(await trackerText(world, ledger)).replace('cites a poisoned trace', 'poisoned')}\n`,
+      [version]: `${(await trackerText(world, version)).replace('Release notes', 'Notes')}\n`,
+      [session]: '---\nclient: claude-code\nsteps: 3\n---\n',
+    });
+
+    const report = await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS });
+
+    const bad = report.findings.filter((finding) => finding.kind === 'non-canonical' || finding.kind === 'unparsable');
+    expect(bad.map((finding) => finding.subject).sort()).toEqual([ledger, page, session, version].sort());
+    expect(bad.find((finding) => finding.subject === ledger)?.message).toContain('sha256');
   });
 
   test('a record that doesn’t parse is reported unparsable, and the checks that need the merged view say they couldn’t read it', async ({ world, grimoire }) => {

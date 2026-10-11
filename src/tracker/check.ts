@@ -5,13 +5,18 @@
 // `removeStaleRefLocks` is the one repair (`doctor --fix`).
 //
 // - Records: each file grimoire's format names is parsed and compared with
-//   what the canonical serializer writes; files this release doesn't know
-//   are kept as they are (spec §5) and never reported. Records filed under
-//   another id, and content a purge tombstone says is gone.
+//   what the canonical serializer writes, or, where the reader keeps no
+//   unknown keys, checked line by line against the canonical form; records
+//   named by a sha256 must hash to their names. Files this release doesn't
+//   know are kept as they are (spec §5) and never reported. Records filed
+//   under another id, and content a purge tombstone says is gone. Formats
+//   another module owns (the skill ledger's records) are checked through
+//   the hook it hands in (`RecordFormats`).
 // - History: edits to write-once files, commits grimoire didn't make, and
 //   knowledge records committed without grimoire's trailers.
 // - Refs: ref locks older than ~30 s, refs whose names block a tracker ref,
 //   and how far the local and remote-tracking trackers moved apart.
+import { createHash } from 'node:crypto';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { ObjectReader } from '../git/batch';
@@ -20,11 +25,13 @@ import { ATTEMPT_PATTERN, parseEnd, parseOutcome, parseStart, serializeEnd, seri
 import { commentEntry } from './comment';
 import { conflictName, parseConflict } from './conflict';
 import { shardOf } from './ids';
-import { GITATTRIBUTES, GITATTRIBUTES_FILE, FORMAT_FILE, SETTINGS_FILE, TRACKER_REF } from './layout';
-import { parseLines } from './lines';
+import { GITATTRIBUTES, GITATTRIBUTES_FILE, FORMAT_FILE, LEDGER_DIR, SESSIONS_DIR, SETTINGS_FILE, SKILL_VERSIONS_DIR, TRACKER_REF } from './layout';
+import { lineValue, parseLines } from './lines';
+import { isQuarantineKind, QUARANTINE_KEYS } from './quarantine';
 import { parseIssue, serializeIssue } from './record';
 import { parseForward, parseTombstone, serializeForward, serializeTombstone } from './retired';
 import { STALE_REF_LOCK_MS } from './store';
+import { parsePage, serializePage, WIKI_CONFLICT_KEYS, WIKI_DIR, WIKI_EDIT_KEYS } from './wiki';
 
 export type StoreSeverity = 'error' | 'warning' | 'info';
 
@@ -81,10 +88,25 @@ async function treeFiles(root: string, tip: string): Promise<TreeFile[]> {
 }
 
 /** Why a record isn't what grimoire writes: `unparsable` or `non-canonical`, with the reason. */
-type RecordVerdict = { readonly kind: 'unparsable' | 'non-canonical'; readonly why: string } | null;
+export interface RecordProblem {
+  readonly kind: 'unparsable' | 'non-canonical';
+  readonly why: string;
+}
+
+type RecordVerdict = RecordProblem | null;
+
+/** Checks for record formats another module owns, handed in by whoever runs the store checks. */
+export interface RecordFormats {
+  /**
+   * A skill ledger record (any kind but a quarantine's), already known to be
+   * named by the sha256 of its bytes: what's wrong with it, or null.
+   */
+  readonly ledgerRecord?: (id: string, bytes: Buffer) => RecordProblem | null;
+}
 
 const unparsable = (why: string): RecordVerdict => ({ kind: 'unparsable', why });
 const nonCanonical = (why: string): RecordVerdict => ({ kind: 'non-canonical', why });
+const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
 /** Text as UTF-8, or null when the bytes aren't valid UTF-8. */
 function utf8(bytes: Buffer): string | null {
@@ -110,9 +132,10 @@ function roundTrip(bytes: Buffer, rewrite: (bytes: Buffer) => Buffer): RecordVer
 /**
  * A frontmatter record whose reader keeps no unknown keys (comments, activity
  * entries): one `key: <JSON>` line each, the known keys in their order and
- * any unknown ones after them, sorted (spec §3, §5).
+ * any unknown ones after them, sorted (spec §3, §5). A null `order` checks
+ * the lines alone, for a record whose key order this release can't know.
  */
-function canonicalFrontmatter(bytes: Buffer, order: readonly string[], body: boolean): RecordVerdict {
+function canonicalFrontmatter(bytes: Buffer, order: readonly string[] | null, body: boolean): RecordVerdict {
   const text = utf8(bytes);
   if (text === null) return unparsable('it is not UTF-8 text');
   if (text.includes('\r')) return nonCanonical('it has CR line ends; grimoire writes LF');
@@ -134,6 +157,7 @@ function canonicalFrontmatter(bytes: Buffer, order: readonly string[], body: boo
     keys.push(match[1]!);
   }
   if (new Set(keys).size !== keys.length) return nonCanonical('a frontmatter key is repeated');
+  if (order === null) return null;
   const known = keys.filter((key) => order.includes(key));
   const unknown = keys.filter((key) => !order.includes(key));
   const expected = [...[...known].sort((a, b) => order.indexOf(a) - order.indexOf(b)), ...[...unknown].sort()];
@@ -159,8 +183,51 @@ const COMMENT_KEYS = ['actor', 'at', 'kind', 'attempt', 'key'];
 const ACTIVITY_KEYS = ['actor', 'at', 'kind', 'attempt', 'fields'];
 const SHA256_NAME = /^[0-9a-f]{64}$/;
 
+/** A write-once record named by the sha256 of its bytes (`<sha256>.md`): null when it is. */
+function contentNamed(fileName: string, bytes: Buffer, what: string): RecordVerdict {
+  const name = fileName.slice(0, -'.md'.length);
+  if (!SHA256_NAME.test(name)) return nonCanonical(`${what} is named by the sha256 of its bytes`);
+  return sha256(bytes) === name ? null : nonCanonical('its file name is not the sha256 of its bytes');
+}
+
+/** A frontmatter value, or undefined when the record has no such line. */
+function frontmatterValue(bytes: Buffer, key: string): unknown {
+  const text = bytes.toString('utf8');
+  const close = text.startsWith('---\n') ? text.indexOf('\n---\n', 3) : -1;
+  const line = close < 0 ? undefined : parseLines(text.slice(4, close)).find((entry) => entry.key === key);
+  return line === undefined ? undefined : lineValue(line.raw);
+}
+
+/**
+ * The knowledge records (spec §17, §18): wiki pages round-trip through their
+ * serializer; set-aside sides, human wiki edits, ledger records and skill
+ * versions are named by the sha256 of their bytes, and their frontmatter is
+ * canonical. The wiki's index and log are derived, regenerated by every
+ * write: they are no record.
+ */
+function checkKnowledge(parts: readonly string[], bytes: Buffer, formats: RecordFormats): RecordVerdict | undefined {
+  const file = parts.join('/');
+  const last = parts[parts.length - 1]!;
+  if (!last.endsWith('.md')) return undefined;
+  if (file.startsWith(`${WIKI_DIR}/`)) {
+    const [, , dir] = parts;
+    if (dir === 'pages' && parts.length === 4) return roundTrip(bytes, (b) => serializePage(parsePage(last.slice(0, -3), b)));
+    if (dir === 'conflicts' && parts.length === 5) return contentNamed(last, bytes, 'a set-aside side') ?? canonicalFrontmatter(bytes, WIKI_CONFLICT_KEYS, true);
+    if (dir === 'edits' && parts.length === 4) return contentNamed(last, bytes, 'a wiki edit record') ?? canonicalFrontmatter(bytes, WIKI_EDIT_KEYS, false);
+    return undefined;
+  }
+  if (file.startsWith(`${LEDGER_DIR}/`) && parts.length === 3) {
+    const named = contentNamed(last, bytes, 'a ledger record');
+    if (named) return named;
+    if (isQuarantineKind(frontmatterValue(bytes, 'kind'))) return canonicalFrontmatter(bytes, QUARANTINE_KEYS, false);
+    return formats.ledgerRecord ? formats.ledgerRecord(last.slice(0, -3), bytes) : null;
+  }
+  if (file.startsWith(`${SKILL_VERSIONS_DIR}/`) && parts.length === 3) return contentNamed(last, bytes, 'a skill version');
+  return undefined;
+}
+
 /** What grimoire's format says about the file at `file`, or undefined for a file this release doesn't know. */
-function checkRecord(file: string, bytes: Buffer): RecordVerdict | undefined {
+function checkRecord(file: string, bytes: Buffer, formats: RecordFormats): RecordVerdict | undefined {
   if (file === FORMAT_FILE) return canonicalLines(bytes, false);
   if (file === SETTINGS_FILE) return canonicalLines(bytes, true);
   if (file === GITATTRIBUTES_FILE) return bytes.toString('utf8') === GITATTRIBUTES ? null : nonCanonical(`it should read ${JSON.stringify(GITATTRIBUTES)}`);
@@ -185,6 +252,8 @@ function checkRecord(file: string, bytes: Buffer): RecordVerdict | undefined {
     if (name === 'end.md') return roundTrip(bytes, (b) => serializeEnd(parseEnd(b)));
     if (name === 'issue-at-start.md') return roundTrip(bytes, (b) => serializeIssue(parseIssue(b)));
     if (parts.length === 7 && parts[5] === 'activity' && parts[6]!.endsWith('.md')) return canonicalFrontmatter(bytes, [...COMMENT_KEYS, ...ACTIVITY_KEYS.filter((key) => !COMMENT_KEYS.includes(key))], true);
+    // Session records (spec §14): capture owns their keys; here, the shared line format and the excerpt body.
+    if (parts.length === 7 && parts[5] === SESSIONS_DIR && parts[6]!.endsWith('.md')) return canonicalFrontmatter(bytes, null, true);
     return undefined;
   }
   if (parts[0] === 'outcomes' && parts.length === 5 && parts[4]!.endsWith('.md')) return roundTrip(bytes, (b) => serializeOutcome(parseOutcome(b)));
@@ -200,9 +269,7 @@ function checkRecord(file: string, bytes: Buffer): RecordVerdict | undefined {
       return unparsable('it is not JSON');
     }
   }
-  if (file.startsWith('knowledge/skill-versions/') && parts.length === 3 && parts[2]!.endsWith('.md')) {
-    return SHA256_NAME.test(parts[2]!.slice(0, -3)) ? null : nonCanonical('a skill version is named by a sha256');
-  }
+  if (parts[0] === 'knowledge') return checkKnowledge(parts, bytes, formats);
   return undefined;
 }
 
@@ -276,7 +343,7 @@ export interface TreeInspection {
  * ref and each remote-tracking one). A file is reported once however many
  * tips hold it.
  */
-export async function inspectTrees(root: string, tips: TrackerTips): Promise<TreeInspection> {
+export async function inspectTrees(root: string, tips: TrackerTips, formats: RecordFormats = {}): Promise<TreeInspection> {
   const heads = [...new Set([tips.local, ...tips.remotes.values()].filter((tip): tip is string => tip !== null))];
   const seen = new Set<string>();
   const files: TreeFile[] = [];
@@ -312,7 +379,7 @@ export async function inspectTrees(root: string, tips: TrackerTips): Promise<Tre
     }
     let verdict: RecordVerdict | undefined;
     try {
-      verdict = checkRecord(file.path, bytes);
+      verdict = checkRecord(file.path, bytes, formats);
     } catch (error) {
       verdict = unparsable(error instanceof Error ? error.message : String(error));
     }
