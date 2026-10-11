@@ -3,7 +3,7 @@
 // versions named by their normalized text, the ledger alone says which version
 // is current, and agents read the served text.
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
@@ -188,7 +188,26 @@ describe('skill versions and human edits', () => {
     expect(await core.call('skill_read', { name: 'deploy' }, ctx)).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
   });
 
-  test('an edit from a base that moved gives BASE_MOVED; replacing it on purpose commits the draft', async ({ world, grimoire }) => {
+  test('text agents would never be served (a git conflict marker) is refused, naming the line, rather than committed unserved', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core, ctx } = grimoire;
+    const v1 = await edit(core, ctx, { name: 'release-notes', text: NOTES_V1, base: null });
+    const marked = NOTES_V1.replace('Create `changes', '<<<<<<< ours\nCreate `changes').replace(' lines.\n', ' lines.\n=======\nWrite it.\n>>>>>>> theirs\n');
+
+    const refused = await expectRefUnmoved(world.a, () =>
+      core.call('skill_edit', { name: 'release-notes', text: marked, base: v1.version }, terminal(ctx)),
+    );
+
+    expect(refused).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { text: expect.stringMatching(/conflict marker on line 7/) } } } });
+    expect(await core.call('skill_read', { name: 'release-notes' }, ctx)).toMatchObject({ ok: true, result: { version: v1.version } });
+  });
+
+  test('an edit from a base that moved gives BASE_MOVED; replacing the version shown on purpose commits the draft, only while that version is current', async ({
+    world,
+    grimoire,
+  }) => {
     const { core, ctx } = grimoire;
     const v1 = await edit(core, ctx, { name: 'release-notes', text: NOTES_V1, base: null });
     const v2 = await edit(core, ctx, { name: 'release-notes', text: NOTES_V2, base: v1.version });
@@ -198,14 +217,25 @@ describe('skill versions and human edits', () => {
       core.call('skill_edit', { name: 'release-notes', text: draft, base: v1.version }, terminal(ctx)),
     );
     const created = await core.call('skill_edit', { name: 'brand-new', text: skill('brand-new', 'Use it.', '# B\n'), base: v1.version }, terminal(ctx));
-    const replaced = await edit(core, ctx, { name: 'release-notes', text: draft, base: v1.version, replace: true });
+    // Replacing a version that is no longer current (the human was shown v1, but v2 is current) moves nothing.
+    const staleReplace = await expectRefUnmoved(world.a, () =>
+      core.call('skill_edit', { name: 'release-notes', text: draft, base: v1.version, replace: v1.version }, terminal(ctx)),
+    );
+    const replaced = await edit(core, ctx, { name: 'release-notes', text: draft, base: v1.version, replace: v2.version });
+    const shown = await core.call('skill_show', { name: 'release-notes' }, terminal(ctx));
+    const record = shown.ok ? shown.result.skills[0]!.provenance!.record : '';
 
     expect(moved).toMatchObject({
       ok: false,
       error: { code: 'BASE_MOVED', details: { name: 'release-notes', base: v1.version, current: v2.version } },
     });
     expect(created).toMatchObject({ ok: false, error: { code: 'BASE_MOVED', details: { current: null } } });
+    expect(staleReplace).toMatchObject({ ok: false, error: { code: 'BASE_MOVED', details: { base: v1.version, current: v2.version } } });
     expect(replaced).toMatchObject({ version: versionOf(draft), from: v2.version, changed: true });
+    // The record lists both versions the human saw: the one the edit started from, and the one it replaced.
+    expect(await trackerFile(world.a, (await trackerTip(world.a))!, `knowledge/ledger/${record}.md`)).toContain(
+      `\nsaw: ${JSON.stringify([v1.version, v2.version])}\n`,
+    );
   });
 
   test('the active cap (skills.max_active, 8) refuses a create past it, but never an edit; descriptions stop at skills.description_max (300)', async ({
@@ -255,7 +285,7 @@ describe('skill versions and human edits', () => {
     expect(remote.split('\t')[0]).toBe(await trackerTip(world.a));
   });
 
-  test('machine-local data this release can’t write doesn’t block an edit; its provenance just can’t say it was local', async ({
+  test('machine-local data this release can’t write doesn’t block an edit; its provenance says the origin is unknown, never another clone', async ({
     world,
     grimoire,
   }) => {
@@ -266,9 +296,19 @@ describe('skill versions and human edits', () => {
 
     const edited = await core.call('skill_edit', { name: 'release-notes', text: NOTES_V1, base: null }, terminal(ctx));
     const shown = await core.call('skill_show', {}, terminal(ctx));
+    await rm(path.join(dir, 'format'));
+    const fixed = await core.call('skill_show', {}, terminal(ctx));
+    await edit(core, ctx, { name: 'release-notes', text: NOTES_V2, base: versionOf(NOTES_V1) });
+    const later = await core.call('skill_show', { name: 'release-notes' }, terminal(ctx));
 
     expect(edited).toMatchObject({ ok: true, result: { created: true } });
-    expect(shown).toMatchObject({ ok: true, result: { skills: [{ name: 'release-notes', provenance: { origin: 'other-clone' } }] } });
+    expect(shown).toMatchObject({ ok: true, result: { skills: [{ name: 'release-notes', provenance: { origin: 'unknown' } }] } });
+    // The record is write-once: its clone stays unknown once the store is readable again.
+    expect(fixed).toMatchObject({ ok: true, result: { skills: [{ name: 'release-notes', provenance: { origin: 'unknown' } }] } });
+    expect(later).toMatchObject({
+      ok: true,
+      result: { skills: [{ provenance: { origin: 'local' }, history: [{ origin: 'unknown' }, { origin: 'local' }] }] },
+    });
   });
 
   test('an edit that changes nothing commits nothing', async ({ world, grimoire }) => {

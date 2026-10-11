@@ -14,8 +14,10 @@
 //   acknowledges one; the losers are superseded;
 // - an accept against a reject of the same proposal is contested, and is
 //   served as accepted, unless a `suspicious` reject is involved: then the
-//   accepted version is served nowhere until a human acknowledges, and the
-//   version that was current before it keeps serving.
+//   accepted version is served nowhere until a human settles it, and the
+//   version that was current before it keeps serving. Any human skill change
+//   that follows all of a decision's accepts and rejects settles it: an
+//   acknowledge, or instead a `skill edit`, a restore, a delete, …
 //
 // What is served also skips versions that fail the content checks (`servable`):
 // wherever the rules would serve a skipped version, the record that made it
@@ -24,25 +26,27 @@
 import type { LedgerEntry } from './ledger';
 
 /** The ranks of the changes that decide a skill's state; every other kind leaves it as it is. */
-const RANK: Readonly<Record<string, number>> = {
-  delete: 3,
-  eject: 3,
-  restore: 2,
-  accept: 1,
-  edit: 1,
-  record: 1,
-  acknowledge: 1,
-};
+const RANK: ReadonlyMap<string, number> = new Map([
+  ['delete', 3],
+  ['eject', 3],
+  ['restore', 2],
+  ['accept', 1],
+  ['edit', 1],
+  ['record', 1],
+  ['acknowledge', 1],
+]);
 const REMOVES: ReadonlySet<string> = new Set(['delete', 'eject']);
+/** The skill changes a human makes with the skill in front of them: one that follows a contested decision settles it. */
+const SETTLES: ReadonlySet<string> = new Set(['acknowledge', 'edit', 'record', 'restore', 'delete', 'eject']);
 
 export type SkillStatus = 'active' | 'deleted' | 'ejected' | 'none';
 
-/** An accept and a reject of one proposal that no acknowledgement has settled. */
+/** An accept and a reject of one proposal that no later human change has settled. */
 export interface ContestedDecision {
   readonly proposal: string;
   readonly accepts: readonly LedgerEntry[];
   readonly rejects: readonly LedgerEntry[];
-  /** A `suspicious` reject is involved: the accepted versions are served nowhere until a human acknowledges. */
+  /** A `suspicious` reject is involved: the accepted versions are served nowhere until a human settles it. */
   readonly withheld: boolean;
 }
 
@@ -110,7 +114,7 @@ function deriveSkill(name: string, records: readonly LedgerEntry[], servable: (v
   const headsOf = (ids: ReadonlySet<string>): LedgerEntry[] =>
     [...ids].filter((id) => ![...ids].some((other) => other !== id && ancestors(other).has(id))).map((id) => byId.get(id)!);
 
-  const changes = new Set(records.filter((record) => record.kind in RANK).map((record) => record.id));
+  const changes = new Set(records.filter((record) => RANK.has(record.kind)).map((record) => record.id));
   const ranked = headsOf(changes).sort(precedence);
   const current = ranked[0] ?? null;
   const superseded = current ? ranked.slice(1).filter((head) => outcome(head) !== outcome(current)) : [];
@@ -172,7 +176,7 @@ function outcome(record: LedgerEntry): string {
 
 /** Fork precedence: the higher rank, then (removals aside) the lower version hash, then the lower record id. */
 function precedence(a: LedgerEntry, b: LedgerEntry): number {
-  const rank = RANK[b.kind]! - RANK[a.kind]!;
+  const rank = RANK.get(b.kind)! - RANK.get(a.kind)!;
   if (rank !== 0) return rank;
   if (!REMOVES.has(a.kind)) {
     if (a.to !== b.to) {
@@ -184,7 +188,7 @@ function precedence(a: LedgerEntry, b: LedgerEntry): number {
   return byCode(a.id, b.id);
 }
 
-/** Accepts and rejects of one proposal that no acknowledgement following them all has settled. */
+/** Accepts and rejects of one proposal that no human change following them all has settled. */
 function contestedDecisions(records: readonly LedgerEntry[], ancestors: (id: string) => ReadonlySet<string>): ContestedDecision[] {
   const byProposal = new Map<string, { accepts: LedgerEntry[]; rejects: LedgerEntry[] }>();
   for (const record of records) {
@@ -193,12 +197,12 @@ function contestedDecisions(records: readonly LedgerEntry[], ancestors: (id: str
     if (!decisions) byProposal.set(record.proposal, (decisions = { accepts: [], rejects: [] }));
     (record.kind === 'accept' ? decisions.accepts : decisions.rejects).push(record);
   }
-  const acknowledgements = records.filter((record) => record.kind === 'acknowledge');
+  const settling = records.filter((record) => SETTLES.has(record.kind));
   const contested: ContestedDecision[] = [];
   for (const [proposal, { accepts, rejects }] of [...byProposal].sort(([a], [b]) => byCode(a, b))) {
     if (accepts.length === 0 || rejects.length === 0) continue;
     const decided = [...accepts, ...rejects];
-    const settled = acknowledgements.some((ack) => decided.every((decision) => ancestors(ack.id).has(decision.id)));
+    const settled = settling.some((change) => decided.every((decision) => ancestors(change.id).has(decision.id)));
     if (settled) continue;
     contested.push({ proposal, accepts, rejects, withheld: rejects.some((reject) => reject.reason === 'suspicious') });
   }

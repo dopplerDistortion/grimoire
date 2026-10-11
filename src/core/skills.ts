@@ -19,7 +19,7 @@ import {
 } from '../knowledge';
 import { runGit } from '../git/run';
 import { cloneTag, MachineLocalStore } from '../machine-local';
-import type { SecretScanner } from '../scanner';
+import { checkHygiene, type SecretScanner } from '../scanner';
 import type { TrackerView } from '../tracker';
 import { ledgerFile } from '../tracker/layout';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
@@ -148,10 +148,16 @@ export interface ShownChange {
   at: string;
 }
 
+/**
+ * A decision made in this clone, one that arrived from another clone, or
+ * `unknown`: the record carries no clone tag (machine-local data this release
+ * couldn't use when it was made), or this clone's own tag can't be read.
+ */
+export type SkillOrigin = 'local' | 'other-clone' | 'unknown';
+
 /** Where the current version came from (spec §18, The skill ledger). */
 export interface SkillProvenance extends ShownChange {
-  /** A decision made in this clone, or one that arrived from another clone. */
-  origin: 'local' | 'other-clone';
+  origin: SkillOrigin;
   actor: Record<string, unknown>;
   /** The tracker commit that added the record; null when this clone can't tell. */
   commit: string | null;
@@ -176,14 +182,16 @@ export interface ShownSkill {
   /** With `name`: the current version's text. */
   text?: string | null;
   /** With `name`: every record of the skill, each after the ones it follows. */
-  history?: (ShownChange & { from: string | null; origin: 'local' | 'other-clone'; proposal?: string; reason?: string })[];
+  history?: (ShownChange & { from: string | null; origin: SkillOrigin; proposal?: string; reason?: string })[];
 }
 
 export interface SkillShowResult {
   skills: ShownSkill[];
-  /** Active skills, and the cap (skills.max_active): creates past it after a merge are allowed and flagged here. */
+  /** Active skills, and the cap (skills.max_active). */
   active: number;
   cap: number;
+  /** More skills are active than the cap allows: creates past it after a merge are allowed, and flagged here. */
+  over_cap: boolean;
   delivery: 'on' | 'off';
 }
 
@@ -236,8 +244,13 @@ export const skillShow = define({
       throw new GrimoireError('NOT_FOUND', `the skill ledger has no evolved skill named ${input.name}`, { skill: input.name });
     }
     const states = [...book.skills.values()].filter((state) => input.name === undefined || state.name === input.name);
-    const local = await new MachineLocalStore(tracker.location.commonDir).records.read<string>('clone', 'tag').catch(() => undefined);
-    const origin = (record: LedgerEntry) => (local !== undefined && record.clone === local ? 'local' : 'other-clone');
+    // No tag yet means no record was made here; a tag that can't be read means this clone can't tell.
+    const local = await new MachineLocalStore(tracker.location.commonDir).records.read<string>('clone', 'tag').then(
+      (tag) => ({ readable: true, tag }),
+      () => ({ readable: false, tag: undefined }),
+    );
+    const origin = (record: LedgerEntry): SkillOrigin =>
+      !local.readable || record.clone === '' ? 'unknown' : record.clone === local.tag ? 'local' : 'other-clone';
     const commits = await addingCommits(
       tracker.location.root,
       states.map((state) => state.current?.id).filter((id): id is string => id !== undefined),
@@ -283,10 +296,12 @@ export const skillShow = define({
       }
       skills.push(shown);
     }
+    const cap = storeSetting(view, 'skills.max_active') as number;
     return {
       skills,
       active: book.active,
-      cap: storeSetting(view, 'skills.max_active') as number,
+      cap,
+      over_cap: book.active > cap,
       delivery: deliveryOn(view) ? 'on' : 'off',
     };
   },
@@ -326,6 +341,22 @@ function draftParts(name: string, draft: string): SkillParts {
   return parts;
 }
 
+/**
+ * INVALID unless the text passes the content checks agents are served through
+ * (src/knowledge/book.ts): a git conflict marker would leave the version
+ * current but never served, so it is refused here instead.
+ */
+function servable(text: string): void {
+  const hygiene = checkHygiene(text);
+  if (hygiene.status !== 'checked') throw invalid({ text: 'could not be checked for conflict markers, so it is not committed' });
+  const marker = hygiene.findings.find((finding) => finding.check === 'conflict-marker');
+  if (marker) {
+    throw invalid({
+      text: `has a git conflict marker on line ${lineAt(text, marker.start)}, and agents are never served a skill with one; resolve it, or indent the example`,
+    });
+  }
+}
+
 /** INVALID unless the secret scan ran and found nothing (spec §18, Secrets): a hit blocks the commit. */
 function scanned(scanner: SecretScanner, text: string): void {
   const scan = scanner.scan(text);
@@ -347,7 +378,12 @@ export const skillEdit = define({
     name: s.string(oneLine),
     text: s.string({ description: 'the whole SKILL.md: name and description frontmatter, then the body' }),
     base: s.nullable(s.string(oneLine), 'the version the edit started from; null for a new skill'),
-    replace: s.optional(s.boolean('commit over a version that moved since `base` (the human confirmed "Replace with my draft")')),
+    replace: s.optional(
+      s.nullable(
+        s.string(oneLine),
+        'the version shown when `base` had moved, which the human confirmed replacing ("Replace with my draft"); null for none. The edit commits only while it is still current',
+      ),
+    ),
   }),
   async run(input, { ctx, tracker, actor, scanner, requestSync }): Promise<SkillEditResult> {
     const problem = skillNameProblem(input.name);
@@ -356,6 +392,7 @@ export const skillEdit = define({
     const parts = draftParts(input.name, input.text);
     const text = serializeSkillText(parts);
     scanned(scanner, text);
+    servable(text);
     const version = skillVersionOf(text);
     // Provenance only: machine-local data this release can't write leaves the record's clone unknown.
     const clone = await cloneTag(new MachineLocalStore(tracker.location.commonDir).records).catch(() => '');
@@ -381,7 +418,9 @@ export const skillEdit = define({
           throw invalid({ name: `${book.active} evolved skills are active, the cap (skills.max_active is ${cap}); delete one before creating another` });
         }
       }
-      if (input.base !== current && input.replace !== true) {
+      // The compare-and-set: against the version the human confirmed replacing, else the one the edit started from.
+      const expected = input.replace !== undefined ? input.replace : input.base;
+      if (expected !== current) {
         throw new GrimoireError(
           'BASE_MOVED',
           `${input.name} changed since the edit started: it is now at ${current ?? 'no version'}; redo the edit on the current text, or replace it with the draft`,

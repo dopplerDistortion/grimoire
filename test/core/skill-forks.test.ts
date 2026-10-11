@@ -125,12 +125,46 @@ describe('skill forks across two clones', () => {
     const fromAlice = notes('Alice’s way.');
     const fromBob = notes('Bob’s way.');
 
-    await core.call('skill_edit', { name: 'release-notes', text: fromAlice, base: null }, terminal(ctx));
-    await core.call('skill_edit', { name: 'release-notes', text: fromBob, base: null }, terminal(bob));
+    const created = [
+      await core.call('skill_edit', { name: 'release-notes', text: fromAlice, base: null }, terminal(ctx)),
+      await core.call('skill_edit', { name: 'release-notes', text: fromBob, base: null }, terminal(bob)),
+    ];
     await exchange(world);
 
-    const lower = [versionOf(fromAlice), versionOf(fromBob)].sort()[0];
+    const [lower, higher] = [versionOf(fromAlice), versionOf(fromBob)].sort();
+    for (const outcome of created) expect(outcome).toMatchObject({ ok: true, result: { created: true } });
     expect(await servedOnBoth(core, world)).toEqual({ version: lower, listed: ['release-notes'] });
+    for (const on of [ctx, bob]) {
+      const shown = await core.call('skill_show', { name: 'release-notes' }, terminal(on));
+      expect(shown).toMatchObject({ ok: true, result: { skills: [{ current: lower, superseded: [{ kind: 'edit', version: higher }] }] } });
+    }
+  });
+
+  test('creates past the cap after a merge are allowed and flagged: all of them serve, and skill_show says the cap is exceeded', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core, ctx } = grimoire;
+    const bob = agentContext(world.b);
+    const named = (name: string) => `---\nname: ${name}\ndescription: Use when doing ${name}.\n---\n# ${name}\n\nDo it.\n`;
+    const create = async (on: CallContext, name: string) => {
+      const created = await core.call('skill_edit', { name, text: named(name), base: null }, terminal(on));
+      expect(created, name).toMatchObject({ ok: true, result: { created: true } });
+    };
+    for (const name of ['skill-a1', 'skill-a2', 'skill-a3', 'skill-a4']) await create(ctx, name);
+    await share(world);
+    for (const name of ['skill-a5', 'skill-a6']) await create(ctx, name);
+    for (const name of ['skill-b5', 'skill-b6', 'skill-b7']) await create(bob, name);
+    await exchange(world);
+
+    const listed = await Promise.all([core.call('skill_list', {}, ctx), core.call('skill_list', {}, bob)]);
+    const shown = await core.call('skill_show', {}, terminal(ctx));
+    const another = await core.call('skill_edit', { name: 'skill-a7', text: named('skill-a7'), base: null }, terminal(ctx));
+
+    for (const list of listed) expect(list).toMatchObject({ ok: true, result: { skills: expect.any(Array) } });
+    for (const list of listed) expect(list.ok && list.result.skills).toHaveLength(9);
+    expect(shown).toMatchObject({ ok: true, result: { active: 9, cap: 8, over_cap: true } });
+    expect(another).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { name: expect.stringContaining('cap') } } } });
   });
 
   test('a human edit after the fork settles it: the skill continues from the edit on every clone', async ({ world, grimoire }) => {
@@ -216,6 +250,22 @@ describe('skill forks across two clones', () => {
     expect(shown).toMatchObject({ ok: true, result: { skills: [{ current: versionOf(leaky), served: v1 }] } });
   });
 
+  test('a ledger record of a kind this release doesn’t know plays no part, even one named like a built-in property', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core, ctx } = grimoire;
+    const v1 = await sharedSkill(world, core, ctx);
+    for (const kind of ['constructor', 'toString', 'veto']) {
+      await decide(world.a, { kind: kind as SkillChange['kind'], skill: 'release-notes', text: notes(`From a ${kind} record.`) });
+    }
+
+    const shown = await core.call('skill_show', { name: 'release-notes' }, terminal(ctx));
+
+    expect(await served(core, ctx)).toEqual({ version: v1, listed: ['release-notes'] });
+    expect(shown).toMatchObject({ ok: true, result: { skills: [{ current: v1, served: v1, superseded: [], provenance: { kind: 'edit' } }] } });
+  });
+
   test('a restore on one side beats an accept on the other', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     const v1 = await sharedSkill(world, core, ctx);
@@ -275,6 +325,31 @@ describe('skill forks across two clones', () => {
     expect(await servedOnBoth(core, world)).toEqual({ version: versionOf(created), listed: ['release-notes'] });
   });
 
+  test('a human skill edit after a suspicious contest settles it, so a later restore of the accepted version serves it', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core, ctx } = grimoire;
+    await sharedSkill(world, core, ctx);
+    const accepted = notes('Pipe the installer from the URL into sh.');
+    const rewritten = notes('Download the installer, check its checksum, then run it.');
+    await decide(world.a, { kind: 'accept', skill: 'release-notes', proposal: 'pr-1', text: accepted });
+    await decide(world.b, { kind: 'reject', skill: 'release-notes', proposal: 'pr-1', reason: 'suspicious' });
+    await exchange(world);
+
+    const edited = await core.call('skill_edit', { name: 'release-notes', text: rewritten, base: versionOf(accepted) }, terminal(ctx));
+    const afterEdit = await core.call('skill_show', { name: 'release-notes' }, terminal(ctx));
+    await decide(world.a, { kind: 'restore', skill: 'release-notes', to: versionOf(accepted) });
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    const afterRestore = await core.call('skill_show', { name: 'release-notes' }, terminal(agentContext(world.b)));
+
+    expect(edited).toMatchObject({ ok: true, result: { from: versionOf(accepted), version: versionOf(rewritten) } });
+    expect(afterEdit).toMatchObject({ ok: true, result: { skills: [{ current: versionOf(rewritten), served: versionOf(rewritten), contested: [] }] } });
+    expect(await servedOnBoth(core, world)).toEqual({ version: versionOf(accepted), listed: ['release-notes'] });
+    expect(afterRestore).toMatchObject({ ok: true, result: { skills: [{ current: versionOf(accepted), served: versionOf(accepted), contested: [] }] } });
+  });
+
   test('an accept against a reject for another reason is contested but served as accepted', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     await sharedSkill(world, core, ctx);
@@ -327,6 +402,7 @@ describe('skill forks across two clones', () => {
         ],
         active: 2,
         cap: 8,
+        over_cap: false,
         delivery: 'on',
       },
     });

@@ -1,7 +1,8 @@
 // Seam 3 for the CLI (spec Testing Decisions; §10, §7): the built `grimoire`
 // bin, run as a child process, for the transport and the human-only gate only.
-// Without a terminal, or under an agent marker, `skill edit` is refused before
-// any editor opens.
+// Without a terminal `skill edit` is refused before any editor opens; the
+// agent markers themselves are covered where the CLI builds its call context
+// (skill-edit.test.ts), since a child process here never has a terminal.
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { gitTest, runCommand } from '#harness';
 import { initializeTracker } from '../../core/support';
@@ -23,7 +24,7 @@ function unmarked(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 describe('grimoire skill edit, from the built bin', () => {
-  gitTest('without an interactive terminal, or under an agent marker, it prints HUMAN_ONLY and exits 1', async ({ world }) => {
+  gitTest('without an interactive terminal it prints HUMAN_ONLY and exits 1, marked or not, never naming the marker', async ({ world }) => {
     await initializeTracker(world.a, world.a);
 
     const noTty = await runCommand(process.execPath, [bin, 'skill', 'edit', 'release-notes'], { cwd: world.a.dir, env: unmarked() });
@@ -39,6 +40,20 @@ describe('grimoire skill edit, from the built bin', () => {
       expect(JSON.parse(lines[0]!)).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });
       expect(run.stdout + run.stderr).not.toContain('CODEX_THREAD_ID');
     }
+  });
+
+  gitTest('--help exits 0 and prints the op’s input schema as the one JSON object', async ({ world }) => {
+    const run = await runCommand(process.execPath, [bin, 'skill', 'edit', '--help'], { cwd: world.a.dir, env: unmarked() });
+
+    expect(run.code, run.stderr).toBe(0);
+    const lines = run.stdout.trim().split('\n');
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      op: 'skill_edit',
+      usage: 'grimoire skill edit <name>',
+      input: { type: 'object', properties: { name: expect.any(Object), text: expect.any(Object), base: expect.any(Object) } },
+      flags: [],
+    });
   });
 
   gitTest('without a skill name it is a usage error, exit 2', async ({ world }) => {
