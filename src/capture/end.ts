@@ -4,15 +4,15 @@
 // commit then seals one session record per bound context. Capture problems
 // become statuses, never errors.
 import os from 'node:os';
+import path from 'node:path';
 import type { Actor, ReservedHint } from '../core/context';
 import type { MachineLocalStore } from '../machine-local';
 import type { SecretScanner } from '../scanner';
 import type { AttemptRecord, TrackerDraft, TrackerView } from '../tracker';
-import type { Reach } from '../tracker/fold-records';
 import { boundContexts, readBindings } from './bindings';
-import { cutClaudeCode, readClaudeCodeTranscript } from './claude-code';
+import { CLAUDE_CODE_READER_VERSION, cutClaudeCode, readClaudeCodeTranscript } from './claude-code';
 import { defaultClaudeConfigDir, findClaudeTranscript } from './claude-code/roots';
-import { cutCodex } from './codex';
+import { CODEX_READER_VERSION, cutCodex } from './codex';
 import { defaultCodexHome } from './codex/roots';
 import { emptyCut, type BindingCall, type Cut, type CutEvidence } from './cut';
 import type { EvidenceSource } from './evidence';
@@ -39,6 +39,8 @@ export const CUT_BUDGET_MS = 10_000;
 /** How long the calling context waits for its ending call to reach its transcript (spec §14: 2 s). */
 export const FLUSH_WAIT_MS = 2_000;
 const FLUSH_POLL_MS = 100;
+
+const READER_VERSION = { 'claude-code': CLAUDE_CODE_READER_VERSION, codex: CODEX_READER_VERSION } as const;
 
 /** Where capture looks, and how long it may take. Defaults: the clients' own folders, the spec's budgets. */
 export interface CaptureOptions {
@@ -271,11 +273,9 @@ class ContextCut {
       this.callIds = cut.callIds;
       return this.fromCut(cut, source, roots);
     } catch {
-      return this.fromCut(
-        emptyCut({ client: { name: family, version: null }, reader: { version: 0 }, session: target.session ?? '', context: target.context ?? '' }, 'unreadable'),
-        target.source,
-        [],
-      );
+      // A reader that throws is one grimoire can't trust on this transcript.
+      const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };
+      return this.fromCut(emptyCut(identity, 'unreadable'), target.source, []);
     }
   }
 
@@ -300,7 +300,7 @@ class ContextCut {
   private async cutClaude(): Promise<{ cut: Cut; roots: string[]; source: EvidenceSource | null }> {
     const { input, target } = this;
     const configDir = input.options?.claudeConfigDir ?? defaultClaudeConfigDir();
-    const projects = `${configDir.replace(/[\\/]+$/, '')}${configDir.includes('\\') ? '\\' : '/'}projects`;
+    const projects = path.join(configDir, 'projects');
     const revealed = async (session: string) => {
       const paths = target.path ? [target.path] : [];
       const root = await revealedRoot(input.store, session).catch(() => undefined);
@@ -345,7 +345,7 @@ class ContextCut {
     }
     const identity = {
       client: { name: 'claude-code', version: null },
-      reader: { version: 1 },
+      reader: { version: CLAUDE_CODE_READER_VERSION },
       session: session ?? '',
       context: agentId ?? (session !== null ? 'main' : (target.context ?? '')),
     };
@@ -371,7 +371,7 @@ class ContextCut {
     const revealed = target.session !== null ? await revealedRoot(input.store, target.session).catch(() => undefined) : undefined;
     const codexHome = (revealed?.client === 'codex' ? revealed.root : undefined) ?? input.options?.codexHome ?? defaultCodexHome();
     if (target.context === null) {
-      const identity = { client: { name: 'codex', version: null }, reader: { version: 1 }, session: target.session ?? '', context: '' };
+      const identity = { client: { name: 'codex', version: null }, reader: { version: CODEX_READER_VERSION }, session: target.session ?? '', context: '' };
       return { cut: emptyCut(identity, 'not_found'), roots: [codexHome], source: target.source };
     }
     const transcript = target.path ?? (revealed?.client === 'codex' ? revealed.transcript_path : undefined);
@@ -535,9 +535,4 @@ export async function sealSessionRecords(
 function withoutText(record: SessionRecord): SessionRecord {
   if (record.text === null) return record;
   return { ...record, text: null, excerpt: 'off', steps_kept: 0, characters: 0 };
-}
-
-/** The reach a written record holds, for the row's last-cut note. */
-export function reachOf(capture: ContextCapture): Reach | null {
-  return cutSucceeded(capture.record) ? capture.record.reach : null;
 }
