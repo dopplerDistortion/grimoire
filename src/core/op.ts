@@ -1,5 +1,6 @@
 // What every operation in the registry is made of (spec §2.1).
 import { GrimoireError } from '../errors';
+import type { CaptureOptions } from '../capture/end';
 import type { SecretScanner } from '../scanner';
 import type { TrackerStore } from '../tracker';
 import { humanSurface, type Actor, type CallContext } from './context';
@@ -22,6 +23,8 @@ export interface OpEnv {
    * call answers and never fails or delays it.
    */
   readonly requestSync: (commit: string) => void;
+  /** Where attempt-end capture looks for transcripts, and its budgets (spec §14); defaults when absent. */
+  readonly capture?: CaptureOptions;
 }
 
 export interface OpDefinition<I, R> {

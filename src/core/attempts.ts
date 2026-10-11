@@ -13,6 +13,7 @@ import {
   type TrackerView,
   type Verdict,
 } from '../tracker';
+import { afterSeal, cutForEnding, sealCaptures } from './capture';
 import { humanSurface, type Actor } from './context';
 import { fieldConflict, namesIssue, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
 import { define, oneLine, writer, type OpEnv } from './op';
@@ -267,81 +268,117 @@ function bindingActors(record: AttemptRecord): Readonly<Record<string, unknown>>
   ];
 }
 
+/** What ending an attempt will do, checked without writing; or the replay of an ending already made. */
+type EndPlan =
+  | { readonly replay: EndResult }
+  | {
+      readonly replay?: undefined;
+      readonly id: string;
+      /** The attempt named; undefined for an unclaimed close, whose instant attempt the commit opens. */
+      readonly record: AttemptRecord | undefined;
+      /** Undefined only for your own open handle on an issue deleted elsewhere. */
+      readonly issue: IssueRecord | undefined;
+      readonly parentEdit: { record: IssueRecord; body: string; noops: readonly number[] } | null;
+    };
+
 /**
- * Ends an attempt in one commit: `parent_patch`, then the comment and the
- * debrief, then the close, the seal and the outcome (spec §8, Close order).
- * Ending your own open handle always works; on an issue that is no longer
- * open it seals as `superseded`.
+ * Validates an ending against `view` without writing (spec §14, step 1): the
+ * handle, NOT_ASSIGNEE, DEBRIEF_REQUIRED and the `parent_patch`
+ * preconditions. Run once before the cut and again inside the round.
  */
-async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }: OpEnv): Promise<EndResult> {
+function planEnd(view: TrackerView, request: EndRequest, me: string, ctx: OpEnv['ctx'], actor: Actor): EndPlan {
+  const { ending } = request;
+  let id = request.id;
+  let record: AttemptRecord | undefined;
+  if (request.attempt !== undefined) {
+    record = view.attempt(request.attempt);
+    // A fold that kept an id collision apart moved the attempt to `<id>~<hash4>`: the bare id it was claimed by still names it.
+    if (record && bareId(id) === id && bareId(record.issue) === id) id = record.issue;
+    if (!record || record.issue !== id) {
+      view.resolveWrite(id, 'id');
+      throw notAssignee(`${request.attempt} is not an attempt on ${id}`);
+    }
+    if (record.end) {
+      if (replays(record, ending, me)) return { replay: replayOf(record) };
+      const yours = openAttemptsOf(view, id).find((open) => open.assignee === me);
+      if (yours) throw attemptOpen(id, yours, me);
+      throw notAssignee(`${record.id} already ended (${record.end.ended}); nobody holds it now`);
+    }
+    // Only a human surface may release another person's attempt as abandoned (spec §7, §8).
+    const othersAbandoned = ending === 'release-abandoned' && humanSurface(ctx);
+    if (record.start.assignee !== me && !othersAbandoned) {
+      throw notAssignee(
+        ending === 'release-abandoned'
+          ? `${record.id} is held by ${record.start.assignee}; only a human can release another person’s attempt as abandoned, from the dashboard or a terminal`
+          : `${record.id} is held by ${record.start.assignee}, not by you`,
+      );
+    }
+  } else {
+    id = view.resolveWrite(id, 'id');
+    const open = openAttemptsOf(view, id);
+    if (open.length > 0) throw attemptOpen(id, open.find((a) => a.assignee === me) ?? open[0]!, me);
+    const status = view.issue(id)!.status;
+    if (status !== 'open') {
+      const latest = view.attempts(id).at(-1);
+      if (latest && latest.start.opened === 'unclaimed-close' && replays(latest, ending, me)) {
+        return { replay: replayOf(latest) };
+      }
+      throw new GrimoireError('NOT_OPEN', `${id} is ${status}, not open`);
+    }
+  }
+  const issue = view.issue(id);
+  if (actor.kind === 'agent' && (ending === 'done' || ending === 'release') && !request.debrief) {
+    throw new GrimoireError(
+      'DEBRIEF_REQUIRED',
+      `${ending === 'done' ? 'closing as done' : 'releasing'} needs a debrief: {asked, tried, failed, worked, next}`,
+    );
+  }
+  let parentEdit: { record: IssueRecord; body: string; noops: readonly number[] } | null = null;
+  if (request.parentPatch && issue) {
+    if (issue.parent === null) throw invalid({ parent_patch: `${id} has no parent` });
+    const parent = view.issue(issue.parent) ?? view.issue(view.resolveWrite(issue.parent, 'parent_patch'))!;
+    const patched = applyPatch(parent.body, request.parentPatch);
+    parentEdit = { record: parent, body: patched.body, noops: patched.noops };
+  }
+  return { id, record, issue, parentEdit };
+}
+
+/**
+ * Ends an attempt (spec §14 Cut at attempt end; §8, Close order): validates
+ * without writing, cuts the bound contexts, then commits once: `parent_patch`,
+ * the comment and the debrief, the session records, the close, the seal and
+ * the outcome. A replay never cuts again. Ending your own open handle always
+ * works; on an issue that is no longer open it seals as `superseded`.
+ */
+async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
+  const { ctx, tracker, actor, scanner } = env;
   const author = writer(ctx);
   const me = author.email;
   const by = recordedActor(me, actor);
   const { ending } = request;
   const binds = ending !== 'release-abandoned';
   checkDebrief(request.debrief);
-  const write = await tracker.transact({ op: request.op, author, actor }, (draft) => {
-    let id = request.id;
-    let record: AttemptRecord | undefined;
-    if (request.attempt !== undefined) {
-      record = draft.attempt(request.attempt);
-      // A fold that kept an id collision apart moved the attempt to `<id>~<hash4>`: the bare id it was claimed by still names it.
-      if (record && bareId(id) === id && bareId(record.issue) === id) id = record.issue;
-      if (!record || record.issue !== id) {
-        draft.resolveWrite(id, 'id');
-        throw notAssignee(`${request.attempt} is not an attempt on ${id}`);
-      }
-      if (record.end) {
-        if (replays(record, ending, me)) return { result: replayOf(record) };
-        const yours = openAttemptsOf(draft, id).find((open) => open.assignee === me);
-        if (yours) throw attemptOpen(id, yours, me);
-        throw notAssignee(`${record.id} already ended (${record.end.ended}); nobody holds it now`);
-      }
-      // Only a human surface may release another person's attempt as abandoned (spec §7, §8).
-      const othersAbandoned = ending === 'release-abandoned' && humanSurface(ctx);
-      if (record.start.assignee !== me && !othersAbandoned) {
-        throw notAssignee(
-          ending === 'release-abandoned'
-            ? `${record.id} is held by ${record.start.assignee}; only a human can release another person’s attempt as abandoned, from the dashboard or a terminal`
-            : `${record.id} is held by ${record.start.assignee}, not by you`,
-        );
-      }
-    } else {
-      id = draft.resolveWrite(id, 'id');
-      const open = openAttemptsOf(draft, id);
-      if (open.length > 0) throw attemptOpen(id, open.find((a) => a.assignee === me) ?? open[0]!, me);
-      const status = draft.issue(id)!.status;
-      if (status !== 'open') {
-        const latest = draft.attempts(id).at(-1);
-        if (latest && latest.start.opened === 'unclaimed-close' && replays(latest, ending, me)) {
-          return { result: replayOf(latest) };
-        }
-        throw new GrimoireError('NOT_OPEN', `${id} is ${status}, not open`);
-      }
-    }
-    // Undefined only for your own open handle on an issue deleted elsewhere.
-    const issue = draft.issue(id);
-    if (actor.kind === 'agent' && (ending === 'done' || ending === 'release') && !request.debrief) {
-      throw new GrimoireError(
-        'DEBRIEF_REQUIRED',
-        `${ending === 'done' ? 'closing as done' : 'releasing'} needs a debrief: {asked, tried, failed, worked, next}`,
-      );
-    }
-    let parentEdit: { record: IssueRecord; body: string; noops: readonly number[] } | null = null;
-    if (request.parentPatch && issue) {
-      if (issue.parent === null) throw invalid({ parent_patch: `${id} has no parent` });
-      const parent = draft.issue(issue.parent) ?? draft.issue(draft.resolveWrite(issue.parent, 'parent_patch'))!;
-      const patched = applyPatch(parent.body, request.parentPatch);
-      parentEdit = { record: parent, body: patched.body, noops: patched.noops };
-    }
-
+  const view = await tracker.read();
+  const checked = planEnd(view, request, me, ctx, actor);
+  if (checked.replay) return checked.replay;
+  const capture = await cutForEnding(env, view, { issue: checked.id, attempt: checked.record ?? null, op: request.op, binds });
+  let sealed: { handle: string; keys: string[] } | null = null;
+  const write = await tracker.transact({ op: request.op, author, actor }, async (draft) => {
+    sealed = null;
+    const plan = planEnd(draft, request, me, ctx, actor);
+    if (plan.replay) return { result: plan.replay };
+    const { id, issue, parentEdit } = plan;
+    // The attempt the cut was made for: one another clone ended and this round sees open again can't be.
+    const cutFor = checked.record?.id ?? null;
     const now = draft.now.toISOString();
-    record ??= draft.openAttempt(id, {
-      assignee: me,
-      actor: by,
-      opened: 'unclaimed-close',
-      wiki_exposed: actor.chore_exposure !== undefined,
-    });
+    const record =
+      plan.record ??
+      draft.openAttempt(id, {
+        assignee: me,
+        actor: by,
+        opened: 'unclaimed-close',
+        wiki_exposed: actor.chore_exposure !== undefined,
+      });
     const handle = record.id;
     if (parentEdit && parentEdit.body !== parentEdit.record.body) {
       draft.putIssue({ ...parentEdit.record, body: parentEdit.body, updated_at: now });
@@ -352,6 +389,7 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     const debrief = request.debrief
       ? draft.addComment(id, { actor: by, kind: 'debrief', body: renderDebrief(request.debrief, scanner), ...named }).id
       : null;
+    if ((plan.record?.id ?? null) === cutFor) sealed = { handle, keys: await sealCaptures(draft, handle, capture) };
 
     const superseded = !issue || issue.status !== 'open';
     const ended = superseded ? 'superseded' : ending;
@@ -380,6 +418,8 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     };
     return { result, issue: id, ...named };
   });
+  const done = sealed as { handle: string; keys: string[] } | null;
+  if (done && !write.replayed) await afterSeal(env, done.handle, capture, done.keys, write.commit);
   return write.result;
 }
 

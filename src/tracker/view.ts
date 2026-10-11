@@ -49,6 +49,10 @@ import {
   ledgerFile,
   outcomeFile,
   OUTCOMES_DIR,
+  SESSION_KEY_PATTERN,
+  sessionFile,
+  sessionPurgeFile,
+  SESSIONS_DIR,
   SETTINGS_FILE,
   skillVersionFile,
 } from './layout';
@@ -106,6 +110,10 @@ export interface TrackerView {
   ledgerFiles(): Promise<ReadonlyMap<string, Buffer>>;
   /** A skill version's stored text, `knowledge/skill-versions/<version>.md`, or null. */
   skillVersion(version: string): Promise<Buffer | null>;
+  /** One session record of the attempt `handle` (spec §3: `sessions/<session-key>.md`), or null when it has none. */
+  sessionRecord(handle: string, key: string): Promise<Buffer | null>;
+  /** Whether a tombstone (`purges/<handle>/<key>.md`) purged that session record: no write may recreate it (spec §3). */
+  sessionPurged(handle: string, key: string): Promise<boolean>;
   /** The wiki (spec §17): pages, their set-aside sides and the human wiki edits, read on first use. */
   readonly wiki: WikiView;
   /** Quarantine marks and clears (spec §17, §18), read on first use. */
@@ -186,6 +194,12 @@ export interface TrackerDraft extends TrackerView {
   putLedgerFile(id: string, bytes: Buffer): void;
   /** Stores a skill version's text, named by its sha256; one already stored stays as it is. */
   putSkillVersion(version: string, bytes: Buffer): void;
+  /**
+   * Writes one session record of the attempt `handle` (spec §14). The caller
+   * decides whether it may replace the stored one, and never writes one a
+   * tombstone purged (`sessionPurged`).
+   */
+  putSessionRecord(handle: string, key: string, bytes: Buffer): void;
   /** The wiki as this round changes it; page writes regenerate the derived index and log. */
   readonly wiki: WikiDraft;
   /** Quarantine as this round changes it. */
@@ -376,6 +390,16 @@ export class Snapshot implements TrackerView {
     if (!SHA256_NAME.test(version)) return Promise.resolve(null);
     return this.source.fileAt(this.rootTree, skillVersionFile(version));
   }
+
+  async sessionRecord(handle: string, key: string): Promise<Buffer | null> {
+    const oid = this.attempt(handle)?.sessions.get(key);
+    return oid === undefined ? null : this.source.blob(oid);
+  }
+
+  async sessionPurged(handle: string, key: string): Promise<boolean> {
+    if (!ATTEMPT_PATTERN.test(handle) || !SESSION_KEY_PATTERN.test(key)) return false;
+    return (await this.source.entryAt(this.rootTree, sessionPurgeFile(handle, key))) !== null;
+  }
 }
 
 interface StoredComment extends CommentEntry {
@@ -416,6 +440,8 @@ export class Draft implements TrackerDraft {
   private readonly ledgerHere = new Map<string, Buffer>();
   /** Skill versions this round stores, by version id. */
   private readonly versionsHere = new Map<string, Buffer>();
+  /** Session records this round writes, by attempt handle, then session key. */
+  private readonly sessionsHere = new Map<string, Map<string, Buffer>>();
   private commentMs: number | null = null;
   private commentN = 0;
   readonly wiki: WikiDraftState;
@@ -512,7 +538,9 @@ export class Draft implements TrackerDraft {
     const records = this.base.attempts(issue).map((record) => this.withEdits(record));
     for (const [id, opened] of this.opened) {
       if (opened.issue === issue) {
-        records.push(this.withEdits({ id, issue, start: opened.start, end: null, outcome: null, activity: [], setAside: [] }));
+        records.push(
+          this.withEdits({ id, issue, start: opened.start, end: null, outcome: null, activity: [], setAside: [], sessions: new Map() }),
+        );
       }
     }
     return records.sort(byOpening);
@@ -563,6 +591,22 @@ export class Draft implements TrackerDraft {
 
   putSkillVersion(version: string, bytes: Buffer): void {
     this.versionsHere.set(contentName(version, 'skill version'), bytes);
+  }
+
+  async sessionRecord(handle: string, key: string): Promise<Buffer | null> {
+    return this.sessionsHere.get(handle)?.get(key) ?? this.base.sessionRecord(handle, key);
+  }
+
+  sessionPurged(handle: string, key: string): Promise<boolean> {
+    return this.base.sessionPurged(handle, key);
+  }
+
+  putSessionRecord(handle: string, key: string, bytes: Buffer): void {
+    if (!this.attempt(handle)) throw new Error(`no attempt ${handle}`);
+    if (!SESSION_KEY_PATTERN.test(key)) throw new Error(`a session key is a hex hash, not ${JSON.stringify(key)}`);
+    let records = this.sessionsHere.get(handle);
+    if (!records) this.sessionsHere.set(handle, (records = new Map()));
+    records.set(key, bytes);
   }
 
   private openAttemptsOf(issue: string): AttemptRecord[] {
@@ -737,6 +781,10 @@ export class Draft implements TrackerDraft {
     }
     for (const [handle, outcome] of this.outcomes) {
       edits.set(outcomeFile(this.attempt(handle)!.issue, handle), serializeOutcome(outcome));
+    }
+    for (const [handle, records] of this.sessionsHere) {
+      const issue = this.attempt(handle)!.issue;
+      for (const [key, bytes] of records) edits.set(sessionFile(issue, handle, key), bytes);
     }
     for (const [file, edit] of this.wiki.fileEdits()) edits.set(file, edit);
     for (const [file, edit] of this.quarantine.fileEdits()) edits.set(file, edit);
@@ -992,7 +1040,13 @@ export class SnapshotLoader {
         )
       : [];
     setAside.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
-    return { id, issue, start, end, activity, setAside };
+    const sessionsDir = entries.find((e) => e.name === SESSIONS_DIR && e.mode === TREE_MODE);
+    const sessions = new Map<string, string>();
+    for (const entry of sessionsDir ? await this.objects.tree(sessionsDir.oid) : []) {
+      const key = entry.name.replace(/.md$/, '');
+      if (entry.mode !== TREE_MODE && entry.name.endsWith('.md') && SESSION_KEY_PATTERN.test(key)) sessions.set(key, entry.oid);
+    }
+    return { id, issue, start, end, activity, setAside, sessions };
   }
 
   /** The outcome records in one issue's `outcomes/<a>/<b>/<issue>/` directory. */
