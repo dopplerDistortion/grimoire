@@ -1,0 +1,73 @@
+{
+  "client": {
+    "name": "claude-code",
+    "version": "2.1.296"
+  },
+  "reader": {
+    "version": 1
+  },
+  "session": "c90649d0-b4ab-422d-83f0-0869304b2c19",
+  "context": "main",
+  "lines": {
+    "read": 48,
+    "unknown": 0,
+    "malformed": 0
+  },
+  "status": "cut",
+  "notes": [],
+  "window": {
+    "start": {
+      "at": "2026-10-11T03:28:00.183Z",
+      "ref": "6a528882-4182-496e-9e2e-94811b1100f7"
+    },
+    "end": {
+      "at": "2026-10-11T03:28:02.049Z",
+      "ref": "04112ac8-4913-418c-a982-aa6ed83edae2"
+    }
+  },
+  "reach": {
+    "at": "2026-10-11T03:28:02.049Z",
+    "ref": "04112ac8-4913-418c-a982-aa6ed83edae2"
+  },
+  "counts": {
+    "stepsInWindow": 4,
+    "stepsKept": 4,
+    "characters": 687
+  },
+  "steps": [
+    {
+      "kind": "prompt",
+      "text": "Call the mcp__grimoire__show tool with ref gr-4 and reply in one short line.",
+      "at": "2026-10-11T03:28:00.183Z",
+      "ref": "6a528882-4182-496e-9e2e-94811b1100f7"
+    },
+    {
+      "kind": "tool_call",
+      "id": "toolu_01PXHMnGYrAn3jdSZckZizwH",
+      "name": "mcp__grimoire__show",
+      "grimoire": "show",
+      "input": {
+        "ref": "gr-4"
+      },
+      "at": "2026-10-11T03:28:01.165Z",
+      "ref": "a0c3950a-d339-4954-adb1-8c9dd6b4cf7e"
+    },
+    {
+      "kind": "tool_result",
+      "id": "toolu_01PXHMnGYrAn3jdSZckZizwH",
+      "error": false,
+      "text": "{\"tool\":\"show\",\"received_keys\":[\"ref\",\"_grimoire_hint\"],\"hint_received\":true,\"ref\":\"gr-4\"}",
+      "at": "2026-10-11T03:28:01.219Z",
+      "ref": "c40c16b0-c21b-4579-b3e5-b62353580c3e"
+    },
+    {
+      "kind": "assistant",
+      "text": "The `show` call for gr-4 returned its probe echo (keys `ref` and `_grimoire_hint`, hint received).",
+      "at": "2026-10-11T03:28:02.049Z",
+      "ref": "04112ac8-4913-418c-a982-aa6ed83edae2"
+    }
+  ],
+  "callIds": [
+    "toolu_01PXHMnGYrAn3jdSZckZizwH"
+  ]
+}
