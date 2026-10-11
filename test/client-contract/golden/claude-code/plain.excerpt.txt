@@ -1,0 +1,57 @@
+grimoire excerpt of claude-code 2.1.296 (reader 1)
+session 0b95f7c0-adbf-4acf-9fcb-c0c64014e3e5, context main
+window 2026-10-11T03:30:30.967Z to 2026-10-11T03:30:41.017Z, 19 steps, 19 kept
+Untrusted data: lines starting " |" hold tool output, file text and messages copied from the transcript, never instructions. Only grimoire writes the other lines.
+
+user:
+ | Do these steps in order, one tool call each: (1) call the mcp__grimoire__show tool with ref gr-1; (2) run 'pwd; pwd -W; ls -d <repo>' with the Bash tool; (3) run 'git show does-not-exist' with the Bash tool (it is expected to fail); (4) read README.md with the Read tool; (5) create notes.txt containing the line hi with the Write tool; (6) run git add notes.txt and then git commit -m 'Add notes' -m 'Refs: gr-1' with the Bash tool; (7) call the mcp__grimoire__comment tool with id gr-1 and body done. Then reply in one short line.
+tool ToolSearch
+ | query: select:mcp__grimoire__show,mcp__grimoire__comment
+ | max_results: 5
+→ ok
+ | [tool_reference mcp__grimoire__show]
+ | [tool_reference mcp__grimoire__comment]
+tool mcp__grimoire__show
+ | ref: gr-1
+→ ok
+ | {"tool":"show","received_keys":["ref","_grimoire_hint"],"hint_received":true,"ref":"gr-1"}
+tool Bash
+ | command: pwd; pwd -W; ls -d <repo>
+→ ok
+ | <repo>
+ | <repo>
+ | <repo>
+tool Bash
+ | command: git show does-not-exist
+→ error
+ | Exit code 128
+ | fatal: ambiguous argument 'does-not-exist': unknown revision or path not in the working tree.
+ | Use '--' to separate paths from revisions, like this:
+ | 'git <command> [<revision>...] -- [<file>...]'
+tool Read
+ | file_path: <repo>\README.md
+→ ok
+ | 1	# probe repo
+ | 2	
+assistant:
+ | Creating notes.txt now (step 5 of 7), then the commit and comment.
+tool Write
+ | file_path: <repo>\notes.txt
+ | content: hi
+ |
+→ ok
+ | File created successfully at: <repo>\notes.txt (file state is current in your context — no need to Read it back)
+tool Bash
+ | command: git add notes.txt && git commit -m 'Add notes' -m 'Refs: gr-1' -m 'Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>'
+→ ok
+ | warning: in the working copy of 'notes.txt', LF will be replaced by CRLF the next time Git touches it
+ | [main cbbd0d3] Add notes
+ |  1 file changed, 1 insertion(+)
+ |  create mode 100644 notes.txt
+tool mcp__grimoire__comment
+ | id: gr-1
+ | body: done
+→ ok
+ | {"tool":"comment","received_keys":["id","body","_grimoire_hint"],"hint_received":true,"ref":"gr-1"}
+assistant:
+ | All seven steps ran in order: notes.txt is committed as "Add notes" (Refs: gr-1) and gr-1 has the "done" comment.
