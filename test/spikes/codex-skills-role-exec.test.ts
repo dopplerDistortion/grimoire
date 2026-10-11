@@ -83,7 +83,7 @@ const commandExecutions = (lines: RolloutLine[]): CommandExecution[] =>
 
 const sessionMeta = (lines: RolloutLine[]) => lines[0]?.payload as Record<string, unknown> & { cwd: string };
 
-describe('B2: Codex lists skill folders written mid-session from the next turn', () => {
+describe('B2, root created mid-session: a repo with no .agents/ folder when the thread starts', () => {
   const [[, lines]] = [...rollouts('codex/transcripts/skill-stub-read')] as [[string, RolloutLine[]]];
   const [turn1, turn2, turn3] = turns(lines) as [RolloutLine[], RolloutLine[], RolloutLine[]];
 
@@ -91,7 +91,7 @@ describe('B2: Codex lists skill folders written mid-session from the next turn',
     expect(turns(lines)).toHaveLength(3);
   });
 
-  it("turn 1's listing holds no grimoire stub, though the SessionStart hook wrote one before the turn's prompt", () => {
+  it("turn 1's listing holds no grimoire stub", () => {
     const [listing] = skillListings(turn1);
     expect(listing).toBeDefined();
     expect(listing).not.toContain('grimoire-');
@@ -125,6 +125,86 @@ describe('B2: Codex lists skill folders written mid-session from the next turn',
   });
 });
 
+/** The single rollout in a fixture folder. */
+const onlyRollout = (folder: string): RolloutLine[] => [...rollouts(folder).values()][0] as RolloutLine[];
+
+/** The `- grimoire-<name>: …` entry of a listing, or undefined. */
+const entry = (listing: string | undefined, name: string) =>
+  listing?.split('\n').find((line) => line.startsWith(`- grimoire-${name}:`));
+
+describe('B2, root present at thread start: changes reach the next turn once the watcher delivers them', () => {
+  const lines = onlyRollout('codex/transcripts/skill-roots/existing-root');
+  const all = turns(lines);
+  const [turn1, turn2, turn3, turn4, turn5] = all as [RolloutLine[], RolloutLine[], RolloutLine[], RolloutLine[], RolloutLine[]];
+  const hookNote = (ls: RolloutLine[]) => ls.findIndex((l) => isMessage(l, 'developer') && textOf(l).startsWith('GRIM-B2-HOOK-WROTE '));
+
+  it('the session has five turns on one thread, and turn 1 lists the committed grimoire-chores skill', () => {
+    expect(all).toHaveLength(5);
+    expect(entry(skillListings(turn1)[0], 'chores')).toBeDefined();
+  });
+
+  it("Codex builds turn 1's listing before the SessionStart hook runs, so the hook's stub misses turn 1", () => {
+    const listingAt = turn1.findIndex((l) => isMessage(l, 'developer') && textOf(l).includes('<skills_instructions>'));
+    expect(listingAt).toBeGreaterThanOrEqual(0);
+    expect(hookNote(turn1)).toBeGreaterThan(listingAt);
+    expect(entry(skillListings(turn1)[0], 'hook-skill')).toBeUndefined();
+  });
+
+  it('turn 2 lists the hook-written stub and the folder turn 1 wrote', () => {
+    const [listing] = skillListings(turn2);
+    expect(entry(listing, 'hook-skill')).toBeDefined();
+    expect(entry(listing, 'tidewater-ledger')).toContain('settle the tidewater ledger. (file: r1/grimoire-tidewater-ledger/SKILL.md)');
+  });
+
+  it('changes made within 10 s of the previous watcher event wait: no new listing in turns 3 and 4', () => {
+    expect(skillListings(turn3)).toEqual([]);
+    expect(skillListings(turn4)).toEqual([]);
+  });
+
+  it('they are delayed, not dropped: turn 5, 11 s later, lists the turn-2 description edit and the turn-3 folder', () => {
+    const [listing] = skillListings(turn5);
+    expect(entry(listing, 'tidewater-ledger')).toContain('settle the tidewater ledger (v2).');
+    expect(entry(listing, 'late-folder')).toBeDefined();
+    const gap = Date.parse(turn5[0]?.timestamp as string) - Date.parse(turn4.at(-1)?.timestamp as string);
+    expect(gap).toBeGreaterThan(10_000);
+  });
+});
+
+describe('B2, root present at thread start, 11 s between turns: every change is listed in the next turn', () => {
+  const lines = onlyRollout('codex/transcripts/skill-roots/existing-root-wait11000');
+  const [, turn2, turn3, turn4, turn5] = turns(lines) as RolloutLine[][];
+
+  it('turn 2 lists the folder turn 1 wrote, turn 3 the turn-2 description edit, turn 4 the folder turn 3 wrote', () => {
+    expect(entry(skillListings(turn2 as RolloutLine[])[0], 'tidewater-ledger')).toContain('settle the tidewater ledger. (file:');
+    expect(entry(skillListings(turn3 as RolloutLine[])[0], 'tidewater-ledger')).toContain('settle the tidewater ledger (v2).');
+    expect(entry(skillListings(turn4 as RolloutLine[])[0], 'late-folder')).toBeDefined();
+  });
+
+  it('turn 5, with nothing changed, gets no new listing', () => {
+    expect(skillListings(turn5 as RolloutLine[])).toEqual([]);
+  });
+});
+
+describe('B2, root created mid-session, later changes: the new root is listed once and then never re-read', () => {
+  const lines = onlyRollout('codex/transcripts/skill-roots/new-root-late');
+  const all = turns(lines);
+  const [, turn2, turn3, turn4] = all as RolloutLine[][];
+
+  it('turn 2 lists the new root with both stubs', () => {
+    const [listing] = skillListings(turn2 as RolloutLine[]);
+    expect(entry(listing, 'hook-skill')).toBeDefined();
+    expect(entry(listing, 'tidewater-ledger')).toContain('settle the tidewater ledger. (file:');
+  });
+
+  it('neither the turn-2 description edit nor a folder written in turn 3, each followed by an 11 s pause, is ever listed', () => {
+    expect(all).toHaveLength(4);
+    expect(commandExecutions(turn3 as RolloutLine[]).some((c) => c.exit_code === 0)).toBe(true);
+    expect(skillListings(turn3 as RolloutLine[])).toEqual([]);
+    expect(skillListings(turn4 as RolloutLine[])).toEqual([]);
+    expect(skillListings(lines).some((l) => l.includes('(v2)') || l.includes('grimoire-late-folder'))).toBe(false);
+  });
+});
+
 describe('P2 (Codex half, scripted model): the read signal for a stub match', () => {
   const [[, lines]] = [...rollouts('codex/transcripts/skill-stub-read')] as [[string, RolloutLine[]]];
   const turn2 = turns(lines)[1] as RolloutLine[];
@@ -138,6 +218,16 @@ describe('P2 (Codex half, scripted model): the read signal for a stub match', ()
     const [stub, copy] = commandExecutions(turn2);
     expect(stub?.aggregated_output).toContain('Generated by grimoire. Read and follow `.grimoire/skills/tidewater-ledger/SKILL.md`.');
     expect(copy?.aggregated_output).toContain('marker GRIM-B2-COPY-READ');
+  });
+
+  it("parsed_cmd exists only in paginated rollouts: a legacy rollout's shell read is just the exec_command call's cmd (Spike E's fixture)", () => {
+    const legacy = onlyRollout('codex/transcripts/legacy');
+    expect(commandExecutions(legacy)).toEqual([]);
+    expect(JSON.stringify(legacy)).not.toContain('parsed_cmd');
+    const cmds = legacy
+      .filter((l) => l.type === 'response_item' && l.payload.type === 'function_call' && l.payload.name === 'exec_command')
+      .map((l) => (JSON.parse(l.payload.arguments as string) as { cmd: string }).cmd);
+    expect(cmds).toContain('Get-Content .grimoire/skills/probe/SKILL.md');
   });
 });
 
@@ -195,7 +285,7 @@ describe('P5 (role-config side): spawn_agent with the grimoire-chores role and a
     expect(output?.output).toBe('unsupported call: exec_command');
   });
 
-  it('the role cannot disable apply_patch: the child added a file', () => {
+  it('apply_patch stays available to the role thread: the child added a file', () => {
     const call = items(child, 'custom_tool_call').find((p) => p.name === 'apply_patch');
     const output = items(child, 'custom_tool_call_output').find((p) => p.call_id === call?.call_id);
     expect(output?.output).toContain('Success. Updated the following files:\nA chore-wrote.txt');
@@ -217,16 +307,36 @@ describe('P5 (role-config side): spawn_agent with the grimoire-chores role and a
 
 describe('P7 and the runner: `codex exec --json` streams of the spec §16 invocation', () => {
   const types = (name: string) => jsonl<ExecEvent>(`codex/exec-json/runner/${name}`).map((e) => e.type);
+  /** The tool calls and outputs Codex sent the model in the run's last request, paired by call_id. */
+  const toolIo = (name: string) => {
+    const items = jsonl<{ type: string; call_id: string; name?: string; namespace?: string; output?: string }>(`codex/exec-json/runner/${name}`);
+    return items
+      .filter((i) => i.type === 'function_call')
+      .map((call) => ({ name: call.namespace ? `${call.namespace}:${call.name}` : call.name, output: items.find((i) => i.type === 'function_call_output' && i.call_id === call.call_id)?.output }));
+  };
 
-  it('a read-only run without prefer_mxc completes with the schema-shaped answer, and refused shell calls leave no items', () => {
+  it('a read-only run without prefer_mxc completes with the schema-shaped answer and no command_execution item', () => {
     const events = jsonl<ExecEvent>('codex/exec-json/runner/success.jsonl');
     expect(events.map((e) => e.type)).toEqual(['thread.started', 'turn.started', 'item.completed', 'turn.completed']);
     expect(events[2]?.item?.type).toBe('agent_message');
     expect(JSON.parse(events[2]?.item?.text as string)).toEqual({ verdict: 'no_pattern', pairs: ['pair-1'] });
   });
 
-  it('with the shell tool turned off the stream has the same shape', () => {
+  it('in that run both shell calls (a read, then a write) reached Codex and were refused before running: "blocked by policy"', () => {
+    const io = toolIo('success.tool-io.jsonl');
+    expect(io.map((c) => c.name)).toEqual(['exec_command', 'exec_command']);
+    for (const call of io) {
+      expect(call.output).toMatch(/^exec_command failed: CreateProcess \{ message: "Rejected\(/);
+      expect(call.output).toContain('rejected: blocked by policy');
+    }
+  });
+
+  it('with the shell tool turned off the stream has the same shape, and the calls got "unsupported call: exec_command"', () => {
     expect(types('no-shell-tool.jsonl')).toEqual(['thread.started', 'turn.started', 'item.completed', 'turn.completed']);
+    expect(toolIo('no-shell-tool.tool-io.jsonl')).toEqual([
+      { name: 'exec_command', output: 'unsupported call: exec_command' },
+      { name: 'exec_command', output: 'unsupported call: exec_command' },
+    ]);
   });
 
   it('a model API error ends in error then turn.failed, carrying the API error body', () => {
@@ -235,12 +345,58 @@ describe('P7 and the runner: `codex exec --json` streams of the spec §16 invoca
     expect(JSON.parse(events[3]?.error?.message as string)).toMatchObject({ error: { message: 'scripted model-side failure' } });
   });
 
-  it('with no login, Codex retries, falls back to HTTPS and ends in turn.failed with a 401', () => {
+  it('with no login: four WebSocket reconnects (2/5 to 5/5), the HTTPS fallback item, five HTTPS reconnects, an error, then turn.failed with a 401', () => {
     const events = jsonl<ExecEvent>('codex/exec-json/runner/not-logged-in.jsonl');
-    expect(events.at(-1)?.type).toBe('turn.failed');
+    const shape = events.map((e) => {
+      const reconnect = /^Reconnecting\.\.\. (\d)\/5 \(.*url: (wss|https):/.exec(e.message ?? '');
+      if (e.type === 'error' && reconnect) return `reconnect ${reconnect[2]} ${reconnect[1]}`;
+      if (e.item?.type === 'error') return `item error: ${e.item.message?.slice(0, 48)}`;
+      return e.type;
+    });
+    expect(shape).toEqual([
+      'thread.started',
+      'turn.started',
+      'reconnect wss 2',
+      'reconnect wss 3',
+      'reconnect wss 4',
+      'reconnect wss 5',
+      'item error: Falling back from WebSockets to HTTPS transport.',
+      'reconnect https 1',
+      'reconnect https 2',
+      'reconnect https 3',
+      'reconnect https 4',
+      'reconnect https 5',
+      'error',
+      'turn.failed',
+    ]);
     expect(events.at(-1)?.error?.message).toMatch(/^unexpected status 401 Unauthorized/);
-    expect(events.some((e) => e.type === 'error' && /^Reconnecting\.\.\. \d\/5/.test(e.message ?? ''))).toBe(true);
-    expect(events.some((e) => e.item?.type === 'error' && e.item.message?.startsWith('Falling back from WebSockets to HTTPS transport.'))).toBe(true);
-    expect(events.some((e) => e.item?.type === 'agent_message')).toBe(false);
+  });
+});
+
+describe('C4 fallback: the final runner invocation, keeping the user config', () => {
+  const events = jsonl<ExecEvent>('codex/exec-json/runner/fallback-final.jsonl');
+
+  it('completes with the schema-shaped answer even though the stream carries reconnect errors and a fallback error item', () => {
+    expect(events.map((e) => e.type)).toEqual([
+      'thread.started',
+      'turn.started',
+      'error',
+      'error',
+      'error',
+      'error',
+      'item.completed',
+      'item.completed',
+      'turn.completed',
+    ]);
+    expect(events[6]?.item?.message).toMatch(/^Falling back from WebSockets to HTTPS transport\./);
+    expect(JSON.parse(events[7]?.item?.text as string)).toEqual({ verdict: 'no_pattern', pairs: ['pair-1'] });
+  });
+
+  it("the model has no shell, and the user config's MCP server is not there to call", () => {
+    const items = jsonl<{ type: string; call_id: string; name?: string; namespace?: string; output?: string }>(
+      'codex/exec-json/runner/fallback-final.tool-io.jsonl',
+    );
+    const outputs = items.filter((i) => i.type === 'function_call_output').map((i) => i.output);
+    expect(outputs).toEqual(['unsupported call: exec_command', 'unsupported call: mcp__usermcpchore_start']);
   });
 });

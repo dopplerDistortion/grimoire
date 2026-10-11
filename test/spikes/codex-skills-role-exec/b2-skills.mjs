@@ -2,21 +2,49 @@
 // written mid-session, from which turn, and what does a stub match followed by
 // a read of the copy look like in the rollout?
 //
-//   node b2-skills.mjs <scratch-dir> [<ms to wait before turn 3>]
+//   node b2-skills.mjs <scratch-dir> [<variant>]
 //
-// One app-server thread (the TUI's core), three turns, scripted model:
-//   SessionStart hook  writes stub + copy for `hook-skill` (the fast path)
-//   turn 1             a shell command writes stub + copy for `tidewater-ledger`
-//   turn 2             reads the stub, then the copy; rewrites the stub's description
-//   turn 3             says done
+// Variants (each one app-server thread, the TUI's core, scripted model):
+//
+//   new-root (default), new-root-wait11000
+//     No `.agents/` folder when the thread starts.
+//     SessionStart hook  writes stub + copy for `hook-skill` (the fast path)
+//     turn 1             a shell command writes stub + copy for `tidewater-ledger`
+//     turn 2             reads the stub, then the copy; rewrites the stub's description
+//     turn 3             says done (11 s after turn 2 in the -wait11000 variant)
+//
+//   new-root-late
+//     As new-root, but turn 3 starts 11 s after turn 2 and writes stub + copy
+//     for a new folder, `late-folder`, and a turn 4 says done 11 s later.
+//
+//   existing-root, existing-root-wait11000
+//     `.agents/skills/grimoire-chores/` is committed, so the root exists when the
+//     thread starts (the steady state from a repo's second session on). The
+//     hook also prints the time of its write, so the rollout carries it.
+//     SessionStart hook  writes stub + copy for `hook-skill`
+//     turn 1             writes stub + copy for `tidewater-ledger`
+//     turn 2             rewrites the tidewater stub's description in place ("(v2)")
+//     turn 3             writes stub + copy for a new folder, `late-folder`
+//     turn 4             says done
+//     turn 5             says done, always 11 s after turn 4
+//     In the -wait11000 variant every turn after the first starts 11 s after
+//     the previous one ends, so each write is past the watcher's 10 s throttle.
+//
 // Every generated folder is self-ignoring (a `.gitignore` of `*`), as §15 says.
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { appServerTurns, findFiles, git, mkRepo, plan, readRequests, sleep, startMock, writeFile, writeHome } from './kit.mjs';
 
+const VARIANTS = ['new-root', 'new-root-wait11000', 'new-root-late', 'existing-root', 'existing-root-wait11000'];
 const scratch = path.resolve(process.argv[2] ?? '.');
-const waitMs = Number(process.argv[3] ?? 0);
-const R = path.join(scratch, 'runs', waitMs ? `b2-wait${waitMs}` : 'b2');
+const variant = process.argv[3] ?? 'new-root';
+if (!VARIANTS.includes(variant)) throw new Error(`variant must be one of ${VARIANTS.join(', ')}`);
+const existingRoot = variant.startsWith('existing-root');
+const late = variant === 'new-root-late';
+const waitEveryTurn = variant.endsWith('-wait11000');
+/** @type {Record<string, string>} */
+const legacyDirs = { 'new-root': 'b2', 'new-root-wait11000': 'b2-wait11000' };
+const R = path.join(scratch, 'runs', legacyDirs[variant] ?? `b2-${variant}`);
 const W = mkRepo(path.join(R, 'work'));
 const home = path.join(R, 'home');
 
@@ -35,8 +63,17 @@ const copy = (name, description, body) => `---\nname: ${name}\ndescription: ${de
 
 const HOOK_DESC = 'Rotate the hook ledger in this repo. Use when the user asks to rotate, roll or archive the hook ledger.';
 const TIDE_DESC = 'Reconcile the tidewater ledger files in this repo. Use when the user asks to reconcile, balance or settle the tidewater ledger.';
+const LATE_DESC = 'Prune the late folder in this repo. Use when the user asks to prune or trim the late folder.';
+const CHORES_DESC = "Run grimoire's due maintenance chores in an isolated subagent. Use when grimoire's session notice says one is due and the user agrees, or when the user asks.";
 
 writeFile(path.join(W, '.grimoire/config.yml'), 'version: 0.0.0\n');
+if (existingRoot) {
+  // A committed skill, so `.agents/skills/` exists before the thread starts.
+  writeFile(
+    path.join(W, '.agents/skills/grimoire-chores/SKILL.md'),
+    `---\nname: grimoire-chores\ndescription: ${CHORES_DESC}\n---\n\nSpawn the grimoire-chores role.\n`,
+  );
+}
 // The SessionStart hook: a script that writes the hook-skill stub and copy.
 const hookScript = path.join(W, '.codex', 'hook-write.cjs');
 writeFile(
@@ -48,7 +85,9 @@ put('.agents/skills/grimoire-hook-skill/SKILL.md', ${JSON.stringify(stub('hook-s
 put('.agents/skills/grimoire-hook-skill/.gitignore', '*\\n');
 put('.grimoire/skills/hook-skill/SKILL.md', ${JSON.stringify(copy('hook-skill', HOOK_DESC, 'Move ledger/hook.md to ledger/archive/.'))});
 put('.grimoire/skills/hook-skill/.gitignore', '*\\n');
-fs.appendFileSync(p.join(root, '.codex', 'hook-ran.log'), new Date().toISOString() + '\\n');
+const at = new Date().toISOString();
+fs.appendFileSync(p.join(root, '.codex', 'hook-ran.log'), at + '\\n');
+${existingRoot ? "process.stdout.write('GRIM-B2-HOOK-WROTE ' + at + '\\n');" : ''}
 `,
 );
 const hookCmd = `node "${hookScript.replaceAll('\\', '/')}"`;
@@ -64,33 +103,60 @@ writeHome(home, mock.port, { trust: [W] });
 
 /** @param {string} s */
 const ps = (s) => s.replaceAll("'", "''");
-const writeTide = [
-  `New-Item -ItemType Directory -Force .agents/skills/grimoire-tidewater-ledger, .grimoire/skills/tidewater-ledger | Out-Null`,
-  `Set-Content -NoNewline -Path .agents/skills/grimoire-tidewater-ledger/SKILL.md -Value '${ps(stub('tidewater-ledger', TIDE_DESC))}'`,
-  `Set-Content -Path .agents/skills/grimoire-tidewater-ledger/.gitignore -Value '*'`,
-  `Set-Content -NoNewline -Path .grimoire/skills/tidewater-ledger/SKILL.md -Value '${ps(copy('tidewater-ledger', TIDE_DESC, 'Write ledger/tidewater.md with one line: marker GRIM-B2-COPY-READ.'))}'`,
-  `Set-Content -Path .grimoire/skills/tidewater-ledger/.gitignore -Value '*'`,
-].join('; ');
+/**
+ * A PowerShell command writing a self-ignoring stub + copy pair.
+ * @param {string} name
+ * @param {string} description
+ * @param {string} body
+ */
+const writePair = (name, description, body) =>
+  [
+    `New-Item -ItemType Directory -Force .agents/skills/grimoire-${name}, .grimoire/skills/${name} | Out-Null`,
+    `Set-Content -NoNewline -Path .agents/skills/grimoire-${name}/SKILL.md -Value '${ps(stub(name, description))}'`,
+    `Set-Content -Path .agents/skills/grimoire-${name}/.gitignore -Value '*'`,
+    `Set-Content -NoNewline -Path .grimoire/skills/${name}/SKILL.md -Value '${ps(copy(name, description, body))}'`,
+    `Set-Content -Path .grimoire/skills/${name}/.gitignore -Value '*'`,
+  ].join('; ');
+const writeTide = writePair('tidewater-ledger', TIDE_DESC, 'Write ledger/tidewater.md with one line: marker GRIM-B2-COPY-READ.');
 const rewriteStub = `(Get-Content -Raw .agents/skills/grimoire-tidewater-ledger/SKILL.md).Replace('settle the tidewater ledger.', 'settle the tidewater ledger (v2).') | Set-Content -NoNewline .agents/skills/grimoire-tidewater-ledger/SKILL.md`;
 
-const prompts = [
-  `Turn one. ${plan([{ call: 'exec_command', args: { cmd: writeTide } }, { say: 'wrote the tidewater skill files' }])}`,
-  `Please reconcile the tidewater ledger. ${plan([
-    { call: 'exec_command', args: { cmd: 'Get-Content .agents/skills/grimoire-tidewater-ledger/SKILL.md' } },
-    { call: 'exec_command', args: { cmd: 'Get-Content .grimoire/skills/tidewater-ledger/SKILL.md' } },
-    { call: 'exec_command', args: { cmd: "New-Item -ItemType Directory -Force ledger | Out-Null; Set-Content ledger/tidewater.md 'marker GRIM-B2-COPY-READ'" } },
-    { call: 'exec_command', args: { cmd: rewriteStub } },
-    { say: 'reconciled the tidewater ledger' },
-  ])}`,
-  `Turn three. ${plan([{ say: 'turn three done' }])}`,
-];
+const prompts = existingRoot
+  ? [
+      `Turn one. ${plan([{ call: 'exec_command', args: { cmd: writeTide } }, { say: 'wrote the tidewater skill files' }])}`,
+      `Turn two. ${plan([{ call: 'exec_command', args: { cmd: rewriteStub } }, { say: 'rewrote the tidewater description' }])}`,
+      `Turn three. ${plan([
+        { call: 'exec_command', args: { cmd: writePair('late-folder', LATE_DESC, 'Delete late/*.tmp.') } },
+        { say: 'wrote the late-folder skill files' },
+      ])}`,
+      `Turn four. ${plan([{ say: 'turn four done' }])}`,
+      `Turn five. ${plan([{ say: 'turn five done' }])}`,
+    ]
+  : [
+      `Turn one. ${plan([{ call: 'exec_command', args: { cmd: writeTide } }, { say: 'wrote the tidewater skill files' }])}`,
+      `Please reconcile the tidewater ledger. ${plan([
+        { call: 'exec_command', args: { cmd: 'Get-Content .agents/skills/grimoire-tidewater-ledger/SKILL.md' } },
+        { call: 'exec_command', args: { cmd: 'Get-Content .grimoire/skills/tidewater-ledger/SKILL.md' } },
+        { call: 'exec_command', args: { cmd: "New-Item -ItemType Directory -Force ledger | Out-Null; Set-Content ledger/tidewater.md 'marker GRIM-B2-COPY-READ'" } },
+        { call: 'exec_command', args: { cmd: rewriteStub } },
+        { say: 'reconciled the tidewater ledger' },
+      ])}`,
+      late
+        ? `Turn three. ${plan([
+            { call: 'exec_command', args: { cmd: writePair('late-folder', LATE_DESC, 'Delete late/*.tmp.') } },
+            { say: 'wrote the late-folder skill files' },
+          ])}`
+        : `Turn three. ${plan([{ say: 'turn three done' }])}`,
+      ...(late ? [`Turn four. ${plan([{ say: 'turn four done' }])}`] : []),
+    ];
 const { threadId, statuses } = await appServerTurns({
   home,
   cwd: W,
   prompts,
   threadParams: { config: { bypass_hook_trust: true } },
   betweenTurns: async (n) => {
-    if (n === 2 && waitMs) await sleep(waitMs);
+    if (waitEveryTurn && (existingRoot || n === 2)) await sleep(11_000);
+    else if (existingRoot && n === 4) await sleep(11_000);
+    else if (late && n >= 2) await sleep(11_000);
   },
 });
 mock.stop();
@@ -111,11 +177,19 @@ const summary = reqs.map((r, n) => {
   const blocks = skillsText(r.body);
   const all = blocks.join('\n');
   /** @param {string} name */
-  const line = (name) => all.split('\n').find((l) => l.startsWith(`- grimoire-${name}:`)) ?? null;
-  return { n, turn: meta.turn_id ?? null, skillBlocks: blocks.length, hookSkill: line('hook-skill'), tidewater: line('tidewater-ledger') };
+  const line = (name) => all.split('\n').findLast((l) => l.startsWith(`- grimoire-${name}:`)) ?? null;
+  return {
+    n,
+    at: r.at,
+    turn: meta.turn_id ?? null,
+    skillBlocks: blocks.length,
+    hookSkill: line('hook-skill'),
+    tidewater: line('tidewater-ledger'),
+    lateFolder: line('late-folder'),
+  };
 });
-writeFileSync(path.join(R, 'summary.json'), JSON.stringify({ threadId, statuses, summary }, null, 2));
-console.log(JSON.stringify({ threadId, statuses }, null, 1));
+writeFileSync(path.join(R, 'summary.json'), JSON.stringify({ variant, threadId, statuses, summary }, null, 2));
+console.log(JSON.stringify({ variant, threadId, statuses }, null, 1));
 for (const s of summary) console.log(JSON.stringify(s));
 for (const f of findFiles(path.join(home, 'sessions'))) console.log('rollout', f);
-console.log('hook ran:', readFileSync(path.join(W, '.codex', 'hook-ran.log'), 'utf8').trim().split('\n').length, 'time(s)');
+console.log('hook ran at:', readFileSync(path.join(W, '.codex', 'hook-ran.log'), 'utf8').trim().split('\n').join(', '));

@@ -5,19 +5,35 @@
 // particular the package name `@goksening/grimoire`, which contains the user
 // name, is kept. With --mcp-log=<n>, the input is stub-mcp.mjs's log and the
 // output is a c2s.jsonl: the messages Codex sent to the n-th server process it
-// started (0-based, in order of first message), one per line.
+// started (0-based, in order of first message), one per line. With --tool-io,
+// the input is the stand-in's requests.jsonl and the output is the tool calls
+// and their outputs that Codex sent the model in its last POST /responses
+// (input items of type function_call, function_call_output, custom_tool_call
+// and custom_tool_call_output), one per line.
 //
-//   node sanitize.mjs <user-name> <time-zone> <src> <dst> [--mcp-log=<n>]
+//   node sanitize.mjs <user-name> <time-zone> <src> <dst> [--mcp-log=<n> | --tool-io]
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const [userName = '', timeZone = '', src = '', dst = '', mode] = process.argv.slice(2);
 if (!userName || !timeZone || !src || !dst) {
-  console.error('usage: node sanitize.mjs <user-name> <time-zone> <src> <dst> [--mcp-log=<n>]');
+  console.error('usage: node sanitize.mjs <user-name> <time-zone> <src> <dst> [--mcp-log=<n> | --tool-io]');
   process.exit(2);
 }
 let text = readFileSync(src, 'utf8');
-if (mode?.startsWith('--mcp-log=')) {
+if (mode === '--tool-io') {
+  /** @type {{ method: string, url: string, body: { input?: { type: string }[] } }[]} */
+  const requests = text
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const last = requests.filter((r) => r.method === 'POST' && /\/responses(\?|$)/.test(r.url)).at(-1);
+  const kinds = ['function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output'];
+  text = (last?.body.input ?? [])
+    .filter((item) => kinds.includes(item.type))
+    .map((item) => `${JSON.stringify(item)}\n`)
+    .join('');
+} else if (mode?.startsWith('--mcp-log=')) {
   /** @type {{ pid: number, msg: unknown }[]} */
   const entries = text
     .split('\n')

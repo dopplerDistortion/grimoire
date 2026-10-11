@@ -31,4 +31,7 @@ directory outside any git repo.
 
 `runner/`: the same invocation with a strict `{verdict, pairs}` schema, as
 success, with the shell tool off, a model API error, and a real not-logged-in
-failure with no stand-in. See `runner/README.md`.
+failure with no stand-in. Also the final runner invocation of the C4 fallback
+(user config kept, its additions switched off by `-c`), and, beside each
+scripted run, the tool calls and outputs Codex sent the model. See
+`runner/README.md`.

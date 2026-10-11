@@ -64,7 +64,7 @@ files in `test/spikes/codex-skills-role-exec.test.ts`. Same client, OS and date
 as spike E, also **captured under a scripted model** (the kit's own stand-in,
 `scripted-responses.mjs`), except `exec-json/runner/not-logged-in.jsonl`, which
 had no stand-in at all. Spike F's files sit in their own subfolders
-(`exec-json/runner/`, `transcripts/skill-stub-read/`, `transcripts/chore-role/`,
-`mcp/chore-role/`), each with a README giving its run, provenance and
-sanitizing: the user name became `USER` and the time zone `Etc/UTC`, with the
-package name `@goksening/grimoire` kept.
+(`exec-json/runner/`, `transcripts/skill-stub-read/`, `transcripts/skill-roots/`,
+`transcripts/chore-role/`, `mcp/chore-role/`), each with a README giving its
+run, provenance and sanitizing: the user name became `USER` and the time zone
+`Etc/UTC`, with the package name `@goksening/grimoire` kept.

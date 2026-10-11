@@ -44,5 +44,5 @@ config, its tool list, the session metadata) is the real Codex.
 ## Sanitizing
 
 `test/spikes/codex-skills-role-exec/sanitize.mjs`: the Windows user name became
-`USER` and the time zone `Europe/Istanbul` became `Etc/UTC`, everywhere they
+`USER` and the machine's IANA time zone became `Etc/UTC`, everywhere they
 occurred. Nothing else changed.

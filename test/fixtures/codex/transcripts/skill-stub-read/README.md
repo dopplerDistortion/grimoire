@@ -12,7 +12,9 @@ What happened, in order:
    `thread/start {config: {bypass_hook_trust: true}}`). It wrote the stub
    `.agents/skills/grimoire-hook-skill/SKILL.md` and the copy
    `.grimoire/skills/hook-skill/SKILL.md`, each folder with a `.gitignore` of
-   `*`. The hook ran after Codex built turn 1's skills listing.
+   `*`. The hook ran after Codex built turn 1's skills listing (its own log
+   said so; this rollout has no hook line, but the `../skill-roots/` rollouts
+   record the hook's note after the listing).
 2. **Turn 1:** a shell command wrote the stub and copy for `tidewater-ledger` the
    same way. Turn 1's listing (the first `<skills_instructions>` developer
    message) has neither stub.
@@ -25,6 +27,8 @@ What happened, in order:
    `ledger/tidewater.md`, and rewrote the stub's description in place (adding
    "(v2)").
 4. **Turn 3:** no new listing; the "(v2)" description never reached the model.
+   The repo had no `.agents/` folder when the thread started, so Codex never
+   watched the root the hook created (see `../skill-roots/` and the findings).
 
 Each shell read appears as an `event_msg` `item_completed`
 `CommandExecution` whose `parsed_cmd` is `[{type: "read", cmd, name, path}]`,
@@ -44,11 +48,12 @@ a `PLAN:` in the prompt, not model judgement. The stub body, the listing, the
   danger-full-access`, default (paginated) history.
 - **OS:** Windows 11 Pro 10.0.26200, Node 24.21.0, PowerShell 5.1 as Codex's
   shell. Captured 2026-10-11.
-- **Script:** `test/spikes/codex-skills-role-exec/b2-skills.mjs`.
+- **Script:** `test/spikes/codex-skills-role-exec/b2-skills.mjs`, variant
+  `new-root` (the default).
 
 ## Sanitizing
 
 `test/spikes/codex-skills-role-exec/sanitize.mjs`: the Windows user name became
-`USER` and the time zone `Europe/Istanbul` became `Etc/UTC`, everywhere they
+`USER` and the machine's IANA time zone became `Etc/UTC`, everywhere they
 occurred. The package name `@goksening/grimoire` in the stub body is kept.
 Nothing else changed.
