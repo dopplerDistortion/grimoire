@@ -48,6 +48,15 @@ type Attempt =
 /** How many transactions an update may lose (see `Attempt`) before it gives up. */
 const ATTEMPTS = 3;
 
+/**
+ * How long a killed git may take to exit before the lock it may have left is
+ * given up on (later updates meet it as any other ref lock: BUSY, then
+ * `stale_lock` once it is ~30 s old). A kill on Windows starts `taskkill`,
+ * which on a loaded machine can take a second or more. Waiting costs no BUSY
+ * its time: the update that killed the git doesn't wait for it.
+ */
+const EXIT_AFTER_KILL_MS = 5_000;
+
 export interface RefUpdaterOptions {
   /** The repository's `packedRefsStamp`; by default, taken of the common dir's packed-refs. */
   readonly packedRefs?: () => Promise<string>;
@@ -88,7 +97,7 @@ export interface RefUpdaterOptions {
  * either does the update fail with a plain Error, which promises nothing
  * (ADR 0012). A killed git leaves its ref lock behind (a kill skips git's
  * own clean-up), which would refuse every later update; once that git has
- * exited (it gets the settle time), the lock it left is removed. The update
+ * exited (it gets EXIT_AFTER_KILL_MS), the lock it left is removed. The update
  * that killed it doesn't wait for that, so its BUSY comes on time; the next
  * update waits for it (a stall time at most, or BUSY), and never starts a
  * transaction before it is done: the lock is told apart by its content, which
@@ -248,7 +257,8 @@ export class RefUpdater {
   private async releaseLock(session: Session, ref: string, next: string): Promise<void> {
     if (!session.exited) {
       if (session.killedAt === null) return;
-      if (!(await exitWithin(session, session.killedAt + stallOf(this.settle) - Date.now()))) return;
+      const grace = Math.max(stallOf(this.settle), EXIT_AFTER_KILL_MS);
+      if (!(await exitWithin(session, session.killedAt + grace - Date.now()))) return;
     }
     const lock = await this.lockPath(ref);
     const ours =

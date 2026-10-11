@@ -493,6 +493,15 @@ lines(git.stdout, (line) => {
 });
 `;
 
+/**
+ * DIES_HOLDING_THE_LOCK, and once it is killed its exit is seen only 3 s
+ * later: a process that is no one's child holds its stdout open until then
+ * (its pid goes to the file given second).
+ */
+const DIES_HOLDING_THE_LOCK_SLOW_TO_EXIT = `${DIES_HOLDING_THE_LOCK}
+spawn(process.execPath, ['-e', ${JSON.stringify(KEEPER.replace('setInterval(() => {}, 1 << 30)', 'setTimeout(() => {}, 3000)'))}, own[1]], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
+`;
+
 /** An object reader that answers requests for refs, and stops answering at the first request for an object id. */
 const ANSWERS_ONLY_REFS = `${RELAY}
 let stopped = false;
@@ -675,8 +684,8 @@ describe('a local git that stops answering', () => {
       expect(await trackerTip(world.a)).toBe(before);
     } finally {
       wedged.restore();
-      await store.close();
       await killPidsIn(pidFile);
+      await store.close();
     }
   });
 
@@ -756,6 +765,32 @@ describe('a local git that stops answering', () => {
       }
     },
   );
+
+  test('a ref updater killed holding the ref’s lock whose exit takes seconds: the lock still goes once it exits, and a later write lands', async ({
+    world,
+    grimoire,
+  }) => {
+    void grimoire; // initializes the tracker
+    const before = (await trackerTip(world.a))!;
+    const pidFile = path.join(world.root, 'keeper-pids');
+    const dies = replaceGits({ command: /update-ref --stdin/, script: DIES_HOLDING_THE_LOCK_SLOW_TO_EXIT, args: ['withhold', pidFile], times: 1 });
+    const store = await openTracker(world.a.dir, { budgetMs: BUDGET_MS, gitStallMs: STALL_MS });
+    try {
+      // BUSY while its exit is awaited, or landed if it came in time; then the same write lands, or replays.
+      await store.transact(keyWrite('slow death'), () => ({ result: null })).catch((error: unknown) => {
+        expect(error).toMatchObject({ code: 'BUSY', retryable: true });
+      });
+      const write = await store.transact(keyWrite('slow death'), () => ({ result: null }));
+
+      expect(write.commit ?? (await trackerTip(world.a))).toBe(await trackerTip(world.a));
+      expect(await world.a.git(['rev-list', '--count', `${before}..${TRACKER_REF}`])).toBe('1');
+      await expect(stat(path.join(world.a.dir, '.git', `${TRACKER_REF}.lock`))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      dies.restore();
+      await killPidsIn(pidFile);
+      await store.close();
+    }
+  });
 
   test('a ref updater killed holding the ref’s lock with under a second of the budget left after it: the write still lands on a new git', async ({
     world,
