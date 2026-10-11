@@ -9,8 +9,10 @@ export const ID_PREFIX = 'gr-';
 export const ID_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';
 export const ID_LENGTH = 5;
 export const MAX_ID_LENGTH = 8;
-/** How grimoire finds an id inside any text (a link, a sentence), with its collision suffix when it has one. */
-export const ID_PATTERN = /\bgr-[0-9a-hjkmnp-tv-z]{5,8}(?:~[0-9a-f]{4})?\b/g;
+/** How grimoire finds an id inside any text (a link, a sentence): the detection regex of spec §3. */
+export const ID_PATTERN = /\bgr-[0-9a-hjkmnp-tv-z]{5,8}\b/g;
+/** What a read finds in text: an id with its collision suffix when it has one, so a link can name one side of a collision. */
+const READ_REF_PATTERN = /\bgr-[0-9a-hjkmnp-tv-z]{5,8}(?:~[0-9a-f]{4})?\b/g;
 /** `~<hash4>`: which side of a cross-clone id collision a record is. */
 const COLLISION_SUFFIX = /~[0-9a-f]{4}$/;
 /** Reads resolve a prefix only from this many suffix characters on. */
@@ -92,7 +94,9 @@ function liveRecord(input: string, id: string, ids: ReadonlySet<string>, retired
 /**
  * The live id a write names among `ids`. A bare id whose records a
  * cross-clone collision kept apart gives AMBIGUOUS_REF, until `resolve`
- * writes its forwarding record.
+ * writes its forwarding record; with no forwarding record and only one of
+ * them left, it names that one, as for reads. Writes store and act on the id
+ * this returns.
  */
 export function resolveWriteRef(input: string, ids: ReadonlySet<string>, field: string, retired = NONE_RETIRED): string {
   return liveRecord(input, parseWriteRef(input, field), ids, retired, field);
@@ -105,7 +109,7 @@ export function resolveWriteRef(input: string, ids: ReadonlySet<string>, field: 
 export function resolveReadRef(input: string, ids: ReadonlySet<string>, field: string, retired = NONE_RETIRED): string {
   const token = bareSuffix(input, field);
   if (token === null) {
-    const found = [...new Set(input.toLowerCase().match(ID_PATTERN) ?? [])];
+    const found = [...new Set(input.toLowerCase().match(READ_REF_PATTERN) ?? [])];
     if (found.length === 0) {
       throw invalid({ [field]: `"${input}" names no issue; use an id like gr-${'x'.repeat(ID_LENGTH)} or a prefix of at least ${MIN_PREFIX} characters` });
     }

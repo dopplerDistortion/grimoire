@@ -69,7 +69,11 @@ export interface TrackerView {
    * or text holding one full id. Throws INVALID, NOT_FOUND or AMBIGUOUS_REF.
    */
   resolveRead(ref: string, field?: string): string;
-  /** The live issue a write names by its full id. Throws INVALID or NOT_FOUND. */
+  /**
+   * The live issue a write names by its full id: act on and store the id it
+   * returns (a bare id can name the one side left of a collision). Throws
+   * INVALID, NOT_FOUND or AMBIGUOUS_REF.
+   */
   resolveWrite(ref: string, field?: string): string;
   /** `link_base` + the record's path, or the bare id when no `link_base` is set (spec §3, Links). */
   link(id: string): string;

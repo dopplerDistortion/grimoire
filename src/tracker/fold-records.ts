@@ -78,6 +78,14 @@ export function foldIssue(baseBytes: Buffer | null, aBytes: Buffer, bBytes: Buff
   const baseValues: Record<string, unknown> = {};
   let setAsideAt = '';
 
+  /** Records a field the fold settled for one side: what stands, and the other side's value set aside. */
+  function setAside(field: keyof IssueRecord, value: unknown, aWins: boolean): void {
+    kept[field] = value;
+    theirs[field] = aWins ? b[field] : a[field];
+    baseValues[field] = base ? base[field] : null;
+    setAsideAt = (aWins ? b : a).updated_at;
+  }
+
   /** A scalar: one-sided change wins; otherwise the later side, and the loser is set aside when `recorded`. */
   function scalar<K extends keyof IssueRecord>(field: K, recorded: boolean): IssueRecord[K] {
     const x: IssueRecord[K] = a[field];
@@ -86,19 +94,21 @@ export function foldIssue(baseBytes: Buffer | null, aBytes: Buffer, bBytes: Buff
     if (base && equal(x, base[field])) return y;
     if (base && equal(y, base[field])) return x;
     const aWins = pickSide(a, b, x, y) === 'a';
-    if (recorded) {
-      kept[field] = aWins ? x : y;
-      theirs[field] = aWins ? y : x;
-      baseValues[field] = base ? base[field] : null;
-      setAsideAt = (aWins ? b : a).updated_at;
-    }
+    if (recorded) setAside(field, aWins ? x : y, aWins);
     return aWins ? x : y;
   }
 
+  // The body merges hunk by hunk; where hunks overlap, the side a scalar would pick keeps its change.
   let body: string;
-  const text = mergeText(base?.body ?? '', a.body, b.body);
-  if (text.clean) body = text.text;
-  else body = scalar('body', true);
+  if (base) {
+    const bodyWinner = pickSide(a, b, a.body, b.body);
+    const text = mergeText(base.body, a.body, b.body, bodyWinner);
+    body = text.text;
+    if (text.conflicted) setAside('body', body, bodyWinner === 'a');
+  } else {
+    // Both sides added the record: with no base, the bodies are two values, not hunks to interleave.
+    body = scalar('body', true);
+  }
 
   const merged: IssueRecord = {
     id: scalar('id', false),
@@ -143,37 +153,55 @@ export function foldEnd(a: Buffer, b: Buffer): [Buffer, Buffer] {
   return aWins ? [a, b] : [b, a];
 }
 
-/** Two outcome records: a human beats grimoire, then the later time, then fail, then the lower bytes. */
-export function foldOutcome(a: Buffer, b: Buffer): Buffer {
+/**
+ * Two outcome records: a human beats grimoire, then the later time, then
+ * fail, then the lower bytes. When both clones sealed the attempt differently
+ * (`ends`: each side's `end.md`), grimoire's outcome derived from the end that
+ * stood comes before the time, so the outcome never contradicts the end.
+ */
+export function foldOutcome(a: Buffer, b: Buffer, ends: readonly [Buffer, Buffer] | null): Buffer {
   const [x, y] = [parseOutcome(a), parseOutcome(b)];
+  const ending = ends ? parseEnd(foldEnd(...ends)[0]).ended : null;
   const human = (o: { set_by: string }) => (o.set_by.startsWith('human:') ? 1 : 0);
+  const sealed = (o: { set_by: string; reason: string }) => (o.set_by === 'grimoire' && o.reason === ending ? 1 : 0);
   const fail = (o: { verdict: string }) => (o.verdict === 'fail' ? 1 : 0);
-  const order = human(x) - human(y) || compareTimes(x.at, y.at) || fail(x) - fail(y) || Buffer.compare(b, a);
+  const order =
+    human(x) - human(y) || sealed(x) - sealed(y) || compareTimes(x.at, y.at) || fail(x) - fail(y) || Buffer.compare(b, a);
   return order >= 0 ? a : b;
 }
 
 /**
- * How far a session record reaches (spec §14): the `reach` frontmatter value,
- * `{at, n}` (the last step's time, then its line ordinal), or null.
+ * How far a session record reaches (spec §14): its `reach` frontmatter value,
+ * `{at, ref}` as capture records a cut's last step (`StepOrigin`): the step's
+ * time, and its ref, a Claude Code line uuid or a Codex ordinal. A facts-only
+ * record writes its event count as the ref. Null when the record has none.
  */
-function reachOf(bytes: Buffer): { at: string; n: number } | null {
+function reachOf(bytes: Buffer): { at: string; ordinal: bigint | null } | null {
   const text = bytes.toString('utf8');
   const close = text.startsWith('---\n') ? text.indexOf('\n---\n', 3) : -1;
   for (const { key, raw } of close < 0 ? [] : parseLines(text.slice(4, close))) {
     if (key !== 'reach') continue;
-    const value = lineValue(raw) as { at?: unknown; n?: unknown } | null;
+    const value = lineValue(raw) as { at?: unknown; ref?: unknown } | null;
     if (value && typeof value === 'object' && typeof value.at === 'string') {
-      return { at: value.at, n: typeof value.n === 'number' ? value.n : 0 };
+      const ref = typeof value.ref === 'number' ? String(value.ref) : value.ref;
+      return { at: value.at, ordinal: typeof ref === 'string' && /^\d+$/.test(ref) ? BigInt(ref) : null };
     }
   }
   return null;
 }
 
-/** Two versions of one session record: the further reach wins, then the lower bytes. */
+/**
+ * Two versions of one session record: the further reach wins (the later
+ * time, then the higher ordinal when both refs are ordinals; line uuids don't
+ * order), then the lower bytes.
+ */
 export function foldSession(a: Buffer, b: Buffer): Buffer {
   const [x, y] = [reachOf(a), reachOf(b)];
+  const ordinals = (p: bigint | null, q: bigint | null) => (p === null || q === null || p === q ? 0 : p > q ? 1 : -1);
   const order =
-    (x ? 1 : 0) - (y ? 1 : 0) || (x && y ? compareTimes(x.at, y.at) || x.n - y.n : 0) || Buffer.compare(b, a);
+    (x ? 1 : 0) - (y ? 1 : 0) ||
+    (x && y ? compareTimes(x.at, y.at) || ordinals(x.ordinal, y.ordinal) : 0) ||
+    Buffer.compare(b, a);
   return order >= 0 ? a : b;
 }
 

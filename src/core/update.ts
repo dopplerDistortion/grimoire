@@ -161,10 +161,10 @@ export const update = define({
         if (target === current.parent) noops.push({ field: 'parent', reason: 'unchanged' });
         else nextParent = target;
       }
-      const blockersAdded = blockersAdd.map((blocker, i) => draft.resolveWrite(blocker, `blocked_by_add[${i}]`));
+      const blockers = blockersAdd.map((blocker, i) => draft.resolveWrite(blocker, `blocked_by_add[${i}]`));
       const blockedBy = applyDeltas(
         current.blocked_by,
-        blockersAdded,
+        blockers,
         blockersRemove,
         { add: 'blocked_by_add', remove: 'blocked_by_remove' },
         noops,

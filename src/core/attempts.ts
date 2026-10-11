@@ -285,8 +285,8 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     let record: AttemptRecord | undefined;
     if (request.attempt !== undefined) {
       record = draft.attempt(request.attempt);
-      // A bare id may name one side of a collision (its forwarding record, or the only side left).
-      if (record && record.issue !== id && bareId(record.issue) === id && resolvesTo(draft, id, record.issue)) id = record.issue;
+      // A fold that kept an id collision apart moved the attempt to `<id>~<hash4>`: the bare id it was claimed by still names it.
+      if (record && bareId(id) === id && bareId(record.issue) === id) id = record.issue;
       if (!record || record.issue !== id) {
         draft.resolveWrite(id, 'id');
         throw notAssignee(`${request.attempt} is not an attempt on ${id}`);
@@ -330,10 +330,9 @@ async function endAttempt(request: EndRequest, { ctx, tracker, actor, scanner }:
     let parentEdit: { record: IssueRecord; body: string; noops: readonly number[] } | null = null;
     if (request.parentPatch && issue) {
       if (issue.parent === null) throw invalid({ parent_patch: `${id} has no parent` });
-      const parent = draft.issue(issue.parent);
-      if (!parent) draft.resolveWrite(issue.parent, 'parent_patch');
-      const patched = applyPatch(parent!.body, request.parentPatch);
-      parentEdit = { record: parent!, body: patched.body, noops: patched.noops };
+      const parent = draft.issue(issue.parent) ?? draft.issue(draft.resolveWrite(issue.parent, 'parent_patch'))!;
+      const patched = applyPatch(parent.body, request.parentPatch);
+      parentEdit = { record: parent, body: patched.body, noops: patched.noops };
     }
 
     const now = draft.now.toISOString();
@@ -423,15 +422,6 @@ export function sealOpenAttempt(draft: TrackerDraft, handle: string, seal: Seal)
   const verdict = VERDICT[seal.ended]!;
   draft.putOutcome(handle, { verdict, reason: seal.ended, set_by: 'grimoire' });
   return verdict;
-}
-
-/** Whether the write ref `ref` names the live record `id` in this view. */
-function resolvesTo(view: TrackerView, ref: string, id: string): boolean {
-  try {
-    return view.resolveWrite(ref, 'id') === id;
-  } catch {
-    return false;
-  }
 }
 
 export const close = define({
