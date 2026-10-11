@@ -5,12 +5,13 @@ import { VERSION } from '../version';
 import { zeroOid } from '../git/objects';
 import { locateRepo, type RepoLocation } from '../git/repo';
 import { runGit } from '../git/run';
-import { randomIdSuffix } from './ids';
+import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
 import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, remoteTrackerRef, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
-import { checkTrackerMarker, serializeMarker, V1_MARKER } from './marker';
-import { BoundedMap, TrackerObjects } from './objects';
+import { foldCommits } from './fold';
+import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
+import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
 import { Draft, SnapshotLoader, type Snapshot, type TrackerDraft, type TrackerView } from './view';
 
 export interface Person {
@@ -85,6 +86,12 @@ export interface TrackerStore {
    * the root commit.
    */
   initialize(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ root: string; created: boolean }>;
+  /**
+   * Commits the fold on its own (`Grimoire-Op: fold`) when the local and the
+   * remote-tracking tracker diverged: the merged view, with both tips as
+   * parents. Returns null when there was nothing to fold.
+   */
+  fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }>;
   /** Stops the store's git process. */
   close(): Promise<void>;
 }
@@ -127,7 +134,7 @@ class GitTrackerStore implements TrackerStore {
   private readonly objects: TrackerObjects;
   private readonly loader: SnapshotLoader;
   private readonly snapshots = new BoundedMap<string, Snapshot>(16);
-  private readonly ancestry = new BoundedMap<string, boolean>(256);
+  private readonly bases = new BoundedMap<string, readonly string[]>(256);
   private readonly turnstile = new Turnstile();
   private readonly fairness: FairnessLock;
   private readonly clock: () => Date;
@@ -167,6 +174,7 @@ class GitTrackerStore implements TrackerStore {
   async transact<R>(
     spec: WriteSpec,
     body: (draft: TrackerDraft) => WriteOutcome<R> | Promise<WriteOutcome<R>>,
+    options: { foldOnly?: boolean } = {},
   ): Promise<WriteResult<R>> {
     const deadline = Date.now() + this.budgetMs;
     this.objects.warm();
@@ -174,7 +182,7 @@ class GitTrackerStore implements TrackerStore {
       const lock = await this.fairness.acquire(deadline);
       if (!lock) throw busy('another grimoire write held the tracker for the whole write budget');
       try {
-        return await this.rounds(spec, body, deadline);
+        return await this.rounds(spec, body, deadline, options);
       } finally {
         await lock.release();
       }
@@ -183,17 +191,23 @@ class GitTrackerStore implements TrackerStore {
     return turn.value;
   }
 
+  async fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }> {
+    const write = await this.transact({ ...spec, op: 'fold' }, () => ({ result: null }), { foldOnly: true });
+    return { commit: write.commit };
+  }
+
   private async rounds<R>(
     spec: WriteSpec,
     body: (draft: TrackerDraft) => WriteOutcome<R> | Promise<WriteOutcome<R>>,
     deadline: number,
+    options: { foldOnly?: boolean },
   ): Promise<WriteResult<R>> {
     for (;;) {
       const tips = await this.resolveTips();
       const snapshot = await this.snapshotOf(tips);
       const now = this.clock();
       if (spec.idempotency) {
-        const replay = await lookupKey(this.objects, snapshot.rootTree, spec.op, spec.idempotency, now);
+        const replay = await lookupKey(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, now);
         if (replay) return { result: replay.result as R, commit: null, replayed: true };
       }
       checkTrackerMarker(snapshot.marker);
@@ -201,16 +215,19 @@ class GitTrackerStore implements TrackerStore {
       const outcome = await body(draft);
       const edits = draft.edits();
       if (spec.idempotency) {
-        const recorded = await keyEdits(this.objects, snapshot.rootTree, spec.op, spec.idempotency, outcome.result, now);
+        const recorded = await keyEdits(snapshot.source, snapshot.rootTree, spec.op, spec.idempotency, outcome.result, now);
         for (const [file, content] of recorded) edits.set(file, content);
       }
-      if (edits.size === 0) return { result: outcome.result, commit: null, replayed: false };
+      const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
+      if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false };
 
+      // The fold's merged tree becomes real only now, in the write that commits it.
+      if (snapshot.virtual) await snapshot.virtual.persist(snapshot.rootTree);
       const tree = (await this.objects.editTree(snapshot.rootTree, edits)) ?? (await this.objects.emptyTree());
       const message = this.message(spec, outcome.issue, outcome.attempt);
       const commit = await this.objects.writeCommit({
         tree,
-        parents: [snapshot.tip],
+        parents: snapshot.parents,
         author: { ...spec.author, when: now },
         committer: { ...spec.author, when: now },
         message,
@@ -310,12 +327,33 @@ class GitTrackerStore implements TrackerStore {
 
   /**
    * The snapshot a read shows: the local tip, or the remote-tracking tip when
-   * it is the only one or strictly ahead. Diverged tips are folded by the fold
-   * slice (GOK-138); until then the local tip is shown.
+   * it is the only one or strictly ahead, or, when the two diverged, their
+   * fold, computed in memory with `merge-base` and object reads only. Memoized
+   * by the tip pair.
    */
-  private async snapshotOf(tips: Tips): Promise<Snapshot> {
-    const tip = await this.viewTip(tips);
-    if (!tip) throw notSynced(this.location.root);
+  private async snapshotOf({ local, remote }: Tips): Promise<Snapshot> {
+    if (!local && !remote) throw notSynced(this.location.root);
+    if (!local || !remote || local === remote) return this.snapshotAt(local ?? remote!);
+    // One merge-base answers all three cases: remote ahead, local ahead, or diverged (and the fold's bases).
+    const bases = await this.mergeBases([local, remote]);
+    if (bases.length === 1 && bases[0] === local) return this.snapshotAt(remote);
+    if (bases.length === 1 && bases[0] === remote) return this.snapshotAt(local);
+    const key = `${local}+${remote}`;
+    let snapshot = this.snapshots.get(key);
+    if (!snapshot) {
+      // A remote this release can't run against gives UPGRADE_REQUIRED, with no fold.
+      const { tree } = await this.objects.commit(remote);
+      const marker = await this.objects.fileAt(tree, FORMAT_FILE);
+      checkTrackerMarker(marker ? parseMarker(marker.toString('utf8')) : null);
+      const virtual = new VirtualObjects(this.objects);
+      const merged = await foldCommits(virtual, (commits) => this.mergeBases(commits), local, remote);
+      snapshot = await this.loader.folded(local, remote, merged, virtual);
+      this.snapshots.set(key, snapshot);
+    }
+    return snapshot;
+  }
+
+  private async snapshotAt(tip: string): Promise<Snapshot> {
     let snapshot = this.snapshots.get(tip);
     if (!snapshot) {
       snapshot = await this.loader.load(tip);
@@ -324,26 +362,28 @@ class GitTrackerStore implements TrackerStore {
     return snapshot;
   }
 
-  private async viewTip({ local, remote }: Tips): Promise<string | null> {
-    if (!local) return remote;
-    if (!remote || remote === local) return local;
-    return (await this.isAncestor(local, remote)) ? remote : local;
-  }
-
-  private async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
-    const key = `${ancestor}..${descendant}`;
-    let answer = this.ancestry.get(key);
-    if (answer === undefined) {
-      const run = await runGit(this.location.root, ['merge-base', '--is-ancestor', ancestor, descendant]);
-      answer = run.code === 0;
-      this.ancestry.set(key, answer);
+  /** `git merge-base --all`: the bases of the first commit and (a merge of) the rest. */
+  private async mergeBases(commits: readonly string[]): Promise<readonly string[]> {
+    const key = commits.join(' ');
+    let bases = this.bases.get(key);
+    if (!bases) {
+      const run = await runGit(this.location.root, ['merge-base', '--all', ...commits]);
+      // Exit 1 with no output: unrelated histories, so the fold has no base.
+      if (run.code !== 0 && run.code !== 1) {
+        // The commits or their history are missing here (a partial or shallow clone).
+        throw new GrimoireError('NOT_SYNCED', `the tracker history is incomplete in this clone: ${run.stderr.trim()}`, {
+          remedy: 'run `grimoire sync` to fetch the missing tracker history',
+        });
+      }
+      bases = run.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '');
+      this.bases.set(key, bases);
     }
-    return answer;
+    return bases;
   }
 
   /** Ids taken on either tip (live, deleted or forwarded), for minting. */
   private async takenIds(snapshot: Snapshot, tips: Tips): Promise<ReadonlySet<string>> {
-    const taken = new Set([...snapshot.ids, ...snapshot.retiredIds]);
+    const taken = new Set([...snapshot.ids, ...snapshot.retiredIds].map(bareId));
     for (const tip of [tips.local, tips.remote]) {
       if (tip && tip !== snapshot.tip) for (const id of await this.loader.takenIds(tip)) taken.add(id);
     }

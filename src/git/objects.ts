@@ -28,6 +28,11 @@ function frame(type: ObjectType, content: Uint8Array): Buffer {
   return Buffer.concat([Buffer.from(`${type} ${content.length}\0`, 'utf8'), content]);
 }
 
+/** The oid git gives an object, computed in memory: nothing is written. */
+export function hashObject(format: ObjectFormat, type: ObjectType, content: Uint8Array): string {
+  return createHash(format).update(frame(type, content)).digest('hex');
+}
+
 function sortKey(entry: TreeEntry): Buffer {
   // git orders a tree's entries by name bytes, comparing a subtree as if its name ended in '/'.
   return Buffer.from(entry.mode === TREE_MODE ? `${entry.name}/` : entry.name, 'utf8');
@@ -141,7 +146,7 @@ export async function writeLooseObject(
   content: Uint8Array,
 ): Promise<string> {
   const framed = frame(type, content);
-  const oid = createHash(format).update(framed).digest('hex');
+  const oid = hashObject(format, type, content);
   const dir = path.join(objectsDir, oid.slice(0, 2));
   const file = path.join(dir, oid.slice(2));
   if (await exists(file)) return oid;
