@@ -1,12 +1,13 @@
 // Cached reads of tracker objects through one long-lived `git cat-file --batch`,
-// and in-process writes of new blobs, trees and commits. Objects are immutable,
-// so every cache is keyed by oid and never invalidated.
+// which also resolves refs, and in-process writes of new blobs, trees and
+// commits. Objects are immutable, so every cache is keyed by oid and never
+// invalidated; refs are never cached.
 //
 // A fold builds its merged tree in memory (`VirtualObjects`): the same oids git
 // would give the objects, computed without writing anything, so reads never
 // create objects (spec §4, Read path). A write persists the ones it needs.
 import { GrimoireError } from '../errors';
-import { ObjectReader } from '../git/batch';
+import { ObjectReader, type GitObject } from '../git/batch';
 import {
   BLOB_MODE,
   decodeCommitHeader,
@@ -132,7 +133,12 @@ async function editTreeWith(
 }
 
 export class TrackerObjects extends ObjectSource {
-  private readonly reader: ObjectReader;
+  private reader: ObjectReader;
+  /** Readers being shut down after a restart. */
+  private readonly retiring = new Set<Promise<void>>();
+  /** The packed-refs stamp when the current reader first resolved refs; undefined before. */
+  private refsStamp: string | undefined;
+  private closed = false;
   private readonly trees = new BoundedMap<string, readonly TreeEntry[]>(20_000);
   private readonly blobs = new BoundedMap<string, Buffer>(20_000);
   private readonly commits = new BoundedMap<string, CommitHeader>(2_000);
@@ -142,7 +148,7 @@ export class TrackerObjects extends ObjectSource {
   };
 
   constructor(
-    repoDir: string,
+    private readonly repoDir: string,
     private readonly objectsDir: string,
     readonly format: ObjectFormat,
   ) {
@@ -154,12 +160,59 @@ export class TrackerObjects extends ObjectSource {
     this.reader.warm();
   }
 
-  close(): Promise<void> {
-    return this.reader.close();
+  async close(): Promise<void> {
+    this.closed = true;
+    await Promise.all([this.reader.close(), ...this.retiring]);
+  }
+
+  /**
+   * Resolves full ref names to oids (null: no such ref) through the long-lived
+   * reader, which reads refs fresh, except that it trusts its cached
+   * packed-refs while the file's stat looks unchanged to it. `packedRefs` is
+   * `packedRefsStamp`, taken just before: when it differs from the stamp of
+   * the reader's first ref lookup, a new reader answers instead. A rewrite
+   * after that stamp can still give a stale answer, which is only an old
+   * view: a write built on it loses its compare-and-set (`RefUpdater` checks
+   * under the ref's lock) and retries.
+   */
+  async resolveRefs(names: readonly string[], packedRefs: string): Promise<(string | null)[]> {
+    if (this.refsStamp !== packedRefs) {
+      if (this.refsStamp !== undefined) this.restartReader();
+      this.refsStamp = packedRefs;
+    }
+    const objects = await Promise.all(names.map((name) => this.read(name)));
+    return objects.map((object) => {
+      if (!object) return null;
+      if (object.type === 'commit' && !this.commits.has(object.oid)) {
+        this.commits.set(object.oid, decodeCommitHeader(object.content));
+      }
+      return object.oid;
+    });
+  }
+
+  private restartReader(): void {
+    const old = this.reader;
+    this.reader = new ObjectReader(this.repoDir);
+    // After close, the new reader too ends its git once a read is answered.
+    if (this.closed) void this.reader.close();
+    const closing: Promise<void> = old.close().finally(() => this.retiring.delete(closing));
+    this.retiring.add(closing);
+  }
+
+  /**
+   * Reads `name` through the reader, and once more when its git died under the
+   * read (killed, or crashed): the reader starts a new one for the retry.
+   */
+  private async read(name: string): Promise<GitObject | null> {
+    try {
+      return await this.reader.read(name);
+    } catch {
+      return this.reader.read(name);
+    }
   }
 
   private async readObject(oid: string, type: ObjectType): Promise<Buffer> {
-    const object = await this.reader.read(oid);
+    const object = await this.read(oid);
     if (!object) {
       throw new GrimoireError('NOT_SYNCED', `the tracker object ${oid} is missing from this clone`, {
         remedy: 'run `grimoire sync` to fetch the missing tracker objects',
