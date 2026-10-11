@@ -3,7 +3,7 @@
 // versions named by their normalized text, the ledger alone says which version
 // is current, and agents read the served text.
 import { createHash } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
@@ -253,6 +253,22 @@ describe('skill versions and human edits', () => {
     expect(edited.ok).toBe(true);
     const remote = await world.a.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker']);
     expect(remote.split('\t')[0]).toBe(await trackerTip(world.a));
+  });
+
+  test('machine-local data this release can’t write doesn’t block an edit; its provenance just can’t say it was local', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core, ctx } = grimoire;
+    const dir = path.join(world.a.dir, '.git', 'grimoire');
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'format'), 'format: 2\ncompat: 2\nrequires: "2.0.0"\n');
+
+    const edited = await core.call('skill_edit', { name: 'release-notes', text: NOTES_V1, base: null }, terminal(ctx));
+    const shown = await core.call('skill_show', {}, terminal(ctx));
+
+    expect(edited).toMatchObject({ ok: true, result: { created: true } });
+    expect(shown).toMatchObject({ ok: true, result: { skills: [{ name: 'release-notes', provenance: { origin: 'other-clone' } }] } });
   });
 
   test('an edit that changes nothing commits nothing', async ({ world, grimoire }) => {

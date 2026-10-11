@@ -357,7 +357,8 @@ export const skillEdit = define({
     const text = serializeSkillText(parts);
     scanned(scanner, text);
     const version = skillVersionOf(text);
-    const clone = await cloneTag(new MachineLocalStore(tracker.location.commonDir).records);
+    // Provenance only: machine-local data this release can't write leaves the record's clone unknown.
+    const clone = await cloneTag(new MachineLocalStore(tracker.location.commonDir).records).catch(() => '');
     const write = await tracker.transact({ op: 'skill-edit', author, actor }, async (draft) => {
       const limit = storeSetting(draft, 'skills.description_max') as number;
       if ([...parts.description].length > limit) {
