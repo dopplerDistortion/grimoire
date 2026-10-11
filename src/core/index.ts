@@ -10,6 +10,10 @@ import { comment } from './comment';
 import { list } from './list';
 import { update } from './update';
 import { claim, close, release } from './attempts';
+import { assign, deleteIssue, outcomeSet, reassign, reopen } from './human-ops';
+import { resolve } from './resolve';
+import { settingsGet, settingsSet } from './settings';
+import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
 import { completeUpgradeDetails } from './upgrade';
@@ -36,6 +40,9 @@ export type { ListResult, ListRow } from './list';
 export type { RelatedIssue, ShownComment } from './show';
 export type { IssueConflict } from './derive';
 export type { Remedy } from './upgrade';
+export type { AssignResult, ReassignResult, ReopenResult, Reblocked, DeleteResult, OutcomeSetResult } from './human-ops';
+export type { ResolveResult } from './resolve';
+export type { SettingsResult, SettingsSetResult, ShownSetting, SettingScope } from './settings';
 export type { ErrorBody, ErrorCode } from '../errors';
 
 export type Outcome<R> = { ok: true; result: R } | { ok: false; error: ErrorBody };
@@ -46,6 +53,8 @@ export interface OpDescriptor {
   readonly description: string;
   readonly kind: 'read' | 'write';
   readonly policy: SurfacePolicy;
+  /** Whether the MCP server lists it as a tool: agent ops only, and not every one of them. */
+  readonly mcp: boolean;
   /** JSON Schema of the op's input. */
   readonly inputSchema: Record<string, unknown>;
   /** MCP annotations (spec §8). */
@@ -88,6 +97,14 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   claim,
   release,
   close,
+  settingsGet,
+  assign,
+  reassign,
+  reopen,
+  deleteIssue,
+  resolve,
+  outcomeSet,
+  settingsSet,
 ];
 
 /**
@@ -140,6 +157,7 @@ export function createCore(options: CoreOptions = {}): Core {
       description: op.description,
       kind: op.kind,
       policy: op.policy,
+      mcp: op.policy === 'agent' && op.mcp !== false,
       inputSchema: op.input.json,
       annotations: annotationsOf(op),
     })),
@@ -149,6 +167,7 @@ export function createCore(options: CoreOptions = {}): Core {
       try {
         const op = ops.get(name);
         if (!op) throw new GrimoireError('INVALID', `there is no operation named ${name}`, { fields: { op: 'unknown' } });
+        checkSurface(op, ctx);
         checkInstallFormat(ctx.repo.installFormat ?? null, ctx.repo.pin);
         const parsed = parseInput(op.input, input);
         tracker = await trackerFor(ctx.repo.root);

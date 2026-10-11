@@ -55,9 +55,9 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
 
     server.setRequestHandler('tools/list', async () => {
       const core = await deps.core();
-      // Only agent ops are ever offered; human-only, human-read and internal ops never are (spec §7).
+      // Only agent ops are ever offered, and only those the registry marks as MCP tools (spec §7, §8).
       const tools: Tool[] = core.ops
-        .filter((op) => op.policy === 'agent')
+        .filter((op) => op.mcp)
         .map((op) => ({
           name: op.name,
           description: op.description,
@@ -94,7 +94,7 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
           `${name} is for a person only, in the dashboard or an interactive terminal; ask the user to do it`,
         );
       }
-      if (op?.policy !== 'agent') {
+      if (!op?.mcp) {
         throw invalid({ name: 'is not a grimoire tool' }, `there is no grimoire tool named ${name}`);
       }
       const root = await findHostRoot(deps.startDir);

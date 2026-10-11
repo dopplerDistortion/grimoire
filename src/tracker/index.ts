@@ -28,6 +28,8 @@ export type {
 export { ATTEMPT_PATTERN } from './attempt';
 export { issueRevision, sortedUnique } from './record';
 export { keyHash, type Idempotency } from './keys';
-export { bareId, parseWriteRef, ID_PATTERN } from './ids';
+export { bareId, collisionSides, parseWriteRef, ID_PATTERN } from './ids';
+export type { StoreSetting } from './settings';
+export type { Tombstone } from './retired';
 export { TRACKER_REF } from './layout';
 export { TRACKER_FORMAT_RANGE, V1_MARKER } from './marker';

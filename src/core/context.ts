@@ -80,6 +80,12 @@ export interface CallContext {
   readonly person: Identity;
   readonly client?: ClientInfo | null;
   readonly evidence?: Evidence;
+  /**
+   * CLI only: whether the process runs at an interactive terminal (stdin and
+   * stdout are TTYs). The human-only gate needs one; a CLI call without it
+   * counts as an agent surface for that gate.
+   */
+  readonly tty?: boolean;
   /** The raw per-call facts of an MCP call. */
   readonly mcp?: McpCallFacts;
   /** This process's nonce. */
@@ -97,6 +103,17 @@ export type Actor = {
   readonly nonce: string;
   readonly chore_exposure?: string;
 };
+
+/**
+ * Whether the call comes from a human surface (spec §7, the human-only gate):
+ * the dashboard, or the CLI with no agent marker at an interactive terminal.
+ * MCP, hook and runner calls, and CLI calls under a marker or without a TTY,
+ * are agent surfaces.
+ */
+export function humanSurface(ctx: CallContext): boolean {
+  if (ctx.surface === 'dashboard') return true;
+  return ctx.surface === 'cli' && (ctx.evidence?.agentMarkers ?? []).length === 0 && ctx.tty === true;
+}
 
 /**
  * The Actor of a call (spec §7, Actors). MCP, hook and runner calls are agent

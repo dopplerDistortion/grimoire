@@ -8,6 +8,26 @@ describe('the op registry', () => {
       const byName = Object.fromEntries(core.ops.map((op) => [op.name, op]));
 
       expect(Object.keys(byName).sort()).toEqual([
+        'assign',
+        'claim',
+        'close',
+        'comment',
+        'create',
+        'delete',
+        'labels',
+        'list',
+        'outcome_set',
+        'reassign',
+        'release',
+        'reopen',
+        'resolve',
+        'settings_get',
+        'settings_set',
+        'show',
+        'update',
+      ]);
+      // MCP lists exactly the agent tools of spec §8 (so far).
+      expect(core.ops.filter((op) => op.mcp).map((op) => op.name).sort()).toEqual([
         'claim',
         'close',
         'comment',
