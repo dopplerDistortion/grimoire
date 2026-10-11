@@ -10,6 +10,8 @@ import type { UpdateResult } from './update';
 import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, ReopenResult } from './human-ops';
 import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
+import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
+import type { QuarantineResult } from './quarantine';
 import type { SyncResult, SyncStatusResult } from './sync';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
@@ -120,6 +122,11 @@ export interface OpResults {
   resolve: ResolveResult;
   outcome_set: OutcomeSetResult;
   settings_set: SettingsSetResult;
+  wiki_list: WikiListResult;
+  wiki_show: WikiShowResult;
+  wiki_edit: WikiEditResult;
+  quarantine: QuarantineResult;
+  unquarantine: QuarantineResult;
   sync: SyncResult;
   sync_status: SyncStatusResult;
 }

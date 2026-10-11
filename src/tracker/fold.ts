@@ -8,7 +8,7 @@
 // sides changed a path, the rule for that path's kind of record decides.
 import { BLOB_MODE, TREE_MODE, type TreeEntry } from '../git/objects';
 import { conflictName } from './conflict';
-import { deleteConflict, foldEnd, foldIssue, foldMarker, foldOutcome, foldSession, foldSettings } from './fold-records';
+import { deleteConflict, foldEnd, foldExtra, foldIssue, foldMarker, foldOutcome, foldSession, foldSettings } from './fold-records';
 import {
   attemptDir,
   ATTEMPTS_DIR,
@@ -27,6 +27,7 @@ import {
 import { bareId } from './ids';
 import type { FileEdit, VirtualObjects } from './objects';
 import { collisionHash, parseIssue } from './record';
+import { foldPage, regenerateWikiTree, wikiConflictPath, wikiKind } from './wiki';
 
 /** The merge bases of the first commit and (a hypothetical merge of) the rest, as `git merge-base --all` gives them. */
 export type MergeBases = (commits: readonly string[]) => Promise<readonly string[]>;
@@ -205,7 +206,7 @@ function kindOf(path: readonly string[]): string {
     if (depth === 7 && path[5] === SESSIONS_DIR) return 'session';
   }
   if (top === OUTCOMES_DIR && depth === 5) return 'outcome';
-  return 'other';
+  return wikiKind(path) ?? 'other';
 }
 
 class Fold {
@@ -398,6 +399,14 @@ class Fold {
       }
       case 'session':
         return { mode: BLOB_MODE, name, oid: this.objects.putBlob(foldSession(await this.objects.blob(a.oid), await this.objects.blob(b.oid))) };
+      case 'wiki-page': {
+        // A page both clones wrote (spec §17): the side set aside goes under the wiki's conflicts/.
+        const slug = name.slice(0, -'.md'.length);
+        const [baseBytes, aBytes, bBytes] = await Promise.all([blobOf(base), blobOf(a), blobOf(b)]);
+        const folded = foldPage(slug, baseBytes, aBytes!, bBytes!, foldExtra);
+        if (folded.conflict) this.add(path.slice(0, 2), wikiConflictPath(slug, folded.conflict.name), folded.conflict.bytes);
+        return { mode: BLOB_MODE, name, oid: this.objects.putBlob(folded.bytes) };
+      }
       default:
         // Files this release doesn't know, and add-only files both sides wrote: the lower hash wins.
         return lower(a, b);
@@ -423,7 +432,9 @@ class Fold {
       return present;
     }
     if (isTree(a) && isTree(b)) {
-      const oid = await this.dir(path, isTree(base) ? base.oid : null, a.oid, b.oid);
+      let oid = await this.dir(path, isTree(base) ? base.oid : null, a.oid, b.oid);
+      // The wiki's index and log are never merged as text: the fold derives them again (spec §17).
+      if (kind === 'wiki-dir') oid = await regenerateWikiTree(this.objects, oid, a.oid, b.oid);
       return oid === null ? null : { mode: TREE_MODE, name, oid };
     }
     if (!isTree(a) && !isTree(b)) return this.file(path, base, a, b);
