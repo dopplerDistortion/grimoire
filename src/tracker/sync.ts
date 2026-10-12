@@ -122,12 +122,22 @@ export interface TrackerRefs {
  * sync's deadline (spec §4: retries on non-fast-forward). Each lost race is
  * another clone's push landing, so two clones syncing at once settle within a
  * few rounds; the pause before each retry keeps them from running in step.
- * A rejection that may be a race or a refusal is retried only when the
- * remote's next listing shows it moved; otherwise it fails as `rejected`.
+ * A rejection the remote's next listing shows no move after may be a refusal
+ * rather than a race: see UNMOVED_REJECTIONS.
  */
 const PUSH_ROUNDS = 10;
 /** The pause before retry n after a lost race is a random share of n times this. */
 const RACE_PAUSE_MS = 100;
+/**
+ * A rejection the remote's next listing shows no move after is retried, this
+ * many rejections in a row at most, before it counts as the remote's refusal
+ * (`rejected`, which backs off): a ref lock's holder that lets go without a
+ * push of its own (a server-side pack-refs, say) gets its moment, and a
+ * refusal (a lock left stale) fails within a few rounds rather than ten.
+ */
+const UNMOVED_REJECTIONS = 3;
+/** The least pause before a retry once a rejection may be a held lock: its holder had it for git's whole lock timeout already. */
+const LOCK_PAUSE_MS = 250;
 /** Missing objects in a partial clone are backfilled in at most this many rounds (spec §4). */
 const BACKFILL_ROUNDS = 2;
 
@@ -275,13 +285,18 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
 
   /** The last push's rejection, which only a remote that moved since makes a lost race: the tip it saw, and the failure. */
   let contended: { readonly tracker: string | null; readonly failure: SyncFailure } | null = null;
+  /** Rejections in a row the remote's next listing showed no move after. */
+  let unmoved = 0;
   for (let round = 1; ; round++) {
     // 1. What the remote holds: its tracker tip, and whether it has a default branch.
     const listing = await net(['ls-remote', remote, 'HEAD', TRACKER_BRANCH]);
     if (listing.code !== 0 || listing.timedOut) return failed('ls-remote', listing);
     const { head, tracker } = parseListing(listing.stdout);
-    // No push raced the last one: the remote refused it (a lock left stale, say).
-    if (contended !== null && contended.tracker === tracker) return outcome({ state: 'pending', reason: 'failed', failure: contended.failure });
+    // No push raced the last one: a lock let go of, or the remote refusing it (a lock left stale, say).
+    if (contended !== null) {
+      unmoved = contended.tracker === tracker ? unmoved + 1 : 0;
+      if (unmoved >= UNMOVED_REJECTIONS) return outcome({ state: 'pending', reason: 'failed', failure: contended.failure });
+    }
     contended = null;
 
     // 2. Fetch it with the explicit refspec, deepening a shallow history.
@@ -373,7 +388,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     const said = remoteLines(push.stderr);
     const rejected: SyncFailure = { class: 'rejected', message: recordable(said ? `${reason}: ${said}` : reason) };
     if (race && round < PUSH_ROUNDS) {
-      const pauseMs = Math.random() * RACE_PAUSE_MS * round;
+      const pauseMs = Math.max(race === 'contended' ? LOCK_PAUSE_MS : 0, Math.random() * RACE_PAUSE_MS * round);
       if (spec.deadline === undefined || Date.now() + pauseMs < spec.deadline) {
         await (spec.pause ?? sleep)(pauseMs);
         if (race === 'contended') contended = { tracker, failure: rejected };

@@ -684,7 +684,7 @@ describe('concurrent clones', () => {
     expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
   });
 
-  test.for(CONTENDED)('a push rejected as %s while the remote doesn’t move is refused, not a lost race: it fails at once as rejected with the remote’s message, and backs off', async (
+  test.for(CONTENDED)('a push rejected as %s while the remote doesn’t move is refused, not a lost race: it fails within three pushes as rejected with the remote’s message, and backs off', async (
     answer,
     { world, grimoire },
   ) => {
@@ -698,9 +698,29 @@ describe('concurrent clones', () => {
     expect(refused).toMatchObject({ state: 'pending', reason: 'failed', failure: { class: 'rejected' } });
     expect(refused.failure?.lostRace).toBeUndefined();
     expect(refused.failure?.message).toContain(answer[1] ? 'File exists' : 'non-fast-forward');
-    // One push, then the listing after its pause: the remote hadn't moved.
-    expect(remote.pushes()).toBe(1);
-    expect(remote.pauses).toHaveLength(1);
+    // Three pushes, each followed by a listing that showed the remote hadn't moved.
+    expect(remote.pushes()).toBe(3);
+    expect(remote.pauses).toHaveLength(3);
+    // A held lock's holder gets at least a quarter second each time to let go.
+    expect(Math.min(...remote.pauses)).toBeGreaterThanOrEqual(250);
     expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: { class: 'rejected' }, retry_at: expect.any(String) });
+  });
+
+  test('a push that meets the remote’s ref lock once, held by something that lets go without moving the remote, pushes again and lands, with no failure or backoff', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    // The lock's holder (a server-side pack-refs, say) lets go before the retry; the remote's listing never moves.
+    const remote = busyRemote(1, [CONTENDED[0]!]);
+
+    const synced = await withTracker(world.a, (tracker) =>
+      syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), network: remote.network, pause: remote.pause }),
+    );
+    expect(synced).toMatchObject({ state: 'pushed' });
+    expect(remote.pushes()).toBe(2);
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
   });
 });
