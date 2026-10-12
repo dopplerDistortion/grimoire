@@ -122,6 +122,8 @@ export interface TrackerRefs {
  * sync's deadline (spec §4: retries on non-fast-forward). Each lost race is
  * another clone's push landing, so two clones syncing at once settle within a
  * few rounds; the pause before each retry keeps them from running in step.
+ * A rejection that may be a race or a refusal is retried only when the
+ * remote's next listing shows it moved; otherwise it fails as `rejected`.
  */
 const PUSH_ROUNDS = 10;
 /** The pause before retry n after a lost race is a random share of n times this. */
@@ -271,11 +273,16 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     return [...tips, ...bases.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '')];
   };
 
+  /** The last push's rejection, which only a remote that moved since makes a lost race: the tip it saw, and the failure. */
+  let contended: { readonly tracker: string | null; readonly failure: SyncFailure } | null = null;
   for (let round = 1; ; round++) {
     // 1. What the remote holds: its tracker tip, and whether it has a default branch.
     const listing = await net(['ls-remote', remote, 'HEAD', TRACKER_BRANCH]);
     if (listing.code !== 0 || listing.timedOut) return failed('ls-remote', listing);
     const { head, tracker } = parseListing(listing.stdout);
+    // No push raced the last one: the remote refused it (a lock left stale, say).
+    if (contended !== null && contended.tracker === tracker) return outcome({ state: 'pending', reason: 'failed', failure: contended.failure });
+    contended = null;
 
     // 2. Fetch it with the explicit refspec, deepening a shallow history.
     refs = await host.trackerRefs();
@@ -360,23 +367,19 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     }
     if (push.timedOut) return failed('push', push);
     const pushed = pushedRef(push.stdout.toString('utf8'), TRACKER_BRANCH);
-    const raced = pushed !== null && lostRace(pushed, push.stderr);
-    if (raced && round < PUSH_ROUNDS) {
+    if (pushed?.flag !== '!') return failed('push', push);
+    const race = lostRace(pushed, push.stderr);
+    const reason = /\(([^)]*)\)\s*$/.exec(pushed.summary)?.[1] ?? pushed.summary;
+    const said = remoteLines(push.stderr);
+    const rejected: SyncFailure = { class: 'rejected', message: recordable(said ? `${reason}: ${said}` : reason) };
+    if (race && round < PUSH_ROUNDS) {
       const pauseMs = Math.random() * RACE_PAUSE_MS * round;
       if (spec.deadline === undefined || Date.now() + pauseMs < spec.deadline) {
         await (spec.pause ?? sleep)(pauseMs);
+        if (race === 'contended') contended = { tracker, failure: rejected };
         continue;
       }
     }
-    if (pushed?.flag === '!') {
-      const reason = /\(([^)]*)\)\s*$/.exec(pushed.summary)?.[1] ?? pushed.summary;
-      const said = remoteLines(push.stderr);
-      return outcome({
-        state: 'pending',
-        reason: 'failed',
-        failure: { class: 'rejected', message: recordable(said ? `${reason}: ${said}` : reason), ...(raced ? { lostRace: true } : {}) },
-      });
-    }
-    return failed('push', push);
+    return outcome({ state: 'pending', reason: 'failed', failure: race ? { ...rejected, lostRace: true } : rejected });
   }
 }
