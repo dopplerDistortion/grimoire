@@ -7,7 +7,7 @@
 // round while the attempt is still open. Each attachment triggers a sync.
 // Upkeep runs it under the part's lease: one sweep at a time per live store.
 import { captureAtEnd, CUT_BUDGET_MS, type CaptureOptions, type SkillReadEvent } from '../capture/end';
-import { noteCutReach, SEEN_HERE, seenHereRows, sessionKey, type SeenHereRow } from '../capture/seen-here';
+import { noteCutReach, SEEN_HERE, sessionKey, type SeenHereRow } from '../capture/seen-here';
 import { cutSucceeded, parseSessionRecord, replaces, serializeSessionRecord, withoutText, type SessionRecord } from '../capture/session-record';
 import { registerSweep } from '../capture/sweeps';
 import { compareReach } from '../tracker/fold-records';
@@ -89,18 +89,18 @@ export async function sweepContexts(
   options: SweepOptions = {},
 ): Promise<SweepReport> {
   const report: SweepReport = { attached: 0, cut: 0, budget: 0, unchanged: 0, pruned: 0, cancelled: false, commit: null };
-  const rows = await seenHereRows(store);
-  if (rows.length === 0) return report;
+  const entries = await store.coordination.list<SeenHereRow>(SEEN_HERE);
+  if (entries.length === 0) return report;
   const now = (options.clock ?? (() => new Date()))();
   const view = await tracker.read();
 
   // Rows are hints only: those of sealed attempts have nothing left to cut.
   const open = new Map<string, { attempt: AttemptRecord; rows: SeenHereRow[] }>();
-  for (const row of rows) {
+  for (const { key, value: row } of entries) {
     const attempt = view.attempt(row.handle);
     const stale = attempt ? attempt.end !== null : now.getTime() - Date.parse(row.last_at) > UNKNOWN_ROW_MS;
     if (stale) {
-      if (await store.coordination.remove(SEEN_HERE, `${row.handle}/${rowKey(row)}`).catch(() => false)) report.pruned++;
+      if (await store.coordination.remove(SEEN_HERE, key).catch(() => false)) report.pruned++;
       continue;
     }
     if (!attempt) continue;
