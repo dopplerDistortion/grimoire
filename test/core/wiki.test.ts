@@ -136,6 +136,7 @@ describe('wiki edit, updating', () => {
         kind: 'failure',
         summary: PAGE.summary,
         sources: [],
+        purged_sources: [],
         generated: null,
         verified: T0.toISOString(),
         updated_at: T0.toISOString(),

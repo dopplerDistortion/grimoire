@@ -21,7 +21,7 @@ import {
   TRACKER_REF,
 } from './support';
 import { putPage } from './chore-support';
-import { CLAUDE_SESSION, captureOf, claimed, created, sessionRecords, test as captureTest } from './capture-support';
+import { CLAUDE_SESSION, captureOf, claimed, claudeCall, created, sessionRecords, test as captureTest } from './capture-support';
 
 const DEBRIEF = { asked: 'a', tried: 't', failed: 'none', worked: 'w', next: 'none' };
 const REMOTE_TRACKER = 'refs/remotes/origin/grimoire/tracker';
@@ -293,6 +293,12 @@ describe('purging one session record', () => {
     const again = await sweepNow(world.a.dir, { capture: capture.options, clock: () => later, sync: false });
     expect(again.result).toMatchObject({ attached: 0 });
     expect(await sessionRecords(world.a, id, attempt)).toEqual([]);
+
+    // The seal skips it too: the trace keeps the context purged, with its facts.
+    capture.at(later.toISOString());
+    await ok(core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close')));
+    expect(await sessionRecords(world.a, id, attempt)).toEqual([]);
+    expect((await captureOf(world.a, attempt)).contexts).toEqual([expect.objectContaining({ key, excerpt: { status: 'purged', notes: [] }, facts: record!.fields.facts })]);
   });
 
   captureTest('with its facts: the tombstone keeps nothing, and the trace lists the context purged with no facts', async ({ world, grimoire, capture }) => {
