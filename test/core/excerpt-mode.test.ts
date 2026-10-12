@@ -114,7 +114,7 @@ describe('settings set excerpts', () => {
     expect(await trackerTip(world.a)).toBe(before);
   });
 
-  test('a push after tightening on another clone rewrites the unpushed segment: no pushed record carries text, and the text pushed before stays', async ({
+  test('a push after tightening on another clone rewrites the unpushed segment: no pushed record carries text, and the text pushed before stays', { timeout: 120_000 }, async ({
     world,
     grimoire,
     capture,

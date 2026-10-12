@@ -168,19 +168,26 @@ export function pushedRef(stdout: string, ref: string): PushedRef | null {
 }
 
 /**
- * Whether a rejected push only lost a race, so fetch, fold and push again:
- * the remote moved since the fetch (git saw it in the ref advertisement), or
- * another push moved it while this one ran (the remote's compare-and-set
- * failed), or another push held the ref's lock when this one came to take it
- * (git 2.55 says `reference already exists`, with the lock file's `File
- * exists` in the remote's lines). A D/F ref conflict or a hook's refusal is
- * no race; a lock left stale keeps refusing, so the last round records it.
+ * Whether a rejected push may only have lost a race, so fetch, fold and push
+ * again. `moved`: the remote says it moved: since the fetch (git saw it in the
+ * ref advertisement: `fetch first`, `stale info`), or while this push ran (the
+ * remote's compare-and-set failed). `contended`: a race or a refusal, which
+ * only the remote's next listing tells apart: the ref's lock was held, by
+ * another push or left stale (git 2.55 says `reference already exists`, with
+ * the lock file's `File exists` in the remote's lines), or the push wasn't a
+ * fast-forward of the tip it saw. Null: no race (a D/F ref conflict, a hook's
+ * refusal). Sync checks either against the remote's next listing: a remote
+ * that says it moved but lists no move reaches other refs on push than on
+ * fetch, and refuses as surely.
  */
-export function lostRace(pushed: PushedRef, stderr: string): boolean {
-  if (pushed.flag !== '!') return false;
-  if (/^\[rejected\]/.test(pushed.summary)) return /non-fast-forward|fetch first|stale info/.test(pushed.summary);
-  if (!/^\[remote rejected\]/.test(pushed.summary)) return false;
-  return /incorrect old value|failed to lock|is at [0-9a-f]+ but expected|\.lock'?: File exists/.test(
-    `${pushed.summary}\n${remoteLines(stderr)}\n${stderr}`,
-  );
+export function lostRace(pushed: PushedRef, stderr: string): 'moved' | 'contended' | null {
+  if (pushed.flag !== '!') return null;
+  if (/^\[rejected\]/.test(pushed.summary)) {
+    if (/fetch first|stale info/.test(pushed.summary)) return 'moved';
+    return /non-fast-forward/.test(pushed.summary) ? 'contended' : null;
+  }
+  if (!/^\[remote rejected\]/.test(pushed.summary)) return null;
+  const said = `${pushed.summary}\n${remoteLines(stderr)}\n${stderr}`;
+  if (/incorrect old value|is at [0-9a-f]+ but expected/.test(said)) return 'moved';
+  return /failed to lock|\.lock'?: File exists/.test(said) ? 'contended' : null;
 }
