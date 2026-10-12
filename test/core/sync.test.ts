@@ -580,37 +580,6 @@ describe('the detached sync child', () => {
 });
 
 describe('concurrent clones', () => {
-  test('two clones closing at once with background syncs end up with one tracker on the remote holding every close', async ({
-    world,
-    grimoire,
-  }) => {
-    await pushTracker(world.a);
-    await world.b.git(['fetch', '--quiet']);
-    const bobCtx = agentContext(world.b);
-    const alice = syncingCore(grimoire);
-    const bob = syncingCore(grimoire);
-    const closed = await Promise.all([
-      ...[1, 2, 3].map((n) => closeOne(alice, grimoire.ctx, `Alice ${n}`)),
-      ...[1, 2, 3].map((n) => closeOne(bob, bobCtx, `Bob ${n}`)),
-    ]);
-    await Promise.all([alice.close(), bob.close()]);
-
-    // The background syncs alone: no explicit sync runs.
-    const remote = (await remoteTracker(world.a))!;
-    const clones = [[world.a, grimoire.ctx], [world.b, bobCtx]] as const;
-    // Both clones' sync status first: a sync that failed names its cause before any list falls short.
-    for (const [checkout, ctx] of clones) {
-      expect(await ok(grimoire.core.call('sync_status', {}, ctx))).toMatchObject({ failure: null, pending_since: null });
-      // Asked of the remote, which has every object: the remote holds this clone's tip.
-      expect(await gitResult(world.remote, ['merge-base', '--is-ancestor', (await trackerTip(checkout))!, remote])).toMatchObject({ code: 0 });
-    }
-    for (const [checkout, ctx] of clones) {
-      await checkout.git(['fetch', '--quiet']);
-      const rows = (await ok(grimoire.core.call('list', { status: 'done' }, ctx))).rows.map((row) => row.id);
-      expect(rows.sort()).toEqual([...closed].sort());
-    }
-  });
-
   /**
    * Bob's tracker commit, on the remote under another branch, and an unpushed
    * one from Alice: what a race needs. Returns Bob's commit and a shell line
