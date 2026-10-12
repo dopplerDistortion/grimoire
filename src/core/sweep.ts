@@ -21,6 +21,8 @@ import { lowerMode, storeExcerptMode } from './settings';
 import { SKILL_READS } from './skills';
 import { autoSync, syncRequestOf } from './sync';
 
+/** What a sweep's cut names as its call: no ending op, so no CLI ending call is looked for. */
+const SWEEP_CALL = 'sweep';
 /** A context is swept once it was idle this long (spec §14: 30 min). */
 export const IDLE_MS = 30 * 60_000;
 /** A seen-here row of an attempt this tracker doesn't know (purged, another tracker) goes after this long. */
@@ -141,7 +143,7 @@ export async function sweepContexts(
         view,
         issue: attempt.issue,
         attempt,
-        call: { op: 'sweep', actor: actorOf(ctx), source: null, pendingHint: null, binds: false, at: now.toISOString() },
+        call: { op: SWEEP_CALL, actor: actorOf(ctx), source: null, pendingHint: null, binds: false, at: now.toISOString() },
         mode,
         capped: cap.capped,
         skillReads,
