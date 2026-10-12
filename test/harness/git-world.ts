@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
-import { cp, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -138,6 +138,11 @@ function worldTemplate(template: WorldTemplate | undefined): { root: string; rea
       process.once('exit', () => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
       const world = await buildWorld(await realpath(root));
       await template?.prepare(world);
+      // git's sample hooks never run (none is named as a hook), but every copy would write them
+      // again for the virus scanner to read: the copies get the hooks folders without them.
+      for (const hooks of [path.join(world.remote, 'hooks'), path.join(world.a.dir, '.git', 'hooks'), path.join(world.b.dir, '.git', 'hooks')]) {
+        for (const file of await readdir(hooks)) if (file.endsWith('.sample')) await rm(path.join(hooks, file));
+      }
     });
     built = { root, ready };
     templates.set(name, built);
