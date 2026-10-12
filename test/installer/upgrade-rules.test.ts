@@ -110,6 +110,19 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
     expect(await changedPaths(world.a)).toEqual(['.grimoire/config.yml', 'AGENTS.md', 'package.json']);
   });
 
+  gitTest('with the remote out of reach, the markers can’t be checked against what it holds: the upgrade refuses NOT_SYNCED before anything is written', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await world.a.git(['remote', 'set-url', 'origin', path.join(world.root, 'gone.git')]);
+
+    const refused = initAt(world.a.dir, NEW, { flags: { upgrade: true } });
+
+    await expect(refused).rejects.toMatchObject({ code: 'NOT_SYNCED', details: { remote: 'origin' } });
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    expect((await listCopies(store)).map((copy) => copy.version)).toEqual([OLD]);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+  });
+
   gitTest('the plan, asked once: the pins, each marker, the files, the hooks, the other worktrees, live old-pin processes, the disclosure and the revert note', async ({ world }) => {
     await installOld(world.a);
     const other = await world.a.addWorktree('feature');

@@ -576,6 +576,14 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   // Step 0 of an upgrade: every marker against what this release declares.
   let upgrade: UpgradeReport | null = null;
   if (upgrading) {
+    if (failure && remote.name !== null) {
+      // Step 0 reads the markers the remote holds: a failed fetch never counts as "the local refs are all there is".
+      throw new GrimoireError(
+        'NOT_SYNCED',
+        `init --upgrade couldn't fetch the tracker from ${remote.name} (${failure.message}), so it can't check this release against the markers there; nothing changed`,
+        { remote: remote.name, failure, remedy: 'rerun init --upgrade when the remote is reachable' },
+      );
+    }
     const formats = o.formats ?? RELEASE_FORMATS;
     const from = inProgress && inProgress.to === version ? inProgress.from : existing!.version!;
     const markers = [
