@@ -23,12 +23,15 @@ export {
   type EndCaptureInput,
   type EndingCall,
   type SkillReadEvent,
+  type SweepScope,
 } from './end';
 export {
   cutSucceeded,
   parseSessionRecord,
   replaces,
   serializeSessionRecord,
+  stripExcerptText,
+  withoutText,
   type FactsStatus,
   type RecordExcerptStatus,
   type RecordNote,

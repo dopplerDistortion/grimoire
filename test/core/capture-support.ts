@@ -131,20 +131,22 @@ export const test = coreTest.extend('capture', async ({ world, grimoire }, { onC
   onCleanup(() => removeDir(configDir));
   let now = new Date('2026-10-11T03:27:17.500Z');
   // The temp folder holding the config dir stands in for the home folder: roots read `~/<config dir>/projects`.
+  const captureOptions = {
+    claudeConfigDir: configDir,
+    codexHome: path.join(configDir, 'no-codex'),
+    home: path.dirname(configDir),
+    flushWaitMs: 50,
+  };
   const options = (extra: CoreOptions = {}): CoreOptions => ({
     ...extra,
     clock: () => now,
-    capture: {
-      claudeConfigDir: configDir,
-      codexHome: path.join(configDir, 'no-codex'),
-      home: path.dirname(configDir),
-      flushWaitMs: 50,
-      ...extra.capture,
-    },
+    capture: { ...captureOptions, ...extra.capture },
   });
   await setExcerptMode(world.a, 'excerpts');
   return {
     configDir,
+    /** Where capture looks, as the core's `capture` option (and a sweep's) gives it. */
+    options: captureOptions,
     core: grimoire.makeCore(options()),
     makeCore: (extra: CoreOptions = {}) => grimoire.makeCore(options(extra)),
     at: (iso: string) => {
