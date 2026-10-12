@@ -1,3 +1,6 @@
+// Ref locks and the fairness lock against the clock (spec §4, Write path): locks
+// held for set times, write budgets of under a second, a lapsing TTL. In the
+// serial `slow` project (npm run test:slow).
 import { rm, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';

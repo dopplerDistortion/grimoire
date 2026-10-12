@@ -100,11 +100,17 @@ export class FairnessLock {
     }
     if (result.status === 'held') return null;
     const { lock } = result;
-    const heartbeat = setInterval(() => void lock.renew(ABANDONED_AFTER_MS).catch(() => {}), HEARTBEAT_MS);
+    // Renewals run one after another, and the release after the last: a renewal still under way would write
+    // the lock back as held once it was let go, holding up every writer until it lapsed.
+    let renewals: Promise<unknown> = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      renewals = renewals.then(() => lock.renew(ABANDONED_AFTER_MS)).catch(() => {});
+    }, HEARTBEAT_MS);
     heartbeat.unref();
     return {
       release: async () => {
         clearInterval(heartbeat);
+        await renewals;
         await lock.release().catch(() => {});
       },
     };
