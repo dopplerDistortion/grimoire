@@ -407,27 +407,36 @@ export const syncStatus = define({
   replay: 'none',
   input: s.object({}),
   async run(_input, { tracker }): Promise<SyncStatusResult> {
-    const machine = machineOf(tracker);
-    const record = await readStatus(machine).catch(() => undefined);
-    const markers = await pendingMarkers(machine).catch(() => []);
-    const oldest = markers.reduce<number | null>((min, m) => (min === null || m.at < min ? m.at : min), null);
     let auto: boolean | null = null;
     try {
       auto = autoSyncOn(await tracker.read());
     } catch {
       auto = null;
     }
-    const status = {
-      remote: record?.remote ?? null,
-      url: record?.url ?? null,
-      auto_sync: auto,
-      pending_since: iso(oldest),
-      last_attempt_at: iso(record?.last_attempt_at),
-      last_success_at: iso(record?.last_success_at),
-      last_result: record?.last_result ?? null,
-      failure: record?.failure ? { ...record.failure, at: iso(record.failure.at)! } : null,
-      retry_at: iso(record?.retry_at),
-    };
-    return { ...status, summary: syncSummary(status) };
+    return readSyncStatus(tracker.location.commonDir, auto);
   },
 });
+
+/**
+ * The machine-local sync status of a clone (what `sync_status` answers),
+ * read without the tracker: `status` and `doctor` show it whatever state the
+ * store is in. `autoSync` is the store's auto-sync setting, when known.
+ */
+export async function readSyncStatus(commonDir: string, autoSync: boolean | null): Promise<SyncStatusResult> {
+  const machine = new MachineLocalStore(commonDir);
+  const record = await readStatus(machine).catch(() => undefined);
+  const markers = await pendingMarkers(machine).catch(() => []);
+  const oldest = markers.reduce<number | null>((min, m) => (min === null || m.at < min ? m.at : min), null);
+  const status = {
+    remote: record?.remote ?? null,
+    url: record?.url ?? null,
+    auto_sync: autoSync,
+    pending_since: iso(oldest),
+    last_attempt_at: iso(record?.last_attempt_at),
+    last_success_at: iso(record?.last_success_at),
+    last_result: record?.last_result ?? null,
+    failure: record?.failure ? { ...record.failure, at: iso(record.failure.at)! } : null,
+    retry_at: iso(record?.retry_at),
+  };
+  return { ...status, summary: syncSummary(status) };
+}

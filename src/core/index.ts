@@ -59,7 +59,7 @@ export type { QuarantineResult } from './quarantine';
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
 export { choreThresholds, dueChores } from './chores';
 export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
-export { AUTO_SYNC_SETTING, autoSync, markSyncPending, syncNow, syncRequestOf } from './sync';
+export { AUTO_SYNC_SETTING, autoSync, autoSyncOn, markSyncPending, readSyncStatus, syncNow, syncRequestOf } from './sync';
 export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
 export type { ErrorBody, ErrorCode } from '../errors';
 export { traceCapture, captureMode, type TraceCapture, type CaptureEntry } from './capture';

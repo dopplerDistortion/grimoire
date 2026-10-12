@@ -1,0 +1,15 @@
+# >>> grimoire (managed block)
+[mcp_servers.grimoire]
+command = "node"
+args = ["-e", "const f=require('fs'),p=require('path'),a=process.argv.slice(1),i=a[0]=='--from',[v,e]=i?a.slice(2):a,r=x=>f.readFileSync(x,'utf8').trim();let d=p.resolve(i?a[1]:'.'),g,u;for(;!f.existsSync(g=d+'/.git');d=u)if((u=p.dirname(d))==d)process.exit();try{g=p.resolve(d,r(g).slice(8));g=p.resolve(g,r(g+'/commondir'))}catch{}const l=g+'/grimoire/launcher.cjs',y=d+'/.grimoire/config.yml';try{if(f.existsSync(l))require(l)(a,d);else if(f.existsSync(y)&&(v=='mcp'||e=='session-start')){const[s,b]=String.fromCharCode(39,96),k=r(y).match(/(?<![ -~])version:[ -']*([0-9]+[.][0-9]+[.][0-9]+([-+][(-~]*)?)(?![(-~])/),m='grimoire isn'+s+'t set up on this machine; ask the user to run '+b+'npx @goksening/grimoire'+(k?'@'+k[1]:'')+' init'+b;v=='mcp'?(console.error(m),process.exitCode=3):console.log(m)}}catch(x){if(v!='hook')throw x}", "mcp"]
+env_vars = ["HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+default_tools_approval_mode = "approve"
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "node -e \"const f=require('fs'),p=require('path'),a=process.argv.slice(1),i=a[0]=='--from',[v,e]=i?a.slice(2):a,r=x=>f.readFileSync(x,'utf8').trim();let d=p.resolve(i?a[1]:'.'),g,u;for(;!f.existsSync(g=d+'/.git');d=u)if((u=p.dirname(d))==d)process.exit();try{g=p.resolve(d,r(g).slice(8));g=p.resolve(g,r(g+'/commondir'))}catch{}const l=g+'/grimoire/launcher.cjs',y=d+'/.grimoire/config.yml';try{if(f.existsSync(l))require(l)(a,d);else if(f.existsSync(y)&&(v=='mcp'||e=='session-start')){const[s,b]=String.fromCharCode(39,96),k=r(y).match(/(?<![ -~])version:[ -']*([0-9]+[.][0-9]+[.][0-9]+([-+][(-~]*)?)(?![(-~])/),m='grimoire isn'+s+'t set up on this machine; ask the user to run '+b+'npx @goksening/grimoire'+(k?'@'+k[1]:'')+' init'+b;v=='mcp'?(console.error(m),process.exitCode=3):console.log(m)}}catch(x){if(v!='hook')throw x}\" -- hook session-start"
+timeout = 10
+# <<< grimoire

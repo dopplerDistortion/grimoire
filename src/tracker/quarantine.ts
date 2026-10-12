@@ -47,22 +47,30 @@ export type NewQuarantineRecord = Omit<QuarantineRecord, 'id' | 'at'>;
 
 const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
+/** A quarantine record's frontmatter keys, in the order its serializer writes them. */
+export const QUARANTINE_KEYS = ['kind', 'target', 'clears', 'reason', 'from', 'to', 'saw', 'basis', 'surface', 'actor', 'by', 'at'] as const;
+
+/** Whether a ledger record's kind is a quarantine's. */
+export function isQuarantineKind(kind: unknown): kind is QuarantineAction {
+  return kind === 'quarantine-mark' || kind === 'quarantine-clear';
+}
+
 function serialize(record: Omit<QuarantineRecord, 'id'>): Buffer {
-  const lines = [
-    formatLine('kind', record.kind),
-    formatLine('target', record.target),
-    formatLine('clears', sortedUnique(record.clears)),
-    formatLine('reason', record.reason),
-    formatLine('from', record.from),
-    formatLine('to', record.to),
-    formatLine('saw', [...record.saw]),
-    formatLine('basis', record.basis),
-    formatLine('surface', record.surface),
-    formatLine('actor', record.actor),
-    formatLine('by', record.by),
-    formatLine('at', record.at),
-  ];
-  return Buffer.from(`---\n${lines.join('\n')}\n---\n`, 'utf8');
+  const values: Record<(typeof QUARANTINE_KEYS)[number], unknown> = {
+    kind: record.kind,
+    target: record.target,
+    clears: sortedUnique(record.clears),
+    reason: record.reason,
+    from: record.from,
+    to: record.to,
+    saw: [...record.saw],
+    basis: record.basis,
+    surface: record.surface,
+    actor: record.actor,
+    by: record.by,
+    at: record.at,
+  };
+  return Buffer.from(`---\n${QUARANTINE_KEYS.map((key) => formatLine(key, values[key])).join('\n')}\n---\n`, 'utf8');
 }
 
 const object = (value: unknown): Record<string, unknown> =>
@@ -82,7 +90,7 @@ function parse(id: string, bytes: Buffer): QuarantineRecord | null {
   const values = new Map<string, unknown>();
   for (const { key, raw } of close < 0 ? [] : parseLines(text.slice(4, close))) values.set(key, lineValue(raw));
   const kind = values.get('kind');
-  if (kind !== 'quarantine-mark' && kind !== 'quarantine-clear') return null;
+  if (!isQuarantineKind(kind)) return null;
   const target = Object.fromEntries(Object.entries(object(values.get('target'))).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
   return {
     id,

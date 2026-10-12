@@ -84,6 +84,22 @@ describe('leases', () => {
     if (a.status === 'acquired') expect(a.lease.holder.name).toBe(`worktree:${world.a.dir}`);
   });
 
+  test('the listing names every lease, those whose names are kept as a hash included', async ({ world }) => {
+    const store = await storeOf(world.a.dir);
+    await store.leases.acquire(`worktree:${world.a.dir}`, { ttlMs: 1 });
+    await store.leases.acquire('upkeep-x', { ttlMs: 60_000 });
+    await sleep(20);
+
+    const listed = await store.leases.list();
+
+    expect(listed.map(({ name, state }) => [name, state.status]).sort()).toEqual(
+      [
+        [`worktree:${world.a.dir}`, 'expired'],
+        ['upkeep-x', 'held'],
+      ].sort(),
+    );
+  });
+
   test('N processes racing for one free lease produce exactly one holder', async ({ world }) => {
     const store = await storeOf(world.a.dir);
     await race(world.a.dir, 'race-free', 12, async (results) => {
