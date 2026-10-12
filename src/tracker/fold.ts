@@ -13,7 +13,8 @@
 // forks are resolved on read, from the ledger alone (src/knowledge/derive.ts).
 import { BLOB_MODE, TREE_MODE, type TreeEntry } from '../git/objects';
 import { conflictName } from './conflict';
-import { deleteConflict, foldEnd, foldExtra, foldIssue, foldMarker, foldOutcome, foldSession, foldSettings } from './fold-records';
+import { compareTimes, deleteConflict, foldEnd, foldExtra, foldIssue, foldMarker, foldOutcome, foldSession, foldSettings, sessionCutAt } from './fold-records';
+import { parseEnd } from './attempt';
 import {
   attemptDir,
   ATTEMPTS_DIR,
@@ -33,6 +34,12 @@ import { bareId } from './ids';
 import type { FileEdit, VirtualObjects } from './objects';
 import { collisionHash, parseIssue } from './record';
 import { foldPage, regenerateWikiTree, wikiConflictPath, wikiKind } from './wiki';
+
+/** What a fold noticed that a write committing it records (machine-locally: the capture doctor stats). */
+export interface FoldReport {
+  /** Late session records the fold dropped, as `<attempt>/<session-key>`: cut after the attempt's end on the other side. */
+  readonly lateDrops: string[];
+}
 
 /** The merge bases of the first commit and (a hypothetical merge of) the rest, as `git merge-base --all` gives them. */
 export type MergeBases = (commits: readonly string[]) => Promise<readonly string[]>;
@@ -64,10 +71,11 @@ export async function foldCommits(
   mergeBases: MergeBases,
   local: string,
   remote: string,
+  report?: FoldReport,
 ): Promise<string> {
   const base = await virtualBase(objects, mergeBases, await mergeBases([local, remote]), 0);
   const [ours, theirs] = await Promise.all([objects.commit(local), objects.commit(remote)]);
-  return (await foldTrees(objects, base, ours.tree, theirs.tree)) ?? objects.putTree([]);
+  return (await foldTrees(objects, base, ours.tree, theirs.tree, report)) ?? objects.putTree([]);
 }
 
 /**
@@ -98,9 +106,10 @@ export async function foldTrees(
   base: string | null,
   a: string | null,
   b: string | null,
+  report?: FoldReport,
 ): Promise<string | null> {
   [base, a, b] = await keepCollisionsApart(objects, base, a, b);
-  const fold = new Fold(objects, { a, b });
+  const fold = new Fold(objects, { a, b }, report);
   await fold.readTombstones([base, a, b]);
   return fold.finish(await fold.dir([], base, a, b));
 }
@@ -229,6 +238,7 @@ class Fold {
   constructor(
     private readonly objects: VirtualObjects,
     private readonly roots: { readonly a: string | null; readonly b: string | null },
+    private readonly report?: FoldReport,
   ) {}
 
   /**
@@ -418,6 +428,42 @@ class Fold {
     }
   }
 
+  /**
+   * Late session records (spec §14): when one side sealed the attempt and the
+   * other hadn't, a record the other side cut after that end is dropped (the
+   * sealing side's record of that context stands, if it has one) and counted;
+   * one cut before it folds like any record, the further reach winning, so it
+   * replaces the placeholder or a shorter record. `end.md` is never edited.
+   * Records written by a side that sealed the attempt itself are never late.
+   */
+  private async dropLateRecords(attempt: string, a: string, b: string, folded: string): Promise<string> {
+    const [aEntries, bEntries] = await Promise.all([this.entries(a), this.entries(b)]);
+    const [aEnd, bEnd] = [aEntries.get('end.md'), bEntries.get('end.md')];
+    if ((aEnd === undefined) === (bEnd === undefined)) return folded;
+    const [sealer, other] = aEnd ? [aEntries, bEntries] : [bEntries, aEntries];
+    const end = sealer.get('end.md')!;
+    if (end.mode === TREE_MODE) return folded;
+    const endAt = parseEnd(await this.objects.blob(end.oid)).at;
+    const [sealed, open] = await Promise.all(
+      [sealer, other].map((side) => {
+        const dir = side.get(SESSIONS_DIR);
+        return this.entries(dir && isTree(dir) ? dir.oid : null);
+      }),
+    );
+    const edits = new Map<string, FileEdit>();
+    for (const [name, entry] of open!) {
+      const kept = sealed!.get(name);
+      const key = name.replace(/\.md$/, '');
+      if (entry.mode === TREE_MODE || same(entry, kept) || this.purgedSessions.has(`${attempt}/${key}`)) continue;
+      const cutAt = sessionCutAt(await this.objects.blob(entry.oid));
+      if (cutAt === null || compareTimes(cutAt, endAt) <= 0) continue;
+      edits.set(`${SESSIONS_DIR}/${name}`, kept && kept.mode !== TREE_MODE ? { oid: kept.oid } : null);
+      this.report?.lateDrops.push(`${attempt}/${key}`);
+    }
+    if (edits.size === 0) return folded;
+    return (await this.objects.editTree(folded, edits)) ?? folded;
+  }
+
   /** Folds one path: a one-sided change wins outright; a change on both sides goes to its rule. */
   async entry(path: readonly string[], base: Entry, a: Entry, b: Entry): Promise<TreeEntry | null> {
     if (same(a, b)) return a ?? null;
@@ -440,6 +486,7 @@ class Fold {
       let oid = await this.dir(path, isTree(base) ? base.oid : null, a.oid, b.oid);
       // The wiki's index and log are never merged as text: the fold derives them again (spec §17).
       if (kind === 'wiki-dir') oid = await regenerateWikiTree(this.objects, oid, a.oid, b.oid);
+      if (kind === 'attempt-dir' && oid !== null) oid = await this.dropLateRecords(name, a.oid, b.oid, oid);
       return oid === null ? null : { mode: TREE_MODE, name, oid };
     }
     if (!isTree(a) && !isTree(b)) return this.file(path, base, a, b);

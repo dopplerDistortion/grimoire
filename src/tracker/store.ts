@@ -10,7 +10,8 @@ import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
 import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, SETTINGS_FILE, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
-import { foldCommits } from './fold';
+import { countLateDrops } from './capture-stats';
+import { foldCommits, type FoldReport } from './fold';
 import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
 import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
 import { serializeSettings, settingLine } from './settings';
@@ -229,6 +230,8 @@ class GitTrackerStore implements TrackerStore {
   private readonly objects: TrackerObjects;
   private readonly loader: SnapshotLoader;
   private readonly snapshots = new BoundedMap<string, Snapshot>(16);
+  /** What each fold snapshot's fold noticed: counted once a write commits that fold. */
+  private readonly foldReports = new WeakMap<Snapshot, FoldReport>();
   private readonly bases = new BoundedMap<string, readonly string[]>(256);
   private readonly turnstile = new Turnstile();
   private readonly fairness: FairnessLock;
@@ -435,6 +438,9 @@ class GitTrackerStore implements TrackerStore {
     const move = await this.moveRef(tips.local, commit);
     if (move.moved) {
       this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
+      // The fold this write committed dropped late session records: counted in this machine's doctor stats.
+      const drops = snapshot.virtual ? this.foldReports.get(snapshot)?.lateDrops : undefined;
+      if (drops && drops.length > 0) await countLateDrops(this.location.commonDir, drops, now).catch(() => {});
       return {
         result: outcome.result,
         commit,
@@ -667,8 +673,10 @@ class GitTrackerStore implements TrackerStore {
       const marker = await this.objects.fileAt(tree, FORMAT_FILE);
       checkTrackerMarker(marker ? parseMarker(marker.toString('utf8')) : null);
       const virtual = new VirtualObjects(this.objects);
-      const merged = await foldCommits(virtual, (commits) => this.mergeBases(commits), local, remote);
+      const report: FoldReport = { lateDrops: [] };
+      const merged = await foldCommits(virtual, (commits) => this.mergeBases(commits), local, remote, report);
       snapshot = await this.loader.folded(local, remote, merged, virtual);
+      this.foldReports.set(snapshot, report);
       this.snapshots.set(key, snapshot);
     }
     return snapshot;
