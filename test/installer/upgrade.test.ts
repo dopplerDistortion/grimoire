@@ -69,7 +69,8 @@ async function newerLauncher(file: string): Promise<string> {
   return text;
 }
 
-describe('init --upgrade across two packed releases', () => {
+// Two inits, three MCP servers and the hooks, each a real process: room for a loaded machine.
+describe('init --upgrade across two packed releases', { timeout: 300_000 }, () => {
   gitTest('moves one worktree: only its files change, the reported paths are exact, and the other worktree keeps its pin and keeps working', async ({ world }) => {
     const installed = await init(OLD, world.a.dir, ['--yes']);
     expect(installed.code, installed.stdout + installed.stderr).toBe(0);

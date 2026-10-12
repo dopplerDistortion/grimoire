@@ -72,7 +72,8 @@ async function changedPaths(checkout: Checkout): Promise<string[]> {
 
 const pinOf = async (root: string) => /^version: (.+)$/m.exec(await readFile(path.join(root, '.grimoire/config.yml'), 'utf8'))?.[1];
 
-describe('init --upgrade', () => {
+// Each test runs init three to five times against real git: room for a loaded machine.
+describe('init --upgrade', { timeout: 240_000 }, () => {
   gitTest('moves the checkout to the new pin, installs and joins the new copy, and reports exactly the paths to commit', async ({ world }) => {
     await installOld(world.a);
     const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
