@@ -176,13 +176,21 @@ export const skillRecord = define({
         const state = book.skills.get(edit.skill);
         const current = state?.version ?? null;
         if (version === current) return { result: { stray: edit.id, name: edit.skill, version, from: current, changed: false } };
-        if (current === null && state?.blocked) {
-          throw invalid({
-            stray: `${edit.skill} was deleted or ejected, and its name stays blocked until a human lifts the block (grimoire skill unblock ${edit.skill})`,
-          });
+        if (current === null) {
+          // Recording over no version creates the skill again: the checks a create gets.
+          if (state?.blocked) {
+            throw invalid({
+              stray: `${edit.skill} was deleted or ejected, and its name stays blocked until a human lifts the block (grimoire skill unblock ${edit.skill})`,
+            });
+          }
+          const cap = storeSetting(draft, 'skills.max_active') as number;
+          if (book.active >= cap) {
+            throw invalid({ stray: `${book.active} evolved skills are active, the cap (skills.max_active is ${cap}); delete one before recording another` });
+          }
         }
-        const expected = input.replace !== undefined ? input.replace : edit.base;
-        if (expected === null || expected !== current) throw new Moved(current);
+        // `replace` (null included: no version) names what the human confirmed replacing; else the edit's base must still be current.
+        const confirmed = input.replace !== undefined ? input.replace === current : edit.base !== null && edit.base === current;
+        if (!confirmed) throw new Moved(current);
         const saw = [...new Set([edit.base, current].filter((v): v is string => v !== null))];
         await writeSkillChange(draft, scanner, { kind: 'record', skill: edit.skill, text, saw }, { actor, by: author.email, surface: ctx.surface, clone });
         return { result: { stray: edit.id, name: edit.skill, version, from: current, changed: true } };

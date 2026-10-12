@@ -5,11 +5,13 @@
 // `skill discard` drops it, singly or in bulk.
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import { listStrayEdits } from '../../src/generated';
+import type { Clone } from '#harness';
+import { listStrayEdits, sharedScanner } from '../../src/generated';
 import { MachineLocalStore } from '../../src/machine-local';
 import type { CallContext, Core } from '../../src/core';
 import { readStatus } from '../../src/installer/status';
-import { skillVersionOf } from '../../src/knowledge';
+import { skillVersionOf, writeSkillChange, type SkillChange } from '../../src/knowledge';
+import { openTracker } from '../../src/tracker';
 import { runUpkeep } from '../../src/upkeep';
 import { coreTest as test } from '../core/support';
 import { editSkill, fileIn, NOTES, NOTES_V2, pinAndCommit, terminal, writeInto } from './support';
@@ -43,6 +45,20 @@ async function strays(core: Core, ctx: CallContext): Promise<Listed[]> {
   const listed = await core.call('skill_strays', {}, terminal(ctx));
   if (!listed.ok) throw new Error(`skill_strays failed: ${JSON.stringify(listed.error)}`);
   return listed.result.stray_edits as Listed[];
+}
+
+/** Writes a ledger change as a human at the dashboard would (delete and unblock have no op of their own yet). */
+async function decide(clone: Clone, change: SkillChange): Promise<void> {
+  const tracker = await openTracker(clone.dir);
+  const actor = { kind: 'human', client: 'dashboard', nonce: 'n' } as const;
+  try {
+    await tracker.transact({ op: change.kind, author: { name: clone.identity.name, email: clone.identity.email }, actor }, async (draft) => {
+      await writeSkillChange(draft, sharedScanner(), change, { actor, by: clone.identity.email, surface: 'dashboard', clone: 'c10e00000000000a' });
+      return { result: null };
+    });
+  } finally {
+    await tracker.close();
+  }
 }
 
 describe('finding a stray edit', () => {
@@ -131,6 +147,36 @@ describe('skill record', () => {
 
     expect(replaced).toMatchObject({ ok: true, result: { version: skillVersionOf(EDITED), from: v2.version, changed: true } });
     expect(await fileIn(world.a, COPY)).toBe(EDITED);
+  });
+
+  test('a stray edit of a skill deleted since is refused while its name is blocked; once a human lifts the block, it records over no version with replace: null, as the BASE_MOVED says', async ({
+    world,
+    grimoire,
+  }) => {
+    await pinAndCommit(world.a);
+    const core = grimoire.makeCore();
+    const v1 = await editSkill(core, grimoire.ctx, { name: 'release-notes', text: NOTES, base: null });
+    await core.close();
+    await writeInto(world.a.dir, COPY, EDITED);
+    await runUpkeep({ root: world.a.dir, force: true });
+    const [stray] = await strays(core, grimoire.ctx);
+    await decide(world.a, { kind: 'delete', skill: 'release-notes', to: null });
+
+    const blocked = await core.call('skill_record', { stray: stray!.id }, terminal(grimoire.ctx));
+    expect(blocked).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { stray: expect.stringContaining('grimoire skill unblock release-notes') } } } });
+
+    await decide(world.a, { kind: 'unblock', skill: 'release-notes', to: null });
+    const moved = await core.call('skill_record', { stray: stray!.id }, terminal(grimoire.ctx));
+    expect(moved).toMatchObject({ ok: false, error: { code: 'BASE_MOVED', message: expect.stringContaining('replace: null'), details: { base: v1.version, current: null } } });
+
+    const recorded = await core.call('skill_record', { stray: stray!.id, replace: null }, terminal(grimoire.ctx));
+    await core.close();
+
+    expect(recorded).toEqual({ ok: true, result: { stray: stray!.id, name: 'release-notes', version: skillVersionOf(EDITED), from: null, changed: true } });
+    expect(await strays(core, grimoire.ctx)).toEqual([]);
+    const shown = await core.call('skill_show', { name: 'release-notes' }, terminal(grimoire.ctx));
+    await core.close();
+    expect(shown).toMatchObject({ ok: true, result: { skills: [{ current: skillVersionOf(EDITED), status: 'active' }] } });
   });
 });
 
