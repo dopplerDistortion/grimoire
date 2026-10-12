@@ -55,6 +55,22 @@ export {
   type WikiView,
 } from './wiki';
 export type { NewQuarantineRecord, QuarantineDraft, QuarantineRecord, QuarantineView } from './quarantine';
+export {
+  aheadBehind,
+  checkHistory,
+  directoryFileConflicts,
+  inspectTrees,
+  removeStaleRefLocks,
+  staleRefLocks,
+  trackerTips,
+  type RecordFormats,
+  type RecordProblem,
+  type RefLock,
+  type StoreFinding,
+  type StoreSeverity,
+  type TrackerRefTips,
+  type TreeInspection,
+} from './check';
 export { isKnownOp, opEffect, type OpEffect } from './ops';
 export {
   CHORE_KINDS,

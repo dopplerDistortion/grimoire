@@ -70,7 +70,11 @@ describe('installing a copy', () => {
     const result = await installCopy(store, '1.4.2', { tarball, integrity });
 
     expect(result).toEqual({ status: 'installed', version: '1.4.2', dir: copyDir(store, '1.4.2'), integrity });
-    expect(JSON.parse(await readFile(path.join(copyDir(store, '1.4.2'), '.complete'), 'utf8'))).toEqual({ integrity });
+    // npm's integrity, and each installed file's sha256 for doctor to compare the copy with.
+    expect(JSON.parse(await readFile(path.join(copyDir(store, '1.4.2'), '.complete'), 'utf8'))).toEqual({
+      integrity,
+      files: { 'dist/launch.mjs': expect.stringMatching(/^[0-9a-f]{64}$/), 'package.json': expect.stringMatching(/^[0-9a-f]{64}$/) },
+    });
     expect(await readFile(path.join(copyDir(store, '1.4.2'), 'dist', 'launch.mjs'), 'utf8')).toContain('export async function launch');
     // Nothing but the copy: no temp folder, no trash.
     expect(await pkgListing(store)).toEqual(['1.4.2']);

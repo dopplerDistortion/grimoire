@@ -10,6 +10,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { fixturePath, makeTempDir, removeDir, type Checkout } from '#harness';
 import { seenHereRows, sessionKey, type SeenHereRow } from '../../src/capture/seen-here';
+import { sessionRecordProblem } from '../../src/capture/session-record';
 import { registerSweep } from '../../src/capture/sweeps';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
 import type { CallContext, Core, CoreOptions } from '../../src/core';
@@ -47,6 +48,8 @@ describe('closing an attempt', () => {
     const records = await sessionRecords(world.a, id, attempt);
     expect(records).toHaveLength(2);
     for (const record of records) expect(changed).toContain(`${attemptDir(id, attempt)}/sessions/${record.name}`);
+    // As doctor reads them: what capture wrote is what its serializer writes back.
+    for (const record of records) expect(sessionRecordProblem(Buffer.from(await trackerFile(world.a, tip, `${attemptDir(id, attempt)}/sessions/${record.name}`)))).toBeNull();
 
     const main = records.find((r) => r.fields.context === 'main')!;
     const subagent = records.find((r) => r.fields.context === CLAUDE_AGENT)!;
