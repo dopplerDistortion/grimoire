@@ -21,6 +21,7 @@ import {
 } from '../../core/support';
 import { buildGrimoire, cli, cliAtTerminal, fakeEditor, humanEnv, lastJsonOnScreen } from './support';
 import { setAsideStrayEdit } from '../../../src/generated';
+import { ok, patchResult, proposer, submit } from '../../core/proposer-support';
 
 let bin: string;
 let cleanup: () => Promise<void>;
@@ -309,6 +310,11 @@ describe('the human-only gate', () => {
       ['settings', 'set', 'auto-sync', 'false'],
       ['purge', 'trace', 'at-aaaaaa', 'secret'],
       ['purge', 'session', 'at-aaaaaa', '0123456789abcdef0123456789abcdef', 'secret'],
+      ['proposal', 'accept', 'pp-0000000000'],
+      ['proposal', 'reject', 'pp-0000000000', 'incorrect'],
+      ['proposal', 'dismiss', 'pp-0000000000'],
+      ['proposal', 'reconsider', 'pp-0000000000'],
+      ['proposal', 'purge', 'pp-0000000000', 'secret'],
     ];
     for (const args of calls) {
       const run = await expectRefUnmoved(a, () => cli(bin, args, { cwd: a.dir }));
@@ -402,6 +408,27 @@ describe('the human-only gate', () => {
     expect(run.code, run.screen).toBe(0);
     expect(lastJsonOnScreen(run.screen)).toMatchObject({ attempt, issue: id, purged: true, reason: 'a token', history: { pushed: false } });
     expect(await coreResult(grimoire.core, 'show', { ref: id }, alice)).toMatchObject({ past_attempts: [] });
+  });
+
+  cliTest('proposal decisions confirm with the typed proposal id at an interactive terminal', async ({ world, grimoire, a }) => {
+    const p = await proposer(grimoire, world);
+    const { proposal } = ok(await submit(p, patchResult(p)));
+    for (const verb of ['accept', 'reject', 'dismiss', 'reconsider', 'purge']) {
+      expect((await cli(bin, ['proposal', verb, '--help'], { cwd: a.dir })).json.confirmation, verb).toMatch(/types the id to confirm/);
+    }
+    expect((await cli(bin, ['proposal', 'reject', '--help'], { cwd: a.dir })).json).toMatchObject({ positionals: ['id', 'reason'] });
+    // Showing needs no terminal, only no agent marker.
+    expect((await cli(bin, ['proposal', 'show', proposal!], { cwd: a.dir })).json).toMatchObject({ id: proposal, status: 'pending' });
+
+    const typo = await expectRefUnmoved(a, () =>
+      cliAtTerminal(bin, ['proposal', 'accept', proposal!], { cwd: a.dir, answers: [{ when: /to confirm/, type: 'pp-wrong' }] }),
+    );
+    expect(typo.code, typo.screen).toBe(1);
+    expect(lastJsonOnScreen(typo.screen)).toMatchObject({ error: { code: 'INVALID', details: { fields: { confirmation: `must be ${proposal}` } } } });
+
+    const run = await cliAtTerminal(bin, ['proposal', 'dismiss', proposal!], { cwd: a.dir, answers: [{ when: new RegExp(`Type ${proposal} to confirm`), type: proposal! }] });
+    expect(run.code, run.screen).toBe(0);
+    expect(lastJsonOnScreen(run.screen)).toMatchObject({ id: proposal, status: 'dismissed' });
   });
 
   cliTest('resolve takes its per-field picks as a JSON flag, so it runs at a terminal', async ({ world, grimoire, a }) => {
