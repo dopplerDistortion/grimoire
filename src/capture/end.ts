@@ -15,12 +15,14 @@ import { defaultClaudeConfigDir, findClaudeTranscript } from './claude-code/root
 import { CODEX_READER_VERSION, cutCodex, readCodexTranscript } from './codex';
 import { defaultCodexHome, findCodexTranscript } from './codex/roots';
 import {
+  boundRuns,
   callSpans,
   creationsInSpans,
   observedCommits,
   referencedCommits,
   reflogCreations,
   transcriptCommitLines,
+  type CallSpan,
   type CommitFact,
   type ReferencedCommit,
   type SeenCommit,
@@ -659,6 +661,7 @@ class ContextCut {
     const versions = this.versions ?? new Map();
     const reads = transcriptSkillReads(cut, cut.steps, versions);
     const seen: SeenCommit[] = transcriptCommitLines(cut, cut.steps);
+    const runs = boundRuns(cut.steps, this.bound);
     const queue = launchedSubagents(cut.steps);
     const launched = new Set<string>();
     let complete = this.versions !== null;
@@ -675,22 +678,25 @@ class ContextCut {
       const steps = transcript.steps.slice(transcript.copiedSteps);
       reads.push(...transcriptSkillReads(transcript, steps, versions));
       seen.push(...transcriptCommitLines(transcript, steps));
+      runs.push(...boundRuns(steps, this.bound));
       queue.push(...launchedSubagents(steps));
     }
-    return { reads, commits: await this.observed(cut, seen), complete, launched };
+    return { reads, commits: await this.observed(cut, seen, runs), complete, launched };
   }
 
   /**
    * The context's observed commits (spec §14 Facts: Commits): the creation
    * lines its window and launched subagents showed, then the creating entries
    * of its worktree's HEAD reflog timed inside one of its calls, each
-   * snapshotted. Git that can't answer before the deadline leaves them bare,
+   * snapshotted. A bound subagent's run (`boundSubagentRuns`: launched in the window
+   * or in a subagent it launched) is no call of this context's: commits made
+   * in it are that subagent's record's. Git that can't answer before the deadline leaves them bare,
    * or out.
    */
-  private async observed(cut: Cut, seen: readonly SeenCommit[]): Promise<CommitFact[]> {
+  private async observed(cut: Cut, seen: readonly SeenCommit[], boundSubagentRuns: readonly CallSpan[]): Promise<CommitFact[]> {
     const stallMs = () => Math.max(100, this.deadline - Date.now());
     const reflog = await reflogCreations(this.target.worktree, { stallMs }).catch(() => []);
-    const inside = creationsInSpans(reflog, callSpans(cut.steps));
+    const inside = creationsInSpans(reflog, callSpans(cut.steps, this.bound), boundSubagentRuns);
     const who = { session: cut.session === '' ? null : cut.session, context: cut.context === '' ? null : cut.context };
     return observedCommits(this.input.repoRoot, seen, inside, who, { stallMs }).catch(() => seen.map(({ hash, session, context }) => ({ hash, via: 'observed' as const, session, context })));
   }

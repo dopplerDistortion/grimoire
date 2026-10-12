@@ -96,30 +96,44 @@ export function transcriptCommitLines(transcript: Pick<Transcript, 'session' | '
 export interface CallSpan {
   readonly start: number;
   readonly end: number;
+  /** A subagent launch's span: the subagent's whole run, not a call of the context's own. */
+  readonly launch?: true;
 }
 
-/**
- * The spans of a context's answered tool calls: a shell call from its call to
- * its result, a subagent launch over the whole subagent run. A
- * `grimoire-chores` subagent's launch is no span of the context's work.
- */
-export function callSpans(steps: readonly Step[]): CallSpan[] {
+/** The answered calls among `steps`, other than `grimoire-chores` launches: each launch with the subagent it ran, when known. */
+function answeredCalls(steps: readonly Step[]): { span: CallSpan; agentId: string | null }[] {
   const calls = new Map<string, number>();
   for (const step of steps) {
     if (step.kind === 'tool_call' || (step.kind === 'subagent_launch' && step.agentType !== CHORES_AGENT)) {
       if (!calls.has(step.id)) calls.set(step.id, Date.parse(step.at));
     }
   }
-  const spans: CallSpan[] = [];
+  const answered: { span: CallSpan; agentId: string | null }[] = [];
   for (const step of steps) {
     if (step.kind !== 'tool_result' && step.kind !== 'subagent_result') continue;
     const start = calls.get(step.id);
     if (start === undefined) continue;
     calls.delete(step.id);
     const end = Date.parse(step.at);
-    if (Number.isFinite(start) && Number.isFinite(end)) spans.push({ start, end });
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    answered.push(step.kind === 'subagent_result' ? { span: { start, end, launch: true }, agentId: step.agentId } : { span: { start, end }, agentId: null });
   }
-  return spans;
+  return answered;
+}
+
+/**
+ * The spans of a context's answered tool calls: a shell call from its call to
+ * its result, a subagent launch over the whole subagent run. A
+ * `grimoire-chores` subagent's launch is no span of the context's work, nor is
+ * a `bound` subagent's: that one's commits are its own record's.
+ */
+export function callSpans(steps: readonly Step[], bound: ReadonlySet<string> = new Set()): CallSpan[] {
+  return answeredCalls(steps).flatMap(({ span, agentId }) => (agentId !== null && bound.has(agentId) ? [] : [span]));
+}
+
+/** The runs of the `bound` subagents `steps` launched: a launcher's record credits no commit made inside one. */
+export function boundRuns(steps: readonly Step[], bound: ReadonlySet<string>): CallSpan[] {
+  return answeredCalls(steps).flatMap(({ span, agentId }) => (agentId !== null && bound.has(agentId) ? [span] : []));
 }
 
 /** A HEAD-reflog entry that created a commit: its new hash and when (epoch ms, whole seconds). */
@@ -160,10 +174,13 @@ export async function reflogCreations(worktree: string, options: { stallMs?: Sta
 /**
  * The reflog creations timed inside one of `spans`. Reflog times are whole
  * seconds: an entry counts from the second its call started in to the end of
- * the second its result came in.
+ * the second its result came in. One inside a subagent launch's span counts
+ * only outside `excluded` (the runs of bound subagents, launched in it or in
+ * the window): those are credited to their own records.
  */
-export function creationsInSpans(entries: readonly ReflogCreation[], spans: readonly CallSpan[]): ReflogCreation[] {
-  return entries.filter(({ at }) => spans.some(({ start, end }) => at >= Math.floor(start / 1000) * 1000 && at <= end));
+export function creationsInSpans(entries: readonly ReflogCreation[], spans: readonly CallSpan[], excluded: readonly CallSpan[] = []): ReflogCreation[] {
+  const inside = (at: number, { start, end }: CallSpan) => at >= Math.floor(start / 1000) * 1000 && at <= end;
+  return entries.filter(({ at }) => spans.some((span) => inside(at, span) && (!span.launch || !excluded.some((run) => inside(at, run)))));
 }
 
 /** Where the generated skill copies live (spec §15): an agent committing them is flagged. */

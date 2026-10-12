@@ -18,6 +18,8 @@ import { trackerFile, trackerTip } from './support';
 const SESSION = 'ff9eace1-0645-4dd9-bf34-f61ffa87b3c2';
 const LAUNCH = 'toolu_01UTXByWB7vpCJEQ9XQtSwdv';
 const SUBAGENT = 'ae1c0b7534f14a681';
+/** The subagent's own first call: its `Write`. */
+const SUBAGENT_WRITE = 'toolu_01EJf9mTZ9UgvtydMrY6JVGu';
 
 /** The cut's budget: what is tested here is which commits count, never how fast git answers on a loaded machine. */
 const UNHURRIED = 120_000;
@@ -142,6 +144,33 @@ describe('observed commits', { timeout: 180_000 }, () => {
       expect(flagged(resolved)).toBe(true);
     },
   );
+
+  commitTest('a bound subagent’s commits are credited to its own record only, never again to its launcher’s', async ({ world, grimoire, capture, session }) => {
+    const { core } = session;
+    capture.at('2026-10-12T12:39:05.000Z');
+    const id = await created(core, grimoire.ctx, 'Commit it twice');
+    const claim = await core.call('claim', { id }, claudeCallIn(grimoire.ctx, SESSION, LAUNCH));
+    if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+    const attempt = claim.result.attempt;
+    // The subagent binds too, through a call of its own (its Write, 12:39:10).
+    capture.at('2026-10-12T12:39:10.100Z');
+    const update = await core.call('update', { id, labels_add: ['sub'], attempt }, claudeCallIn(grimoire.ctx, SESSION, SUBAGENT_WRITE, { id: SUBAGENT, type: 'general-purpose' }));
+    expect(update.ok).toBe(true);
+    // Inside the subagent's Bash call (12:39:13.8 to 12:39:25.0), and so inside the launcher's Agent call too.
+    const inside = await commitAt(world.a, '2026-10-12T12:39:20Z', { 'sub.txt': 'sub\n' }, 'Add sub');
+    capture.at('2026-10-12T12:39:30.000Z');
+
+    await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCallIn(grimoire.ctx, SESSION, 'toolu_close'));
+
+    const records = await sessionRecords(world.a, id, attempt);
+    const of = (context: string) => records.find((record) => record.fields.context === context)!.fields;
+    expect(of(SUBAGENT).commits).toEqual([
+      { hash: 'dba2f59', via: 'observed', session: SESSION, context: SUBAGENT },
+      expect.objectContaining({ hash: inside, via: 'observed', session: SESSION, context: SUBAGENT }),
+    ]);
+    expect(of('main').facts).toBe('scanned');
+    expect(of('main').commits).toEqual([]);
+  });
 
   commitTest(
     'a clean git merge that makes a commit is observed, flagged when its skill file blends both sides; a fast-forward makes none',

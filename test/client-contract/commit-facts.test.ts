@@ -9,7 +9,7 @@
 // Codex child thread (`git log --oneline -1`).
 import { describe, expect, it } from 'vitest';
 import { fixturePath } from '#harness';
-import { callSpans, transcriptCommitLines } from '../../src/capture/commit-facts';
+import { boundRuns, callSpans, creationsInSpans, transcriptCommitLines, type CallSpan } from '../../src/capture/commit-facts';
 import { readClaudeCodeTranscript, readCodexTranscript, type Transcript } from '../../src/capture';
 
 async function claude(file: string, agentId?: string): Promise<Transcript> {
@@ -69,5 +69,22 @@ describe('the spans of a context’s tool calls', () => {
       ['2026-10-12T12:39:08.800Z', '2026-10-12T12:39:25.836Z'],
       ['2026-10-12T12:39:26.801Z', '2026-10-12T12:39:27.570Z'],
     ]);
+  });
+});
+
+describe('a bound subagent’s run', () => {
+  it('is no span of its launcher’s: its launch drops out, and a reflog creation inside its run counts only inside a call of the launcher’s own', async () => {
+    const main = await claude(SUBAGENT_COMMIT);
+    const bound = new Set([SUBAGENT]);
+    const iso = (spans: readonly CallSpan[]) => spans.map(({ start, end }) => [new Date(start).toISOString(), new Date(end).toISOString()]);
+
+    expect(iso(callSpans(main.steps, bound))).toEqual([['2026-10-12T12:39:26.801Z', '2026-10-12T12:39:27.570Z']]);
+    expect(iso(boundRuns(main.steps, bound))).toEqual([['2026-10-12T12:39:08.800Z', '2026-10-12T12:39:25.836Z']]);
+    // The subagent's commit (its reflog entry at 12:39:24) is not the launcher's, nor is it when the launch reached it through an unbound subagent.
+    const commit = { hash: 'dba2f59', at: Date.parse('2026-10-12T12:39:24Z') };
+    expect(creationsInSpans([commit], callSpans(main.steps, bound), boundRuns(main.steps, bound))).toEqual([]);
+    expect(creationsInSpans([commit], callSpans(main.steps), boundRuns(main.steps, bound))).toEqual([]);
+    // A call of the launcher's own running at the same time still counts.
+    expect(creationsInSpans([commit], [{ start: Date.parse('2026-10-12T12:39:23Z'), end: Date.parse('2026-10-12T12:39:25Z') }], boundRuns(main.steps, bound))).toEqual([commit]);
   });
 });
