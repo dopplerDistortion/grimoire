@@ -13,7 +13,7 @@ import { INVALID_RESULTS, readRun, writeRun } from '../../src/knowledge/chores';
 import { MachineLocalStore } from '../../src/machine-local';
 import { inspectTrees, openTracker, parseProposal, serializeProposal } from '../../src/tracker';
 import type { Checkout, Clone } from '#harness';
-import { choreAgent, Clock, commitChoreRun, compileRecord, putPage, terminal, workPair } from './chore-support';
+import { choreAgent, Clock, commitChoreRun, compileRecord, DEBRIEF, putPage, terminal, workPair } from './chore-support';
 import { agentContext, commitToTracker, coreTest as test, expectRefUnmoved, fetchTracker, fetchTrackerFrom, pushTracker, T0, trackerFile, trackerTip, TRACKER_REF, type Grimoire } from './support';
 import { writeSkillChange } from '../../src/knowledge';
 import { bundledRules, createScanner } from '../../src/scanner';
@@ -76,17 +76,26 @@ async function readAll(core: Core, ctx: CallContext, run: string, item?: string)
  * pattern page citing the fails and the compile that consumed them: the Skill
  * Proposer is due. Starts its run and reads everything, the page included.
  */
-async function proposer(grimoire: Grimoire, world: { a: Clone }, options: { read?: boolean } = {}): Promise<ProposerRun> {
+async function proposer(
+  grimoire: Grimoire,
+  world: { a: Clone },
+  options: { read?: boolean; work?: (core: Core) => Promise<{ fails: string[]; passes: string[] }> } = {},
+): Promise<ProposerRun> {
   const clock = new Clock(T0);
   const core = grimoire.makeCore({ clock: clock.now });
   await core.call('settings_set', { key: 'chores.compile_pairs', value: 100 }, terminal(grimoire.ctx));
   const edited = ok(await core.call('skill_edit', { name: SKILL, text: SKILL_V1, base: null }, terminal(grimoire.ctx)));
-  const fails = [
-    await workPair(core, grimoire.ctx, 'fail', 'Port clash in api tests'),
-    await workPair(core, grimoire.ctx, 'fail', 'Port clash in worker tests'),
-    await workPair(core, grimoire.ctx, 'fail', 'Port clash in e2e tests'),
-  ];
-  const passes = [await workPair(core, grimoire.ctx, 'pass', 'Ports fixed in cli tests')];
+  const work =
+    options.work ??
+    (async () => ({
+      fails: [
+        await workPair(core, grimoire.ctx, 'fail', 'Port clash in api tests'),
+        await workPair(core, grimoire.ctx, 'fail', 'Port clash in worker tests'),
+        await workPair(core, grimoire.ctx, 'fail', 'Port clash in e2e tests'),
+      ],
+      passes: [await workPair(core, grimoire.ctx, 'pass', 'Ports fixed in cli tests')],
+    }));
+  const { fails, passes } = await work(core);
   clock.advance(25);
   const version = await putPage(world.a, world.a, PAGE, [...fails, ...passes]);
   await commitChoreRun(world.a, world.a, compileRecord('cr-0000000001', clock.now().toISOString(), [...fails.map((t) => [t, 'fail'] as const), [passes[0]!, 'pass']], { [PAGE]: version }));
@@ -235,6 +244,103 @@ describe('chore_submit: the mechanical checks refuse with reason codes, one fix-
     expect(fixed).toMatchObject({ result: 'proposed' });
   });
 });
+
+describe('chore_submit: the evidence minimum counts only served traces with an outcome, unquarantined, from 2 issues, 2 failing, and a pattern page', () => {
+  test('no pattern page; then a single fail; then quarantined fails; then a fail a human set to none: too_little_evidence each time, and the citations pass once the fails count again', async ({
+    world,
+    grimoire,
+  }) => {
+    const p = await proposer(grimoire, world);
+    const all = patchResult(p).citations as string[];
+    const noPage = all.filter((item) => !item.startsWith('page:'));
+    expect(ok(await submit(p, patchResult(p, { citations: noPage })))).toMatchObject({ result: 'invalid', reasons: ['too_little_evidence'] });
+    const claims = patchResult(p).claims as Record<string, unknown>;
+    const oneFail = { citations: [`page:${PAGE}`, `trace:${p.fails[0]}`, `trace:${p.passes[0]}`, `skill:${SKILL}`], claims: { ...claims, failures: [{ trace: p.fails[0], line: 'a fixed port was already taken' }] } };
+    expect(ok(await submit(p, patchResult(p, oneFail)))).toMatchObject({ result: 'failed', reasons: ['too_little_evidence'] });
+
+    // Served, then quarantined: two of the three fails no longer count.
+    const human = terminal(grimoire.ctx);
+    const second = await manualRun(p);
+    for (const trace of p.fails.slice(1)) ok(await p.core.call('quarantine', { trace, reason: 'leaked a token' }, human));
+    expect(ok(await submit(second, patchResult(second)))).toMatchObject({ result: 'invalid', reasons: ['too_little_evidence'] });
+    // Lifted, but a human says the third was no real failure: three cited traces, one with outcome none, count as two.
+    for (const trace of p.fails.slice(1)) ok(await p.core.call('unquarantine', { trace }, human));
+    ok(await p.core.call('outcome_set', { attempt: p.fails[2], verdict: 'none', reason: 'the CI runner was down' }, human));
+    const failsOnly = { citations: [`page:${PAGE}`, ...p.fails.map((t) => `trace:${t}`), `skill:${SKILL}`] };
+    expect(ok(await submit(second, patchResult(second, failsOnly)))).toMatchObject({ result: 'failed', reasons: ['too_little_evidence'] });
+
+    ok(await p.core.call('outcome_set', { attempt: p.fails[2], verdict: 'fail', reason: 'it was real' }, human));
+    const third = await manualRun(p);
+    expect(ok(await submit(third, patchResult(third)))).toMatchObject({ result: 'proposed' });
+  });
+
+  test('three traces, two failing, all from one issue: too_little_evidence', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world, {
+      work: async (core) => {
+        const { id } = ok(await core.call('create', { title: 'Port clash everywhere', body: 'Body' }, grimoire.ctx));
+        const attempts: string[] = [];
+        for (const ending of ['release', 'release', 'close'] as const) {
+          const { attempt } = ok(await core.call('claim', { id }, grimoire.ctx));
+          if (ending === 'close') ok(await core.call('close', { id, attempt, reason: 'done', debrief: DEBRIEF }, grimoire.ctx));
+          else ok(await core.call('release', { id, attempt, debrief: DEBRIEF }, grimoire.ctx));
+          attempts.push(attempt);
+        }
+        return { fails: attempts.slice(0, 2), passes: attempts.slice(2) };
+      },
+    });
+    expect(ok(await submit(p, patchResult(p)))).toMatchObject({ result: 'invalid', reasons: ['too_little_evidence'], problems: { citations: expect.stringContaining('3 traces from 1 issues, 2 failing') } });
+  });
+});
+
+describe('chore_submit: names, the cap, copying, anchors and duplicates', () => {
+  test('a reserved name, an ambiguous anchor, a patch that changes nothing, then a create at the cap that copies CLAUDE.md with an overlong description', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    expect(ok(await submit(p, createResult(p, 'chores', longBody(5))))).toMatchObject({ result: 'invalid', reasons: ['reserved_name'] });
+    // "the " occurs on many lines of the skill.
+    const ambiguous = [{ op: 'insert-after', anchor: 'the ', text: 'x' }];
+    expect(ok(await submit(p, patchResult(p, { ops: ambiguous })))).toMatchObject({ result: 'failed', reasons: ['anchor_ambiguous'] });
+
+    const second = await manualRun(p);
+    const same = [{ op: 'replace', anchor: '3. Pin random seeds', text: '3. Pin random seeds' }];
+    expect(ok(await submit(second, patchResult(second, { ops: same })))).toMatchObject({ result: 'invalid', reasons: ['no_change'] });
+
+    const human = terminal(grimoire.ctx);
+    ok(await p.core.call('settings_set', { key: 'skills.max_active', value: 1 }, human));
+    ok(await p.core.call('settings_set', { key: 'skills.description_max', value: 20 }, human));
+    const copiedLines = ['Always bind test servers to an ephemeral port.', 'Never hard-code a port number in any test file.', 'Read the bound port back from the listening server.'];
+    await writeFile(path.join(world.a.dir, 'CLAUDE.md'), `# House rules\n\n${copiedLines.join('\n')}\n`);
+    const copying = createResult(second, 'free-ports', `# Free ports\n\n${copiedLines.join('\n')}\n`);
+    expect(ok(await submit(second, copying))).toMatchObject({ result: 'failed', reasons: ['at_cap', 'copied', 'description_too_long'] });
+  });
+
+  test('a create naming a skill a human deleted is blocked_name; the same text as a pending proposal is duplicate_pending', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const human = terminal(grimoire.ctx);
+    // A human wrote and then deleted free-ports: the name stays blocked.
+    ok(await p.core.call('skill_edit', { name: 'free-ports', text: skillText('free-ports', 'Old ports advice.', '# Old\n'), base: null }, human));
+    await removeSkill(world.a, world.a, 'free-ports');
+    expect(ok(await submit(p, createResult(p, 'free-ports', longBody(5))))).toMatchObject({ result: 'invalid', reasons: ['blocked_name'] });
+    const { proposal } = ok(await submit(p, patchResult(p)));
+
+    // A second slot, and the same text again.
+    ok(await p.core.call('settings_set', { key: 'proposals.pending_limit', value: 2 }, human));
+    const again = await manualRun(p);
+    expect(ok(await submit(again, patchResult(again)))).toMatchObject({ result: 'invalid', reasons: ['duplicate_pending'], problems: { text: expect.stringContaining(proposal!) } });
+  });
+});
+
+/** A human's delete of an evolved skill, written to the ledger as the gate will. */
+async function removeSkill(checkout: Checkout, clone: Clone, skill: string): Promise<void> {
+  const tracker = await openTracker(checkout.dir);
+  try {
+    await tracker.transact({ op: 'delete', author: { name: clone.identity.name, email: clone.identity.email }, actor: { kind: 'human', surface: 'cli' } }, async (draft) => {
+      await writeSkillChange(draft, createScanner(bundledRules), { kind: 'delete', skill, to: null }, { actor: { kind: 'human' }, by: clone.identity.email, surface: 'cli', clone: 'test-clone' });
+      return { result: null };
+    });
+  } finally {
+    await tracker.close();
+  }
+}
 
 /** A human's decision on a proposal, written to the ledger as the gate will (GOK-165 brings the decision ops). */
 async function decide(checkout: Checkout, clone: Clone, kind: 'reject' | 'dismiss' | 'accept', skill: string, proposal: string, extra: { reason?: string; text?: string; at?: Date } = {}): Promise<void> {
