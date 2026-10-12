@@ -19,6 +19,8 @@ import { joinClone, reportingPackage } from '../../installer/support';
 import { VERSION } from '../../../src/version';
 import { installed, read } from '../../upkeep/support';
 import { buildGrimoire } from './support';
+import { CLAUDE_SESSION, MAIN_CALL, claudeCall, claudeConfigDir, sessionRecords, setExcerptMode } from '../../core/capture-support';
+import { removeDir } from '#harness';
 
 /** The built package, laid out as published: package.json beside dist/. */
 let packageDir: string;
@@ -39,12 +41,12 @@ interface Server {
 }
 
 /** Spawns the MCP entry through the frozen bootstrap with GRIMOIRE_DEBUG, as Claude Code connects (2026-07-28). */
-async function server(cwd: string): Promise<Server> {
+async function server(cwd: string, env: Record<string, string> = {}): Promise<Server> {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [...MCP_ENTRY_ARGS],
     cwd,
-    env: { ...(process.env as Record<string, string>), GRIMOIRE_DEBUG: '1' },
+    env: { ...(process.env as Record<string, string>), GRIMOIRE_DEBUG: '1', ...env },
     stderr: 'pipe',
   });
   let stderr = '';
@@ -133,6 +135,41 @@ describe('upkeep in grimoire mcp', () => {
     } finally {
       await writeFile(release, '');
       await Promise.all(servers.map((s) => s.client.close()));
+    }
+  });
+
+  gitTest('a context a crashed session left on an open attempt is cut at the next server start', { timeout: 120_000 }, async ({ world }) => {
+    const root = world.a.dir;
+    await initializeTracker(world.a, world.a);
+    await installed(root);
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    await joinClone(store, VERSION, { dir: packageDir, integrity: null });
+    await setExcerptMode(world.a, 'excerpts');
+    const configDir = await claudeConfigDir({ folder: 'claude-code/transcripts/subagent', session: CLAUDE_SESSION });
+    try {
+      // A Claude Code session claimed, then crashed: no close, no server left to sweep it.
+      const writer = createCore({ autoSync: 'off', clock: () => new Date('2026-10-11T03:27:17.500Z') });
+      const ctx = claudeCall(agentContext(world.a), MAIN_CALL);
+      const created = await writer.call('create', { title: 'Left behind' }, ctx);
+      if (!created.ok) throw new Error(JSON.stringify(created.error));
+      const id = (created.result as { id: string }).id;
+      const claimed = await writer.call('claim', { id }, ctx);
+      if (!claimed.ok) throw new Error(JSON.stringify(claimed.error));
+      const attempt = (claimed.result as { attempt: string }).attempt;
+      await writer.close();
+
+      const next = await server(root, { CLAUDE_CONFIG_DIR: configDir });
+      try {
+        await next.client.listTools();
+        await expect.poll(() => outcomes(next.stderr()).get('excerpt-sweep') ?? [], { timeout: 60_000, interval: 100 }).toEqual(['ran']);
+        const [record] = await sessionRecords(world.a, id, attempt);
+        expect(record?.fields, next.stderr()).toMatchObject({ session: CLAUDE_SESSION, context: 'main', excerpt: 'cut', facts: 'scanned' });
+        expect(record!.body).toContain('tool Agent');
+      } finally {
+        await next.client.close();
+      }
+    } finally {
+      await removeDir(configDir);
     }
   });
 });
