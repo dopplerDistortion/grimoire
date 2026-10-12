@@ -276,6 +276,14 @@ _Avoid_: Validation, review, linting
 A fact grimoire computes about a skill proposal and shows its reviewer, such as where each command it adds comes from (its token origin), dangerous patterns or a near-rewrite; it never rejects a proposal by itself.
 _Avoid_: Warning, score, lint
 
+**Red flag**:
+A risk flag, or the live evidence flag (the evidence minimum re-checked now and no longer met after a purge, a quarantine or an outcome flip), that a human must acknowledge, one by one, before accepting a skill proposal; the skill ledger records each acknowledgement.
+_Avoid_: Blocker, error, veto
+
+**Lapsed**:
+The status of a skill proposal whose mechanical checks, run again at accept, failed (a create over the cap, a new stub collision, a stricter rule after an upgrade); nothing is accepted and the pending slot frees.
+_Avoid_: Expired, failed, invalid
+
 **Skill version**:
 One exact text of an evolved skill, identified by that text alone, so the same words are always the same version.
 _Avoid_: Revision, snapshot, release
