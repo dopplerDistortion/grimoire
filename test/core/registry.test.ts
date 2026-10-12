@@ -8,6 +8,7 @@ describe('the op registry', () => {
       const byName = Object.fromEntries(core.ops.map((op) => [op.name, op]));
 
       expect(Object.keys(byName).sort()).toEqual([
+        'activity',
         'assign',
         'chore_abandon',
         'chore_read',
@@ -81,6 +82,7 @@ describe('the op registry', () => {
       });
       expect(byName.skill_edit).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
       expect(byName.skill_show).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      expect(byName.activity).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
       expect(byName.create).toMatchObject({
         kind: 'write',
         policy: 'agent',
