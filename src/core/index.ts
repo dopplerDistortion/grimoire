@@ -221,6 +221,7 @@ function watched(tracker: TrackerStore, requestSync: (commit: string) => void, b
     location: tracker.location,
     read: () => tracker.read(),
     tips: () => tracker.tips(),
+    check: () => tracker.check(),
     now: () => tracker.now(),
     async transact(spec, body) {
       const write = await tracker.transact(spec, body);

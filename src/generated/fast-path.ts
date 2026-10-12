@@ -19,6 +19,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readCheckoutConfig } from '../core/host';
+import { GrimoireError } from '../errors';
 import type { Lease, MachineLocalStore } from '../machine-local';
 import { operationInProgress, upgradeInProgress, worktreeLeaseName } from '../upkeep/checkout';
 import { VERSION } from '../version';
@@ -45,7 +46,7 @@ export interface FastPathResult {
   readonly wrote: readonly string[];
   /** Copies saved to the stray-edit store before the served text went back. */
   readonly strayEdits: readonly { skill: string; path: string }[];
-  /** Why nothing was tried, when nothing was: `pin`, `upgrade`, a git operation, `held`, `budget`. */
+  /** Why nothing was tried, when nothing was: `pin`, `upgrade`, a git operation, `unsynced` (no tracker here), `held`, `budget`. */
   readonly skipped?: string;
 }
 
@@ -92,6 +93,16 @@ async function acquire(store: MachineLocalStore, worktree: string, waitMs: numbe
   }
 }
 
+/** The served set, or null without a tracker to read it from (nothing to write: upkeep says why). */
+async function servedOrUnsynced(store: MachineLocalStore, worktree: string): Promise<ServedSet | null> {
+  try {
+    return await cachedServedSet(store, worktree);
+  } catch (error) {
+    if (error instanceof GrimoireError && error.code === 'NOT_SYNCED') return null;
+    throw error;
+  }
+}
+
 /** Runs the fast path in `worktree`: what it wrote, or why it didn't try. Throws only on what it couldn't read. */
 export async function sessionStartFastPath(store: MachineLocalStore, worktree: string, options: FastPathOptions = {}): Promise<FastPathResult> {
   const version = options.version ?? VERSION;
@@ -100,7 +111,9 @@ export async function sessionStartFastPath(store: MachineLocalStore, worktree: s
   if (skip) return { ...NOTHING, skipped: skip };
   // What it writes goes on the generated-path list, which the machine marker governs.
   await store.marker.check();
-  if (!(await differs(worktree, await cachedServedSet(store, worktree)))) return NOTHING;
+  const first = await servedOrUnsynced(store, worktree);
+  if (!first) return { ...NOTHING, skipped: 'unsynced' };
+  if (!(await differs(worktree, first))) return NOTHING;
   if (late()) return { ...NOTHING, skipped: 'budget' };
   const lease = await acquire(store, worktree, options.leaseWaitMs ?? FAST_PATH_LEASE_WAIT_MS);
   if (!lease) return { ...NOTHING, skipped: 'held' };
@@ -108,7 +121,8 @@ export async function sessionStartFastPath(store: MachineLocalStore, worktree: s
     // Under the lease: the checkout may have moved on, and a decision's refresh may have run.
     const again = await leaveAlone(store, worktree, version);
     if (again) return { ...NOTHING, skipped: again };
-    const served = await cachedServedSet(store, worktree);
+    const served = await servedOrUnsynced(store, worktree);
+    if (!served) return { ...NOTHING, skipped: 'unsynced' };
     if (late()) return { ...NOTHING, skipped: 'budget' };
     const report = await reconcileWorktree(store, worktree, served, 'fast-path');
     return { wrote: report.wrote, strayEdits: report.strayEdits };

@@ -3,7 +3,10 @@
 // put back; only a human's `skill record` makes it a skill version (checking
 // its base, with a three-way diff when the current version moved), and
 // `skill discard` drops it, singly or in bulk.
+import path from 'node:path';
 import { describe, expect } from 'vitest';
+import { listStrayEdits } from '../../src/generated';
+import { MachineLocalStore } from '../../src/machine-local';
 import type { CallContext, Core } from '../../src/core';
 import { readStatus } from '../../src/installer/status';
 import { skillVersionOf } from '../../src/knowledge';
@@ -189,5 +192,27 @@ describe('the human-only gate', () => {
     }
     expect(await strays(core, grimoire.ctx)).toHaveLength(1);
     expect(await fileIn(world.a, COPY)).toBe(NOTES);
+  });
+});
+
+describe('a tracker that can’t be read', () => {
+  test('upkeep leaves the generated output as it is and sets no copy aside as a stray edit, even when the served-set cache was warm', async ({ world, grimoire }) => {
+    await pinAndCommit(world.a);
+    const core = grimoire.makeCore();
+    await editSkill(core, grimoire.ctx, { name: 'release-notes', text: NOTES, base: null });
+    await core.close();
+    await runUpkeep({ root: world.a.dir, force: true });
+    expect(await fileIn(world.a, COPY)).toBe(NOTES);
+
+    // Every tracker ref of the clone gone: reads say NOT_SYNCED, never "nothing served".
+    const refs = (await world.a.git(['for-each-ref', '--format=%(refname)'])).split(/\r?\n/).filter((ref) => ref.endsWith('grimoire/tracker'));
+    expect(refs.length).toBeGreaterThan(0);
+    for (const ref of refs) await world.a.git(['update-ref', '-d', ref]);
+    await runUpkeep({ root: world.a.dir, force: true });
+    await runUpkeep({ root: world.a.dir, force: true });
+
+    expect(await fileIn(world.a, COPY)).toBe(NOTES);
+    expect(await fileIn(world.a, '.claude/skills/grimoire-release-notes/SKILL.md')).toContain('name: grimoire-release-notes');
+    expect(await listStrayEdits(new MachineLocalStore(path.join(world.a.dir, '.git')))).toEqual([]);
   });
 });
