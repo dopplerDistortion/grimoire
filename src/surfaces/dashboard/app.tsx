@@ -1,10 +1,14 @@
 // The dashboard's app shell (spec §20, Shell): the sign-in exchange, the
-// signed-out page, and the frame later views plug into (sidebar, content,
-// footer with the live state and the signed-in identity). Served under a CSP
-// with no inline script or style: every style lives in styles.css.
-import { useEffect, useState } from 'preact/hooks';
+// signed-out page, and the frame the views plug into (sidebar, content routed
+// by path, footer with the live state and the signed-in identity), plus the
+// dialog host and toasts every view shares. Served under a CSP with no inline
+// script or style: every style lives in styles.css.
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, instance, session, signedOut, signIn, signOut, type InstanceInfo, type SessionInfo } from './api';
+import { IssuesScreen } from './issues';
 import { connectLive, type LiveState } from './live';
+import { interceptLinks, usePath } from './router';
+import { DialogHost, Me, Toasts } from './ui';
 
 /** Where a signed-in browser goes after `/login`: a same-origin path only. */
 function nextPath(raw: string | null): string {
@@ -70,9 +74,18 @@ const SECTIONS = [
   { path: '/settings', label: 'Settings' },
 ];
 
+function sectionOf(path: string): string {
+  const top = `/${path.split('/')[1] ?? ''}`;
+  return SECTIONS.some((section) => section.path === top) ? top : '/';
+}
+
 function Shell({ session: who, instance: running }: { session: SessionInfo; instance: InstanceInfo }) {
   const [live, setLive] = useState<LiveState>('connecting');
   const [info, setInfo] = useState(running);
+  const path = usePath();
+  const shell = useRef<HTMLDivElement>(null);
+  const section = sectionOf(path);
+  useEffect(() => (shell.current ? interceptLinks(shell.current) : undefined), []);
 
   useEffect(
     () =>
@@ -87,18 +100,19 @@ function Shell({ session: who, instance: running }: { session: SessionInfo; inst
   );
 
   return (
-    <div class="shell">
+    <Me.Provider value={{ email: who.identity?.email ?? null, name: who.identity?.name ?? null }}>
+    <div class="shell" ref={shell}>
       {info.notice ? <div class="banner">{info.notice}</div> : null}
       <nav class="sidebar">
         <span class="brand">grimoire</span>
-        {SECTIONS.map((section) => (
-          <a key={section.path} href={section.path} class={location.pathname === section.path ? 'current' : undefined}>
-            {section.label}
+        {SECTIONS.map((entry) => (
+          <a key={entry.path} href={entry.path} class={section === entry.path ? 'current' : undefined}>
+            {entry.label}
           </a>
         ))}
       </nav>
-      <main class="content">
-        <h1>{SECTIONS.find((section) => section.path === location.pathname)?.label ?? 'grimoire'}</h1>
+      <main class={section === '/issues' ? 'content issues-content' : 'content'}>
+        {section === '/issues' ? <IssuesScreen path={path} /> : <h1>{SECTIONS.find((entry) => entry.path === section)?.label ?? 'grimoire'}</h1>}
       </main>
       <footer class="footer">
         <span class={`live live-${live}`}>{live === 'live' ? 'live' : live === 'reconnecting' ? 'reconnecting…' : 'connecting…'}</span>
@@ -108,6 +122,9 @@ function Shell({ session: who, instance: running }: { session: SessionInfo; inst
           Sign out
         </button>
       </footer>
+      <DialogHost />
+      <Toasts />
     </div>
+    </Me.Provider>
   );
 }
