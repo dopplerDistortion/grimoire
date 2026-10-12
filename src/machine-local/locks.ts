@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Json } from './docs';
 import { isPidAlive, liveProcesses } from './process-info';
-import { Held, holderOf, Slot, UNREADABLE_GRACE_MS, type Holder, type SlotState } from './slots';
+import { Held, holderOf, Slot, slotNames, UNREADABLE_GRACE_MS, type Holder, type SlotState } from './slots';
 
 export interface LockOptions {
   /** How long to wait for a held lock, in milliseconds (default 0: don't wait). */
@@ -89,6 +89,26 @@ export class Locks {
     if (!state || state.holder?.released_at) return { status: 'free' };
     if (await this.isStale(state)) return { status: 'stale', holder: state.holder };
     return { status: 'held', holder: holderOf(state) };
+  }
+
+  /** Every lock ever taken, by name, with its state. */
+  async list(): Promise<{ name: string; state: LockState }[]> {
+    const locks: { name: string; state: LockState }[] = [];
+    for (const name of await slotNames(this.root)) locks.push({ name, state: await this.inspect(name) });
+    return locks;
+  }
+
+  /**
+   * Lets go of a lock whose holder is gone (`doctor --fix`): takes it over the
+   * way any acquirer would, and releases it at once. False when it is held
+   * (or free) after all.
+   */
+  async clearStale(name: string): Promise<boolean> {
+    if ((await this.inspect(name)).status !== 'stale') return false;
+    const result = await this.acquire(name);
+    if (result.status !== 'acquired') return false;
+    await result.lock.release();
+    return true;
   }
 
   private async isStale(state: SlotState): Promise<boolean> {

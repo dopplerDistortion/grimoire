@@ -63,8 +63,10 @@ export class Slot {
     root: string,
     readonly name: string,
     private readonly host: string = currentHost(),
+    /** The slot's folder under `root`: the name's own, unless a listing found it. */
+    folder: string = fileNameForKey(name),
   ) {
-    this.dir = path.join(root, fileNameForKey(name));
+    this.dir = path.join(root, folder);
   }
 
   private genFile(gen: number): string {
@@ -194,6 +196,22 @@ export class Held {
   async release(): Promise<void> {
     await this.slot.rewrite(this.holder.owner, (h) => ({ ...h, released_at: Date.now() }));
   }
+}
+
+/**
+ * The names of the slots under `root` that have ever been taken, read from
+ * their current holders (a slot's folder name may be a hash of its name). A
+ * slot whose holder can't be read yet is left out: it lapses on its own.
+ */
+export async function slotNames(root: string): Promise<string[]> {
+  const names: string[] = [];
+  for (const folder of (await readdir(root).catch(() => [] as string[])).sort()) {
+    // Read the folder as listed: a hashed folder name is no slot name of its own.
+    const state = await new Slot(root, folder, undefined, folder).current().catch(() => null);
+    const name = state?.holder?.name;
+    if (typeof name === 'string' && name !== '' && fileNameForKey(name) === folder) names.push(name);
+  }
+  return names;
 }
 
 /** A held slot whose file isn't readable yet is reported with a placeholder holder. */
