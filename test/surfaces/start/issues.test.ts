@@ -287,7 +287,7 @@ describe('the Issues screens in a browser, under the CSP', () => {
     }
   });
 
-  startTest.skipIf(!chromium)('agent-authored text renders inert: a script tag is text and images are never fetched; dialogs name the recorded actor', async ({ served, world, grimoire }) => {
+  startTest.skipIf(!chromium)('agent-authored text renders inert: a script tag is text and images are never fetched; dialogs name the recorded actor, and delete needs the typed id', async ({ served, world, grimoire }) => {
     const agent = agentContext(world.b, world.a);
     const evil = `http://127.0.0.1:${served.port}/evil.png`;
     const body = `<script>window.__pwned = 1</script>\n\n<img src="${evil}?raw" onerror="window.__pwned = 2">\n\n![a chart](${evil}?md) and [a link](javascript:window.__pwned=3) and [docs](https://example.com/docs)`;
@@ -311,6 +311,15 @@ describe('the Issues screens in a browser, under the CSP', () => {
       await page.evaluate(`document.querySelector('.delete-issue').click()`);
       await page.waitFor(`document.querySelector('.modal') !== null`);
       const dialog = await page.evaluate<string>(`document.querySelector('.modal .recorded').textContent`);
+      // Delete needs the typed id: without it nothing is sent.
+      await page.evaluate(`document.querySelector('.modal button.ok').click()`);
+      await page.waitFor(`document.querySelector('.dialog-error') !== null`);
+      const untyped = await page.evaluate<string>(`document.querySelector('.dialog-error').textContent`);
+      const kept = await grimoire.core.call('show', { ref: id }, agent);
+      await page.evaluate(`document.querySelector('.modal input[name="__typed"]').value = ${JSON.stringify(id)}`);
+      await page.evaluate(`document.querySelector('.modal button.ok').click()`);
+      await page.waitFor(`document.querySelector('.modal') === null && location.pathname === '/issues'`);
+      const gone = await grimoire.core.call('show', { ref: id }, agent);
 
       expect(facts).toMatchObject({ scripts: 0, images: 0, pwned: null, javascriptLinks: 0, title: '<b>bold?</b> edit' });
       expect(facts.text).toContain('<script>window.__pwned = 1</script>');
@@ -318,6 +327,9 @@ describe('the Issues screens in a browser, under the CSP', () => {
       expect(facts.hosts).toContain('↗ example.com');
       expect(page.requests().filter((url) => url.includes('evil.png'))).toEqual([]);
       expect(dialog).toBe(`🔒 human-only · recorded as ${world.a.identity.email} through the dashboard`);
+      expect(untyped).toBe(`Type ${id} to confirm.`);
+      expect(kept.ok).toBe(true);
+      expect(gone).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
       expect(await page.report()).toEqual({ violations: [], errors: [] });
     } finally {
       await page.close();

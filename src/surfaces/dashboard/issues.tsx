@@ -285,7 +285,7 @@ function Board({ rows, isFlash }: { rows: readonly ListRow[]; isFlash: (id: stri
                   </span>
                 ))}
               </div>
-              {key === 'waiting' || key === 'closed' ? <StateChip facts={rowFacts(row)} /> : null}
+              {key === 'closed' || (key === 'waiting' && (row.open_blocker_count > 0 || row.open_child_count > 0)) ? <StateChip facts={{ ...rowFacts(row), conflict: false }} /> : null}
               {row.open_attempts.map((a) => (
                 <div key={a.attempt} class="small">
                   {short(a.assignee)}

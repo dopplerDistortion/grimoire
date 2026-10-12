@@ -403,6 +403,8 @@ function ConflictBanners({ issue, reload }: { issue: IssueDetail; reload: () => 
 
 interface TimelineItem {
   readonly at: string;
+  /** Orders items made at the same instant: create, attempt start, field change, comment, attempt end. */
+  readonly rank: number;
   readonly key: string;
   readonly node: ComponentChildren;
 }
@@ -414,7 +416,7 @@ function clientOf(actor: Readonly<Record<string, unknown>>): string | null {
 function Timeline({ issue, activity, flash }: { issue: IssueDetail; activity: readonly ActivityEntry[]; flash: number }) {
   const items: TimelineItem[] = [];
   const entryFor = (op: string, attempt: string) => activity.find((entry) => entry.op === op && entry.attempt === attempt);
-  for (const comment of issue.comments) items.push({ at: comment.at, key: `c:${comment.id}`, node: <CommentCard comment={comment} /> });
+  for (const comment of issue.comments) items.push({ at: comment.at, rank: 3, key: `c:${comment.id}`, node: <CommentCard comment={comment} /> });
   const attempts: { attempt: string; assignee: string; since: string; opened: string; past: PastAttempt | null }[] = [
     ...issue.past_attempts.map((past) => ({ attempt: past.attempt, assignee: past.assignee, since: past.since, opened: past.opened, past })),
     ...issue.open_attempts.map((open) => ({ attempt: open.attempt, assignee: open.assignee, since: open.since, opened: '', past: null })),
@@ -424,6 +426,7 @@ function Timeline({ issue, activity, flash }: { issue: IssueDetail; activity: re
     if (a.opened !== 'unclaimed-close') {
       items.push({
         at: a.since,
+        rank: 1,
         key: `s:${a.attempt}`,
         node: (
           <div class="tl-ev attempt-start">
@@ -447,6 +450,7 @@ function Timeline({ issue, activity, flash }: { issue: IssueDetail; activity: re
       const end = activity.find((entry) => (entry.op === 'close' || entry.op === 'release' || entry.op === 'reassign' || entry.op === 'reopen') && entry.attempt === past.attempt);
       items.push({
         at: past.ended_at,
+        rank: 4,
         key: `e:${past.attempt}`,
         node: (
           <div class="tl-ev attempt-end">
@@ -475,6 +479,7 @@ function Timeline({ issue, activity, flash }: { issue: IssueDetail; activity: re
     if (what === null) continue;
     items.push({
       at: entry.at,
+      rank: entry.op === 'create' ? 0 : 2,
       key: `a:${entry.commit}`,
       node: (
         <div class="tl-ev field-change">
@@ -483,7 +488,7 @@ function Timeline({ issue, activity, flash }: { issue: IssueDetail; activity: re
       ),
     });
   }
-  items.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
+  items.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : x.rank - y.rank));
   return (
     <section class="timeline-block">
       <h3>Activity</h3>
@@ -648,7 +653,6 @@ function closeDialog(issue: IssueDetail, mine: ListedOpenAttempt | null, reload:
 }
 
 function SidePanel({ issue, context, reload }: { issue: IssueDetail; context: IssueContext; reload: () => Promise<void> }) {
-  const me = useMe();
   const id = issue.id;
   const open = issue.status === 'open';
   const held = issue.open_attempts;
@@ -1019,7 +1023,6 @@ function SidePanel({ issue, context, reload }: { issue: IssueDetail; context: Is
         >
           Delete issue… 🔒
         </button>
-        <p class="mute small">Recorded as {me.email ?? 'you'} through the dashboard.</p>
       </Section>
     </>
   );

@@ -100,6 +100,8 @@ export interface HeadlessPage {
   /** The URLs the page requested so far, in order. */
   requests(): string[];
   report(): Promise<PageReport>;
+  /** A PNG of the viewport at `width` x `height` (for looking at a failure). */
+  screenshot(width?: number, height?: number): Promise<Buffer>;
   close(): Promise<void>;
 }
 
@@ -194,6 +196,11 @@ export async function openHeadless(executable: string): Promise<HeadlessPage> {
         const violations = [...collected, ...consoleViolations];
         collected = [];
         return { violations, errors: [...errors] };
+      },
+      async screenshot(width = 1400, height = 900) {
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, sessionId);
+        const { data } = (await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId)) as { data: string };
+        return Buffer.from(data, 'base64');
       },
       async close() {
         await cdp.send('Browser.close').catch(() => {});
