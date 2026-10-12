@@ -114,11 +114,22 @@ function utf8(bytes: Buffer): string | null {
   return Buffer.from(text, 'utf8').equals(bytes) ? text : null;
 }
 
-/** Compares a record with what its serializer writes back from what it parsed. */
+/**
+ * CR where grimoire writes LF. A body is its author's verbatim bytes (a
+ * Windows tool's output keeps its CRLF), so with a body only the
+ * frontmatter, through its closing `---` line, must be LF-only.
+ */
+function hasForeignCR(text: string, body: boolean): boolean {
+  if (!body) return text.includes('\r');
+  const close = /\n---\r?\n/.exec(text.slice(3));
+  return (close ? text.slice(0, 3 + close.index + close[0].length) : text).includes('\r');
+}
+
+/** Compares a record with what its serializer writes back from what it parsed (the serializer judges any body). */
 function roundTrip(bytes: Buffer, rewrite: (bytes: Buffer) => Buffer): RecordVerdict {
   const text = utf8(bytes);
   if (text === null) return unparsable('it is not UTF-8 text');
-  if (text.includes('\r')) return nonCanonical('it has CR line ends; grimoire writes LF');
+  if (hasForeignCR(text, true)) return nonCanonical('it has CR line ends; grimoire writes LF');
   if (!text.startsWith('---\n')) return unparsable('it has no frontmatter');
   let written: Buffer;
   try {
@@ -138,7 +149,7 @@ function roundTrip(bytes: Buffer, rewrite: (bytes: Buffer) => Buffer): RecordVer
 function canonicalFrontmatter(bytes: Buffer, order: readonly string[] | null, body: boolean): RecordVerdict {
   const text = utf8(bytes);
   if (text === null) return unparsable('it is not UTF-8 text');
-  if (text.includes('\r')) return nonCanonical('it has CR line ends; grimoire writes LF');
+  if (hasForeignCR(text, body)) return nonCanonical('it has CR line ends; grimoire writes LF');
   if (!text.startsWith('---\n')) return unparsable('it has no frontmatter');
   const close = text.indexOf('\n---\n', 3);
   if (close < 0) return unparsable('its frontmatter is not closed');
