@@ -12,6 +12,7 @@ import {
   type FactsStatus,
   type RecordExcerptStatus,
   type RecordNote,
+  type SessionRecord,
 } from '../capture/session-record';
 import type { StepOrigin } from '../capture/steps';
 import { noteCutReach } from '../capture/seen-here';
@@ -168,6 +169,25 @@ export interface TraceCapture {
   facts_complete: boolean;
 }
 
+/** One stored session record as a trace's capture shows it. */
+function entryOf(key: string, stored: SessionRecord): CaptureEntry {
+  return {
+    key,
+    client: stored.client,
+    client_version: stored.client_version,
+    reader_version: stored.reader_version,
+    session: stored.session,
+    context: stored.context,
+    source: stored.source,
+    window: stored.window_start && stored.window_end ? { start: stored.window_start, end: stored.window_end } : null,
+    counts: { steps: stored.steps, kept: stored.steps_kept, characters: stored.characters },
+    excerpt: { status: stored.excerpt, notes: [...stored.excerpt_notes] },
+    facts: stored.facts,
+    skills_read: [...stored.skills_read],
+    commits: [...stored.commits],
+  };
+}
+
 /** The capture of attempt `handle`, read from its session records and their purge tombstones. */
 export async function traceCapture(view: TrackerView, handle: string): Promise<TraceCapture> {
   const record = view.attempt(handle);
@@ -177,24 +197,15 @@ export async function traceCapture(view: TrackerView, handle: string): Promise<T
   for (const key of [...record.sessions.keys()].sort()) {
     const bytes = await view.sessionRecord(handle, key);
     if (bytes === null || purged.has(key)) continue;
-    const stored = parseSessionRecord(bytes);
-    contexts.push({
-      key,
-      client: stored.client,
-      client_version: stored.client_version,
-      reader_version: stored.reader_version,
-      session: stored.session,
-      context: stored.context,
-      source: stored.source,
-      window: stored.window_start && stored.window_end ? { start: stored.window_start, end: stored.window_end } : null,
-      counts: { steps: stored.steps, kept: stored.steps_kept, characters: stored.characters },
-      excerpt: { status: stored.excerpt, notes: [...stored.excerpt_notes] },
-      facts: stored.facts,
-      skills_read: [...stored.skills_read],
-      commits: [...stored.commits],
-    });
+    contexts.push(entryOf(key, parseSessionRecord(bytes)));
   }
   for (const key of [...purged].sort()) {
+    // The excerpt alone was purged: its facts stay, on the tombstone.
+    const kept = view.sessionPurge(handle, key)?.kept;
+    if (kept) {
+      contexts.push({ ...entryOf(key, parseSessionRecord(kept)), excerpt: { status: 'purged', notes: [] } });
+      continue;
+    }
     contexts.push({
       key,
       client: 'unknown',

@@ -15,6 +15,7 @@ import { BLOB_MODE, TREE_MODE, type TreeEntry } from '../git/objects';
 import { conflictName } from './conflict';
 import { compareTimes, deleteConflict, foldEnd, foldExtra, foldIssue, foldMarker, foldOutcome, foldSession, foldSettings, sessionCutAt } from './fold-records';
 import { parseEnd } from './attempt';
+import { parsePurge } from './purge';
 import {
   attemptDir,
   ATTEMPTS_DIR,
@@ -221,6 +222,7 @@ function kindOf(path: readonly string[]): string {
     if (depth === 7 && path[5] === SESSIONS_DIR) return 'session';
   }
   if (top === OUTCOMES_DIR && depth === 5) return 'outcome';
+  if (top === PURGES_DIR && depth === 3) return 'session-purge';
   return wikiKind(path) ?? 'other';
 }
 
@@ -432,6 +434,11 @@ class Fold {
       }
       case 'session':
         return { mode: BLOB_MODE, name, oid: this.objects.putBlob(foldSession(await this.objects.blob(a.oid), await this.objects.blob(b.oid))) };
+      case 'session-purge': {
+        // Two purges of one session record: the one that took the facts stands over one that kept them (spec §3).
+        const [aTook, bTook] = await Promise.all([a, b].map(async (entry) => parsePurge(await this.objects.blob(entry.oid)).facts !== 'kept'));
+        return aTook === bTook ? lower(a, b) : aTook ? a : b;
+      }
       case 'wiki-page': {
         // A page both clones wrote (spec §17): the side set aside goes under the wiki's conflicts/.
         const slug = name.slice(0, -'.md'.length);
