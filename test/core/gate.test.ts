@@ -108,10 +108,8 @@ describe('accept', () => {
       expect(await fileIn(wt, `.agents/skills/grimoire-${SKILL}/SKILL.md`), wt.dir).toContain(`name: grimoire-${SKILL}`);
     }
     const listed = ok(await p.core.call('proposal_list', {}, cli));
-    expect(listed.proposals.map((row) => [row.id, row.status])).toEqual([
-      [first, 'accepted'],
-      [second, 'stale'],
-    ]);
+    // Both were drafted at one instant: the list's order between them is by id.
+    expect(Object.fromEntries(listed.proposals.map((row) => [row.id, row.status]))).toEqual({ [first!]: 'accepted', [second!]: 'stale' });
     expect(listed.pending).toEqual([]);
     expect(listed.history).toMatchObject({ accepted: 1, rejected: 0, accept_rate: 1, baseline: 0.29 });
     // A stale proposal can't be accepted: its base moved.
