@@ -19,13 +19,18 @@ export interface HookIo {
   readonly stdout: NodeJS.WritableStream;
 }
 
+export interface HookOptions {
+  /** session-start: how long into the hook its fast path may start work (default 7 s); a test seam. */
+  readonly fastPathBudgetMs?: number;
+}
+
 /** Runs `hook <event>` started in `startDir`; the exit code is always 0. */
-export async function runHook(event: string | undefined, startDir: string, io: HookIo = { stdin: process.stdin, stdout: process.stdout }): Promise<0> {
+export async function runHook(event: string | undefined, startDir: string, io: HookIo = { stdin: process.stdin, stdout: process.stdout }, options: HookOptions = {}): Promise<0> {
   try {
     let output = '';
     if (event === 'session-start') {
       const { sessionStart } = await import('./session-start');
-      output = await sessionStart(await readAll(io.stdin), { startDir });
+      output = await sessionStart(await readAll(io.stdin), { startDir, ...options });
     } else if (event === 'pre-tool-use') {
       const { preToolUse } = await import('./pre-tool-use');
       output = await preToolUse(await readAll(io.stdin), { startDir });
