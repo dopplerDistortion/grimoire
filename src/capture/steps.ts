@@ -1,6 +1,7 @@
 // The client-neutral step model (spec §14 Readers): what every client's
 // transcript reader normalizes into, and what windows and excerpts are cut from.
 // Reasoning is never a step.
+import { stat } from 'node:fs/promises';
 
 /** Where a step came from in its transcript: the line's timestamp and its id (Claude Code: the line uuid). */
 export interface StepOrigin {
@@ -88,6 +89,32 @@ export function isResult(step: Step): step is ResultStep {
   return step.kind === 'tool_result' || step.kind === 'subagent_result';
 }
 
+/**
+ * The file a reader read, as it stood just before the read: a sweep reads it
+ * again only once its size or modification time moved (spec §14 Sweeps).
+ */
+export interface TranscriptStamp {
+  readonly file: string;
+  readonly size: number;
+  readonly mtime_ms: number;
+}
+
+/** The stamp of `file` as it stands now; null when it can't be read. */
+export async function stampOf(file: string): Promise<TranscriptStamp | null> {
+  try {
+    const stats = await stat(file);
+    return stats.isFile() ? { file, size: stats.size, mtime_ms: stats.mtimeMs } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `file` still stands as `stamp` saw it. */
+export async function unchangedSince(stamp: TranscriptStamp): Promise<boolean> {
+  const now = await stampOf(stamp.file);
+  return now !== null && now.size === stamp.size && now.mtime_ms === stamp.mtime_ms;
+}
+
 /** What a reader made of one context's transcript. */
 export interface Transcript {
   readonly client: { readonly name: string; readonly version: string | null };
@@ -111,6 +138,8 @@ export interface Transcript {
   readonly copiedSteps: number;
   /** The latest timestamp on any line read: how far the transcript was flushed. */
   readonly flushedTo: string | null;
+  /** The file read, as it stood just before the read, when a reader knows it. */
+  readonly stamp?: TranscriptStamp;
   readonly lines: {
     readonly read: number;
     /** Lines of a type, or with content, the reader doesn't know: skipped and counted. */

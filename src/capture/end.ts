@@ -26,10 +26,11 @@ import {
   type RecordExcerptStatus,
   type RecordNote,
   type SessionRecord,
+  withoutText,
 } from './session-record';
-import { isCall, type Step, type Transcript } from './steps';
+import { isCall, type Step, type Transcript, type TranscriptStamp } from './steps';
 import { eventSkillReads, skillVersionTexts, transcriptSkillReads, type SkillRead, type SkillVersionTexts } from './skill-facts';
-import { revealedRoot } from './transcript-roots';
+import { revealedRoot, revealedRoots } from './transcript-roots';
 
 /** The excerpt mode (spec §14 The setting): `excerpts`, `facts` or `none`. */
 export type CaptureMode = 'excerpts' | 'facts' | 'none';
@@ -97,6 +98,21 @@ export interface EndCaptureInput {
   readonly options?: CaptureOptions;
   /** When the budget runs out (epoch ms), when one ending cuts several attempts: they share one budget. Default: now plus the budget. */
   readonly deadline?: number;
+  /** A sweep, not an ending: only these contexts are cut, while the attempt stays open. */
+  readonly sweep?: SweepScope;
+}
+
+/**
+ * What a sweep cuts (spec §14 Sweeps): the contexts it picked, by session key,
+ * each with a seen-here row here. Their windows end at the transcript's end at
+ * cut time; contexts it didn't pick get no placeholder. Once `signal` aborts
+ * (an attempt-ending call in this process), no further context is cut.
+ */
+export interface SweepScope {
+  readonly only: ReadonlySet<string>;
+  readonly signal?: AbortSignal;
+  /** Called after each context's cut, before the next (a test's pause point). */
+  readonly afterCut?: () => Promise<void> | void;
 }
 
 /** One bound context's fresh capture, for the ending commit to seal. */
@@ -108,6 +124,8 @@ export interface ContextCapture {
   readonly cut: boolean;
   /** The row the reach is noted on after the commit, when there is one. */
   readonly row: boolean;
+  /** The transcript the record was cut from, as it stood before the read: a sweep doesn't read it again until it moves. */
+  readonly stamp?: TranscriptStamp;
 }
 
 /** One bound context as the cut sees it: identity, binding calls and what this machine knows of it. */
@@ -144,7 +162,9 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   const handle = input.attempt?.id ?? null;
   // Finding the bound contexts, their pending records and purges is inside the budget too. Past it, a
   // purge is still honoured at the seal, and a pending record only changes the order.
-  const targets = await targetsOf(input, deadline);
+  const { sweep } = input;
+  const found = await targetsOf(input, deadline);
+  const targets = sweep ? found.filter((target) => target.row && sweep.only.has(target.key)) : found;
   const pending = new Set<string>();
   const purged = handle === null ? new Set<string>() : await beforeDeadline(input.view.purgedSessions(handle), deadline, new Set<string>());
   if (handle !== null) {
@@ -153,32 +173,56 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
     }
   }
   const rank = (t: Target) => (t.calling ? 0 : pending.has(t.key) ? 2 : 1);
-  const ordered = [...targets].sort((a, b) => rank(a) - rank(b));
+  // A sweep names its contexts longest uncut first: within a rank, that order holds.
+  const picked = sweep ? [...sweep.only] : [];
+  const position = (t: Target) => picked.indexOf(t.key);
+  const ordered = [...targets].sort((a, b) => rank(a) - rank(b) || position(a) - position(b));
   // What transcript reads are matched against: every version the ledger records; null when they couldn't be read
   // in time, which leaves every transcript scan's facts partial. `none` mode opens no transcript.
   const versions: SkillVersionTexts | null =
     input.mode === 'none' ? new Map() : await beforeDeadline(skillVersionTexts(input.view, input.scanner), deadline, null);
-  const bound = new Set(targets.flatMap((target) => (target.context !== null ? [target.context] : [])));
+  const bound = new Set(found.flatMap((target) => (target.context !== null ? [target.context] : [])));
 
   const captures: ContextCapture[] = [];
   const claimed: string[] = [];
   const cutAt = input.call.at;
+  const claudeDirs = await revealedClaudeDirs(input).catch(() => []);
   for (const target of ordered) {
+    if (sweep?.signal?.aborted) break;
     if (purged.has(target.key)) continue;
     if (!target.calling && !target.row) {
       captures.push({ key: target.key, record: placeholder(target, cutAt), cut: false, row: false });
       continue;
     }
-    const cut = new ContextCut(input, target, deadline, claimed, versions, bound);
+    const cut = new ContextCut(input, target, deadline, claimed, versions, bound, claudeDirs);
     const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling && traceable(target) ? cut.waitingForFlush(started) : cut.once(), deadline, null);
+    await sweep?.afterCut?.();
     // A chores context's transcript is excluded from excerpts and fact scans (spec §14): it gets no record.
     if (cut.chores) continue;
     // A cut the deadline overtook keeps the last record it finished: the calling context's earlier cut.
     const captured = record ?? cut.latest ?? budgetRecord(target, cutAt);
     if (cut.callIds) claimed.push(...cut.callIds);
-    captures.push({ key: target.key, record: captured, cut: true, row: target.row });
+    const stamp = captured === cut.latest ? cut.stamp : null;
+    captures.push({ key: target.key, record: captured, cut: true, row: target.row, ...(stamp ? { stamp } : {}) });
   }
   return captures;
+}
+
+/**
+ * The Claude Code config folders hooks revealed on this machine (spec §14
+ * Roots, §6), other than the one capture looks in: a transcript not found
+ * there is searched for in these too. A revealed root is a `projects/<slug>/`
+ * folder; its config folder is two levels up.
+ */
+async function revealedClaudeDirs(input: EndCaptureInput): Promise<string[]> {
+  const own = path.resolve(input.options?.claudeConfigDir ?? defaultClaudeConfigDir());
+  const dirs = new Set<string>();
+  for (const root of await revealedRoots(input.store)) {
+    if (root.client !== 'claude-code') continue;
+    const dir = path.resolve(path.dirname(path.dirname(root.root)));
+    if (dir.toLowerCase() !== own.toLowerCase()) dirs.add(dir);
+  }
+  return [...dirs].sort();
 }
 
 /**
@@ -369,6 +413,8 @@ class ContextCut {
   callIds: readonly string[] | null = null;
   /** The record of its last finished cut, for when the deadline overtakes the next one. */
   latest: SessionRecord | null = null;
+  /** The transcript `latest` was cut from, as it stood before the read. */
+  stamp: TranscriptStamp | null = null;
   /** Whether its transcript names it a `grimoire-chores` context, which is never captured. */
   chores = false;
   private readonly rewrite: (text: string) => string;
@@ -383,6 +429,8 @@ class ContextCut {
     private readonly versions: SkillVersionTexts | null,
     /** The contexts bound to the attempt: a subagent among them is scanned for its own record, never again for its launcher's. */
     private readonly bound: ReadonlySet<string>,
+    /** Other Claude Code config folders hooks revealed: searched when the transcript isn't in the default one. */
+    private readonly claudeDirs: readonly string[] = [],
   ) {
     const home = input.options?.home ?? os.homedir();
     this.paths = { home, repo: target.worktree, ...(process.platform === 'win32' ? { tmp: os.tmpdir() } : {}) };
@@ -411,13 +459,14 @@ class ContextCut {
   }
 
   async once(): Promise<SessionRecord> {
-    const { record, callIds } = await this.cutOnce();
+    const { record, callIds, stamp } = await this.cutOnce();
     this.latest = record;
     this.callIds = callIds;
+    this.stamp = stamp ?? null;
     return record;
   }
 
-  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null }> {
+  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null; stamp?: TranscriptStamp }> {
     const { input, target } = this;
     const family = clientFamily(target.client);
     if (input.mode === 'none') return { record: this.factsOnly('off'), callIds: null };
@@ -426,7 +475,7 @@ class ContextCut {
       const { cut, roots, source, subagents } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
       if (isChoresContext(cut)) this.chores = true;
       const facts = cut.window === null || this.chores ? null : await beforeDeadline(this.scanFacts(cut, subagents), this.deadline, null);
-      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds };
+      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}) };
     } catch {
       // A reader that throws is one grimoire can't trust on this transcript.
       const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };
@@ -439,7 +488,8 @@ class ContextCut {
     return {
       issue: input.issue,
       attemptOpenedAt: input.attempt?.start.at ?? input.call.at,
-      attemptEndedAt: input.call.at,
+      // A sweep's window ends at the transcript's end at cut time.
+      ...(input.sweep ? {} : { attemptEndedAt: input.call.at }),
       bindingCalls: [...target.bindingCalls, ...extra],
       writeOnly: target.writeOnly,
       claimedCallIds: this.claimed,
@@ -469,7 +519,7 @@ class ContextCut {
     let location: Awaited<ReturnType<typeof findClaudeTranscript>> | null = null;
 
     for (const hint of session === null ? target.pendingHints : []) {
-      const hinted = await findClaudeTranscript({ ...base, session: hint.session_id, revealed: await revealed(hint.session_id) });
+      const hinted = await this.findClaude({ ...base, session: hint.session_id, revealed: await revealed(hint.session_id) });
       if (hinted.status !== 'found') continue;
       const read = await readClaudeCodeTranscript(hinted.transcript, hint.agent_id !== undefined ? { agentId: hint.agent_id } : {});
       if (read.found && read.transcript.steps.some((step) => isCall(step) && step.id === hint.tool_use_id)) {
@@ -484,9 +534,9 @@ class ContextCut {
     if (location === null) {
       const ids = target.bindingCalls.flatMap((call) => (call.id !== undefined ? [call.id] : []));
       if (session !== null) {
-        location = await findClaudeTranscript({ ...base, session, revealed: await revealed(session) });
+        location = await this.findClaude({ ...base, session, revealed: await revealed(session) });
       } else if (ids.length > 0) {
-        location = await findClaudeTranscript({ ...base, callIds: ids, ...(earliestAt(target.bindingCalls) ? { calledAt: earliestAt(target.bindingCalls)! } : {}) });
+        location = await this.findClaude({ ...base, callIds: ids, ...(earliestAt(target.bindingCalls) ? { calledAt: earliestAt(target.bindingCalls)! } : {}) });
         if (location.status === 'found') {
           session = location.session;
           agentId = location.agentId;
@@ -495,7 +545,7 @@ class ContextCut {
       } else if (target.spawnEnv !== null) {
         session = target.spawnEnv;
         source = 'spawn-env';
-        location = await findClaudeTranscript({ ...base, session, revealed: await revealed(session) });
+        location = await this.findClaude({ ...base, session, revealed: await revealed(session) });
       }
     }
     const identity = {
@@ -523,6 +573,16 @@ class ContextCut {
       return read.found ? read.transcript : null;
     };
     return { cut, roots: cut.status === 'not_found' ? [location.transcript] : [], source, subagents };
+  }
+
+  /** Finds a transcript in the config folder capture looks in, then in each one hooks revealed (spec §14 Roots). */
+  private async findClaude(options: Parameters<typeof findClaudeTranscript>[0]): ReturnType<typeof findClaudeTranscript> {
+    let found = await findClaudeTranscript(options);
+    for (const configDir of this.claudeDirs) {
+      if (found.status !== 'not_found') break;
+      found = await findClaudeTranscript({ ...options, configDir });
+    }
+    return found;
   }
 
   /** A Codex context: its thread's own transcript, searched by thread id in the hook-revealed home, else the default one. */
@@ -781,12 +841,6 @@ export async function sealSessionRecords(
     }
   }
   return written;
-}
-
-/** A record as a mode that commits no excerpt text keeps it. */
-function withoutText(record: SessionRecord): SessionRecord {
-  if (record.text === null) return record;
-  return { ...record, text: null, excerpt: 'off', steps_kept: 0, characters: 0 };
 }
 
 /** Reads in the order they were made; reads made at the same instant keep their order. */

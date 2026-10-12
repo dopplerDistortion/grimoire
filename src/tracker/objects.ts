@@ -237,6 +237,11 @@ export class TrackerObjects extends ObjectSource {
     return header;
   }
 
+  /** A commit object's raw bytes (header lines and message), for rewriting it with other tree and parents. */
+  commitBytes(oid: string): Promise<Buffer> {
+    return this.readObject(oid, 'commit');
+  }
+
   async tree(oid: string): Promise<readonly TreeEntry[]> {
     let entries = this.trees.get(oid);
     if (!entries) {

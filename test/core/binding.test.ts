@@ -203,6 +203,7 @@ describe('seen-here rows', () => {
       last_at: later.toISOString(),
       path: transcript,
       reach: null,
+      swept: null,
     });
     expect(rows.find((row) => row.context === 'a77')).toMatchObject({ handle: attempt, call: 'toolu_sub', session: main.session, path: transcript });
     expect(await seenHereRows(machine, { handle: 'at-zzzzzz' })).toEqual([]);

@@ -12,9 +12,12 @@ import {
   type SyncFailureClass,
   type SyncOutcome,
   type SyncSpec,
+  type TextPolicy,
   type TrackerStore,
   type TrackerView,
 } from '../tracker';
+import { stripExcerptText } from '../capture/session-record';
+import { storeExcerptMode } from './settings';
 import type { Actor, CallContext } from './context';
 import { define, writer } from './op';
 import { s } from './schema';
@@ -145,15 +148,27 @@ export async function syncPending(commonDir: string): Promise<boolean> {
   return (await pendingMarkers(new MachineLocalStore(commonDir))).length > 0;
 }
 
-/** Clears every marker whose tip the remote holds (`remoteTip` or an ancestor), or that names no commit here. */
+/**
+ * Clears every marker whose tip the remote holds (`remoteTip` or an ancestor),
+ * and every stale one: a tip the local tracker no longer holds was rewritten
+ * (the push's text strip rewrites the unpushed segment, and expiring the
+ * reflog doesn't remove the old commits), so nothing can push it. The
+ * rewritten tip is marked in its own right while it waits. The markers are
+ * listed before the local tip is read: a write marks its tip only after its
+ * ref moved, so a listed tip the local tip doesn't hold was rewritten.
+ */
 async function clearHeld(machine: MachineLocalStore, root: string, remoteTip: string | null): Promise<void> {
-  for (const marker of await pendingMarkers(machine)) {
+  const markers = await pendingMarkers(machine);
+  if (markers.length === 0) return;
+  const local = await localTip(root);
+  for (const marker of markers) {
     // With no tracker tip anywhere there is nothing to push: the marker is stale.
     const held =
       remoteTip === null ||
       marker.tip === remoteTip ||
-      // 0: an ancestor; 1: not one; anything else: the commit is gone (a rewritten segment).
-      (await runGit(root, ['merge-base', '--is-ancestor', marker.tip, remoteTip])).code !== 1;
+      // 0: an ancestor; 1: not one; anything else: the commit is gone.
+      (await runGit(root, ['merge-base', '--is-ancestor', marker.tip, remoteTip])).code !== 1 ||
+      (local !== null && marker.tip !== local && (await runGit(root, ['merge-base', '--is-ancestor', marker.tip, local])).code !== 0);
     if (held) await machine.coordination.remove(PENDING, marker.tip);
   }
 }
@@ -190,6 +205,12 @@ async function readStatus(machine: MachineLocalStore): Promise<SyncStatusRecord 
   return machine.records.read<SyncStatusRecord>(STATUS, STATUS_KEY);
 }
 
+/** Before every push (spec §4): a merged mode other than `excerpts` keeps text out of the unpushed segment. */
+const PUSH_TEXT: TextPolicy = {
+  forbidsText: (view) => storeExcerptMode(view) !== 'excerpts',
+  stripText: stripExcerptText,
+};
+
 /** One sync: the tracker's fetch → fold → push, then its record and the markers settled. */
 async function syncOnce(tracker: TrackerStore, machine: MachineLocalStore, request: SyncRequest, spec: SyncSpec): Promise<SyncOutcome> {
   const outcome = await tracker.sync(spec);
@@ -223,6 +244,7 @@ async function syncRounds(
     actor: request.actor,
     timeoutMs: options.timeoutMs,
     ...(deadline !== undefined ? { deadline } : {}),
+    text: PUSH_TEXT,
   };
   let outcome: SyncOutcome | null = null;
   for (let round = 0; round < DRAIN_ROUNDS; round++) {

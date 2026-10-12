@@ -176,6 +176,18 @@ _Avoid_: Summary, snippet, transcript
 One bound context's part of an attempt's trace: which client, session and context it was, the window grimoire cut from its transcript, its capture statuses and facts, and its excerpt when the excerpt mode allows one; it waits with the open attempt, a later cut replaces it only by reaching further, and the attempt's end freezes it.
 _Avoid_: Capture file, session log, transcript
 
+**Sweep**:
+The upkeep part that catches capture up without waiting for a session to end: it cuts the bound contexts of open attempts that went idle or whose transcript was archived, and attaches their session records to the still-open attempt.
+_Avoid_: Scan, crawl, harvest
+
+**Late record**:
+A session record that reaches an attempt through a fold after another clone ended it: admitted when it was cut before that end, dropped and counted when cut after it.
+_Avoid_: Stray record, orphan record
+
+**Excerpt mode**:
+The store setting (`excerpts`, `facts` or `none`) that decides what capture ever commits: excerpt text and facts, facts only, or nothing read from a transcript at all; a machine may only lower it for its own sessions.
+_Avoid_: Capture level, privacy mode, trace mode
+
 **Debrief**:
 A worker's own short account of an attempt, posted on the issue as the attempt ends: what was tried, what failed, what worked, and what the next worker should know; agents are asked for one, humans may write one.
 _Avoid_: Retro, summary, report, work log

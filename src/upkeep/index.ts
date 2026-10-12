@@ -24,3 +24,4 @@ export { UPKEEP_PARTS, generatedRemoval, pendingSync, pointerRefresh, pruneCopie
 export { refreshGeneratedOutput, type RefreshOptions } from './refresh';
 export { POINTER_REFRESH_RECORDS, noteRefreshed, refreshNotice, refreshedPointerFiles, type PointerRefreshRecord } from './refreshed';
 export { WORKTREE_WATCH_MS, watchNewWorktrees, type WorktreeWatcher } from './watch';
+export { excerptSweep, SWEEP_PART, type SweepOptions } from './sweep';
