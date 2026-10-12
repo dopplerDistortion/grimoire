@@ -166,3 +166,19 @@ export function cutSucceeded(record: Pick<SessionRecord, 'excerpt' | 'facts' | '
 export function replaces(fresh: SessionRecord, stored: SessionRecord | null): boolean {
   return cutSucceeded(fresh) && (stored === null || compareReach(fresh.reach, stored.reach) > 0);
 }
+
+/** A record as a mode that commits no excerpt text keeps it: the entry and the facts, no text (status `off`). */
+export function withoutText(record: SessionRecord): SessionRecord {
+  if (record.text === null) return record;
+  return { ...record, text: null, excerpt: 'off', steps_kept: 0, characters: 0 };
+}
+
+/**
+ * A stored record's bytes without its excerpt text (spec §14 The setting:
+ * tightening, and every push and fold under a mode that forbids text), or
+ * null when it carries none. Unknown keys are kept.
+ */
+export function stripExcerptText(bytes: Buffer): Buffer | null {
+  const record = parseSessionRecord(bytes);
+  return record.text === null ? null : serializeSessionRecord(withoutText(record));
+}

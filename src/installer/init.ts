@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { Identity } from '../core/context';
-import { putMachineSetting, seedStoreSettings, storeExcerptMode, type ExcerptMode } from '../core/settings';
+import { disclosureLines, putMachineSetting, seedStoreSettings, storeExcerptMode, type ExcerptMode } from '../core/settings';
 import { syncNow } from '../core/sync';
 import { GrimoireError, type ErrorBody } from '../errors';
 import { findGitDirs, MachineLocalStore, readTextIfExists } from '../machine-local';
@@ -268,17 +268,6 @@ async function chooseAdapter(
     'decline',
   );
   return answer === 'make' ? { placement: 'top', decision: 'grimoire' } : { placement: 'none', decision: 'declined' };
-}
-
-/** The excerpt disclosure (spec §12 step 3), shown on every init. */
-export function disclosureLines(mode: ExcerptMode | null): string[] {
-  return [
-    mode === null ? 'Excerpt mode: not known until this clone has the tracker.' : `Excerpt mode: ${mode}.`,
-    'In `excerpts` mode, redacted excerpts of agent transcripts are committed to grimoire/tracker and pushed while the attempt is still open.',
-    'Redaction is best-effort: a secret can slip through.',
-    'Pushed history can’t be purged.',
-    'The modes: `excerpts` (redacted excerpt text plus facts), `facts` (names, versions, hashes, times and statuses, never excerpt text) and `none` (never opens a transcript). A person changes it with `grimoire settings set excerpts <mode>` or in the dashboard.',
-  ];
 }
 
 function storageNotices(remote: string | null): string[] {

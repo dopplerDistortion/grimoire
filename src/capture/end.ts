@@ -26,6 +26,7 @@ import {
   type RecordExcerptStatus,
   type RecordNote,
   type SessionRecord,
+  withoutText,
 } from './session-record';
 import { isCall } from './steps';
 import { revealedRoot } from './transcript-roots';
@@ -648,10 +649,4 @@ export async function sealSessionRecords(
     }
   }
   return written;
-}
-
-/** A record as a mode that commits no excerpt text keeps it. */
-function withoutText(record: SessionRecord): SessionRecord {
-  if (record.text === null) return record;
-  return { ...record, text: null, excerpt: 'off', steps_kept: 0, characters: 0 };
 }

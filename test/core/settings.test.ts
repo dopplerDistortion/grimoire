@@ -53,9 +53,10 @@ describe('store settings', () => {
         },
       },
     });
-    // The store settings other parts of grimoire own (the excerpt mode, the loop pause, thresholds) come with them.
+    // The store settings other parts of grimoire own (the loop pause, thresholds) come with them.
     expect(Object.keys(shown.ok ? shown.result.store : {}).sort()).toEqual([
       'auto-sync',
+      'excerpts',
       'link_base',
       'skills.delivery',
       'skills.description_max',
@@ -105,7 +106,7 @@ describe('store settings', () => {
   test('an unknown key or an invalid value is refused, the ref unmoved', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
 
-    const unknownKeys = ['no.such', 'constructor', '__proto__', 'toString', 'excerpts'];
+    const unknownKeys = ['no.such', 'constructor', '__proto__', 'toString'];
     const [unknownSets, badValues, unknownGets] = await expectRefUnmoved(world.a, async () => [
       await Promise.all(unknownKeys.map((key) => core.call('settings_set', { key, value: 'x' }, terminal(ctx)))),
       [

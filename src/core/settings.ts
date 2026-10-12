@@ -3,12 +3,13 @@
 // with the later change winning; machine settings live in the machine-local
 // store and apply to this clone on this machine only. `settings_get` reads
 // both; `settings_set` is human-only.
+import { stripExcerptText } from '../capture/session-record';
 import { invalid } from '../errors';
 import { defaultDashboardPort, MachineLocalStore } from '../machine-local';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
 import { parseDuration } from './stale';
-import type { TrackerView } from '../tracker';
+import type { TrackerDraft, TrackerView } from '../tracker';
 
 export type SettingScope = 'store' | 'machine';
 
@@ -75,6 +76,13 @@ const linkBase: Pick<SettingSpec, 'parse' | 'why'> = {
  * shown and kept.
  */
 const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(Object.entries({
+  excerpts: {
+    scope: 'store',
+    description:
+      'what capture commits: excerpts (redacted excerpt text plus facts), facts (never excerpt text) or none (never opens a transcript); tightening strips the text from open attempts',
+    fallback: () => EXCERPTS_UNSET,
+    ...oneOf(['excerpts', 'facts', 'none']),
+  },
   'auto-sync': {
     scope: 'store',
     description: 'whether grimoire syncs the tracker on its own; `grimoire sync` always works',
@@ -156,13 +164,56 @@ export function storeExcerptMode(view: Pick<TrackerView, 'settings'>): ExcerptMo
 /**
  * The full settings a new tracker is seeded with (spec §12, init step 4): the
  * excerpt mode chosen at the mint, and every store setting this release knows
- * at its default. (The excerpt mode itself joins the catalog with the slice
- * that governs changing it.)
+ * at its default.
  */
 export function seedStoreSettings(mode: ExcerptMode): Map<string, unknown> {
   const seed = new Map<string, unknown>([[EXCERPTS_SETTING, mode]]);
-  for (const [key, spec] of SETTINGS) if (spec.scope === 'store') seed.set(key, spec.fallback(''));
+  for (const [key, spec] of SETTINGS) if (spec.scope === 'store' && !seed.has(key)) seed.set(key, spec.fallback(''));
   return seed;
+}
+
+const MODE_RANK: Readonly<Record<ExcerptMode, number>> = { none: 0, facts: 1, excerpts: 2 };
+
+/** The lower of two excerpt modes: the one that commits less. */
+export function lowerMode(x: ExcerptMode, y: ExcerptMode): ExcerptMode {
+  return MODE_RANK[x] <= MODE_RANK[y] ? x : y;
+}
+
+/** The excerpt disclosure (spec §12 step 3): shown on every init, and again by every change of the mode (§14). */
+export function disclosureLines(mode: ExcerptMode | null): string[] {
+  return [
+    mode === null ? 'Excerpt mode: not known until this clone has the tracker.' : `Excerpt mode: ${mode}.`,
+    'In `excerpts` mode, redacted excerpts of agent transcripts are committed to grimoire/tracker and pushed while the attempt is still open.',
+    'Redaction is best-effort: a secret can slip through.',
+    'Pushed history can’t be purged.',
+    'The modes: `excerpts` (redacted excerpt text plus facts), `facts` (names, versions, hashes, times and statuses, never excerpt text) and `none` (never opens a transcript). A person changes it with `grimoire settings set excerpts <mode>` or in the dashboard.',
+  ];
+}
+
+/** What loosening the mode says (spec §14 The setting). */
+export const LOOSENING_WARNING =
+  'Loosening the excerpt mode: every clone applies it at its next cut, and teammates aren’t asked.';
+
+/**
+ * Strips the excerpt text from every open attempt's session records in
+ * `draft` (spec §14: switching to `facts` or `none` does so in the same
+ * commit). Sealed traces keep theirs. Returns how many records it rewrote.
+ */
+export async function stripOpenAttempts(draft: TrackerDraft): Promise<number> {
+  let stripped = 0;
+  for (const issue of draft.issues()) {
+    for (const attempt of draft.attempts(issue.id)) {
+      if (attempt.end !== null) continue;
+      for (const key of attempt.sessions.keys()) {
+        const bytes = await draft.sessionRecord(attempt.id, key);
+        const without = bytes === null ? null : stripExcerptText(bytes);
+        if (without === null) continue;
+        draft.putSessionRecord(attempt.id, key, without);
+        stripped++;
+      }
+    }
+  }
+  return stripped;
 }
 
 /** Sets a machine setting for this clone (`settings_set`'s machine half, for init's join). */
@@ -262,6 +313,12 @@ export interface SettingsSetResult {
   /** Store settings: when and by whom the value was set. */
   at?: string;
   by?: string;
+  /** The excerpt mode: the disclosure, shown again. */
+  disclosure?: string[];
+  /** The excerpt mode, loosened: every clone applies it at its next cut, and teammates aren't asked. */
+  warning?: string;
+  /** The excerpt mode, tightened: how many open attempts' session records lost their text in the same commit. */
+  stripped?: number;
 }
 
 const scalar = s.either(
@@ -290,15 +347,21 @@ export const settingsSet = define({
       return { key: input.key, scope: 'machine', value, changed };
     }
     const author = writer(ctx);
-    const write = await tracker.transact({ op: 'settings-set', author, actor }, (draft) => {
+    const write = await tracker.transact({ op: 'settings-set', author, actor }, async (draft) => {
       const current = draft.settings().get(input.key);
       if (current && JSON.stringify(current.value) === JSON.stringify(value)) {
-        return { result: { key: input.key, scope: 'store' as const, value, changed: false, at: current.at, by: current.by } };
+        return { result: { key: input.key, scope: 'store' as const, value, changed: false, at: current.at, by: current.by } as SettingsSetResult };
       }
+      const mode = input.key === EXCERPTS_SETTING ? { from: storeExcerptMode(draft), to: value as ExcerptMode } : null;
       draft.putSetting(input.key, value, author.email);
       const at = draft.now.toISOString();
-      return { result: { key: input.key, scope: 'store' as const, value, changed: true, at, by: author.email } };
+      const result: SettingsSetResult = { key: input.key, scope: 'store' as const, value, changed: true, at, by: author.email };
+      // The excerpt mode (spec §14): a mode that forbids text strips it from the open attempts in this commit.
+      if (mode && mode.to !== 'excerpts') result.stripped = await stripOpenAttempts(draft);
+      if (mode && MODE_RANK[mode.to] > MODE_RANK[mode.from]) result.warning = LOOSENING_WARNING;
+      return { result };
     });
+    if (input.key === EXCERPTS_SETTING) write.result.disclosure = disclosureLines(value as ExcerptMode);
     // The delivery switch: off removes every copy and stub, on brings them back (spec §15).
     if (write.result.changed && input.key === DELIVERY_SETTING) servedChanged();
     return write.result;
