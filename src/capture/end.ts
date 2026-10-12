@@ -157,6 +157,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   // What transcript reads are matched against: every version the ledger records. `none` mode opens no transcript.
   const versions: SkillVersionTexts =
     input.mode === 'none' ? new Map() : await beforeDeadline(skillVersionTexts(input.view, input.scanner), deadline, new Map());
+  const bound = new Set(targets.flatMap((target) => (target.context !== null ? [target.context] : [])));
 
   const captures: ContextCapture[] = [];
   const claimed: string[] = [];
@@ -167,7 +168,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
       captures.push({ key: target.key, record: placeholder(target, cutAt), cut: false, row: false });
       continue;
     }
-    const cut = new ContextCut(input, target, deadline, claimed, versions);
+    const cut = new ContextCut(input, target, deadline, claimed, versions, bound);
     const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling && traceable(target) ? cut.waitingForFlush(started) : cut.once(), deadline, null);
     // A chores context's transcript is excluded from excerpts and fact scans (spec §14): it gets no record.
     if (cut.chores) continue;
@@ -378,6 +379,8 @@ class ContextCut {
     private readonly deadline: number,
     private readonly claimed: readonly string[],
     private readonly versions: SkillVersionTexts,
+    /** The contexts bound to the attempt: a subagent among them is scanned for its own record, never again for its launcher's. */
+    private readonly bound: ReadonlySet<string>,
   ) {
     const home = input.options?.home ?? os.homedir();
     this.paths = { home, repo: target.worktree, ...(process.platform === 'win32' ? { tmp: os.tmpdir() } : {}) };
@@ -564,7 +567,7 @@ class ContextCut {
     let complete = true;
     while (queue.length > 0) {
       const id = queue.shift()!;
-      if (launched.has(id)) continue;
+      if (launched.has(id) || this.bound.has(id)) continue;
       launched.add(id);
       const transcript = subagents ? await subagents(id).catch(() => null) : null;
       if (transcript === null) {
