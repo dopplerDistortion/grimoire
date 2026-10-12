@@ -3,6 +3,7 @@
 // files and stale locks. Each check is one entry of DOCTOR_CHECKS (the store's
 // in ./store-checks.ts, the install's in ./install-checks.ts), so later slices
 // add their own (capture statistics, knowledge facts, the runner) the same way.
+import { sessionRecordProblem } from '../capture';
 import { GrimoireError } from '../errors';
 import { ledgerRecordProblem } from '../knowledge';
 import { findGitDirs, MachineLocalStore, type GitDirs, type Lease } from '../machine-local';
@@ -99,7 +100,7 @@ async function runChecks(options: DoctorOptions, dirs: GitDirs, config: Checkout
     config,
     env: options.env ?? process.env,
     tips: () => (tips ??= trackerTips(options.root)),
-    trees: () => (trees ??= input.tips().then((held) => inspectTrees(options.root, held, { ledgerRecord: ledgerRecordProblem }))),
+    trees: () => (trees ??= input.tips().then((held) => inspectTrees(options.root, held, { ledgerRecord: ledgerRecordProblem, sessionRecord: sessionRecordProblem }))),
     view: () => (view ??= (tracker ??= openTracker(options.root)).then((store) => store.read())),
   };
   const findings: Finding[] = [];

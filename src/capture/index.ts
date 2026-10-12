@@ -29,6 +29,7 @@ export {
   parseSessionRecord,
   replaces,
   serializeSessionRecord,
+  sessionRecordProblem,
   type FactsStatus,
   type RecordExcerptStatus,
   type RecordNote,

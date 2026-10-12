@@ -9,6 +9,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { GitWorld } from '#harness';
 import type { CallContext } from '../../src/core';
+import { parseSessionRecord, serializeSessionRecord } from '../../src/capture/session-record';
 import { DOCTOR_CHECKS, runDoctor, type DoctorReport } from '../../src/installer/doctor';
 import type { Finding } from '../../src/installer/health';
 import { openTracker } from '../../src/tracker';
@@ -33,6 +34,10 @@ const T2 = new Date(T0.getTime() + 120_000);
 const REF_CHECKS = DOCTOR_CHECKS.filter((check) => ['store.ref-locks', 'store.sync', 'store.ref-names'].includes(check.name));
 /** The check of each record's bytes. */
 const RECORD_CHECKS = DOCTOR_CHECKS.filter((check) => check.name === 'store.records');
+
+/** A session record as capture writes it: every key, in its order, and the excerpt as it was cut. */
+const capturedSession = (text: string | null): string =>
+  serializeSessionRecord({ ...parseSessionRecord(Buffer.from('---\n---\n')), client: 'claude-code', session: 's1', steps: 3, cut_at: '2026-10-12T05:00:00.000Z', text }).toString('utf8');
 
 /** A human at an interactive terminal: the CLI with no agent marker and a TTY. */
 function terminal(ctx: CallContext): CallContext {
@@ -148,6 +153,7 @@ describe('store checks', SLOW, () => {
     const version = files.find((file) => file.startsWith('knowledge/skill-versions/'))!;
     const start = files.find((file) => file.endsWith(`/${attempt}/start.md`))!;
     const session = start.replace(/start\.md$/, 'sessions/s1.md');
+    const reordered = start.replace(/start\.md$/, 'sessions/s2.md');
     // A person's edits: a key moved in the page; another reason in the mark; a changed line in the skill.
     const swap = (lines: string[], key: string) => {
       const at = lines.findIndex((line) => line.startsWith(`${key}: `));
@@ -164,12 +170,15 @@ describe('store checks', SLOW, () => {
       [version]: `${(await trackerText(world, version)).replace('Release notes', 'Notes')}\n`,
       // Capture writes session records in the shared line format: a bare word is no JSON value.
       [session]: '---\nclient: claude-code\nsteps: 3\n---\n',
+      // Every line canonical, but two of capture's keys out of its order.
+      [reordered]: swap(capturedSession(null).split('\n'), 'steps').slice(0, -1),
     });
 
     const report = await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS });
 
     const bad = report.findings.filter((finding) => finding.kind === 'non-canonical' || finding.kind === 'unparsable');
-    expect(bad.map((finding) => finding.subject).sort()).toEqual([forged, ledger, page, session, version].sort());
+    expect(bad.map((finding) => finding.subject).sort()).toEqual([forged, ledger, page, reordered, session, version].sort());
+    expect(bad.find((finding) => finding.subject === reordered)?.message).toContain('canonical serializer');
     expect(bad.find((finding) => finding.subject === ledger)?.message).toContain('sha256');
     expect(bad.find((finding) => finding.subject === forged)?.message).toContain('canonical serializer');
   });
@@ -184,7 +193,7 @@ describe('store checks', SLOW, () => {
     const crlfFrontmatter = start.replace(/start\.md$/, 'sessions/s2.md');
     await commitToTracker(world.a, {
       // An excerpt keeps a Windows tool's output as it was.
-      [session]: '---\nclient: "claude-code"\n---\nPS> npm test\r\nok\r\n',
+      [session]: capturedSession('PS> npm test\r\nok\r\n'),
       [crlfFrontmatter]: '---\r\nclient: "codex"\r\n---\r\n',
     });
 

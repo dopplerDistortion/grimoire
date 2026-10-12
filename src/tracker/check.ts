@@ -10,8 +10,8 @@
 //   named by a sha256 must hash to their names. Files this release doesn't
 //   know are kept as they are (spec §5) and never reported. Records filed
 //   under another id, and content a purge tombstone says is gone. Formats
-//   another module owns (the skill ledger's records) are checked through
-//   the hook it hands in (`RecordFormats`).
+//   another module owns (the skill ledger's records, capture's session
+//   records) are checked through the hooks it hands in (`RecordFormats`).
 // - History: edits to write-once files, commits grimoire didn't make, and
 //   knowledge records committed without grimoire's trailers.
 // - Refs: ref locks older than ~30 s, refs whose names block a tracker ref,
@@ -102,6 +102,8 @@ export interface RecordFormats {
    * named by the sha256 of its bytes: what's wrong with it, or null.
    */
   readonly ledgerRecord?: (id: string, bytes: Buffer) => RecordProblem | null;
+  /** A session record (capture's), its lines already known to be canonical: what's wrong with it, or null. */
+  readonly sessionRecord?: (bytes: Buffer) => RecordProblem | null;
 }
 
 const unparsable = (why: string): RecordVerdict => ({ kind: 'unparsable', why });
@@ -263,8 +265,8 @@ function checkRecord(file: string, bytes: Buffer, formats: RecordFormats): Recor
     if (name === 'end.md') return roundTrip(bytes, (b) => serializeEnd(parseEnd(b)));
     if (name === 'issue-at-start.md') return roundTrip(bytes, (b) => serializeIssue(parseIssue(b)));
     if (parts.length === 7 && parts[5] === 'activity' && parts[6]!.endsWith('.md')) return canonicalFrontmatter(bytes, [...COMMENT_KEYS, ...ACTIVITY_KEYS.filter((key) => !COMMENT_KEYS.includes(key))], true);
-    // Session records (spec §14): capture owns their keys; here, the shared line format and the excerpt body.
-    if (parts.length === 7 && parts[5] === SESSIONS_DIR && parts[6]!.endsWith('.md')) return canonicalFrontmatter(bytes, null, true);
+    // Session records (spec §14): here, the shared line format and the excerpt body; capture owns their keys (`sessionRecord`).
+    if (parts.length === 7 && parts[5] === SESSIONS_DIR && parts[6]!.endsWith('.md')) return canonicalFrontmatter(bytes, null, true) ?? formats.sessionRecord?.(bytes) ?? null;
     return undefined;
   }
   if (parts[0] === 'outcomes' && parts.length === 5 && parts[4]!.endsWith('.md')) return roundTrip(bytes, (b) => serializeOutcome(parseOutcome(b)));
