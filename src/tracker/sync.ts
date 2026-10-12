@@ -17,6 +17,18 @@ import {
   type SyncFailureClass,
 } from './remote';
 import type { Person, WriteSpec } from './store';
+import type { TrackerView } from './view';
+
+/**
+ * The excerpt mode at push time (spec §4 Before every push, §14 The setting):
+ * whether the merged view's mode forbids excerpt text, and how a session
+ * record loses it. Pushed text stays; the unpushed segment is rewritten.
+ */
+export interface TextPolicy {
+  forbidsText(view: TrackerView): boolean;
+  /** A session record's bytes without its text, or null when it carries none. */
+  stripText(bytes: Buffer): Buffer | null;
+}
 
 /** What one sync needs to know about its caller. */
 export interface SyncSpec {
@@ -30,6 +42,8 @@ export interface SyncSpec {
   readonly timeoutMs: number;
   /** When the whole sync must be done (epoch ms): each step gets at most what is left. */
   readonly deadline?: number;
+  /** The excerpt mode's rule for what a push may carry (default: none, nothing is rewritten). */
+  readonly text?: TextPolicy;
 }
 
 export interface SyncFailure {
@@ -78,6 +92,13 @@ export interface SyncHost {
   isShallow(): Promise<boolean>;
   /** Commits the fold of the local and the remote-tracking tracker, when they diverged. */
   fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }>;
+  /**
+   * When the local tip's merged mode forbids text, rewrites the local commits
+   * `pushed` (the remote's tip, null: none) lacks so that no session record
+   * they carry has text the remote doesn't hold already. Returns the new local
+   * tip, or null when nothing changed.
+   */
+  stripUnpushed(pushed: string | null, policy: TextPolicy): Promise<string | null>;
 }
 
 export interface TrackerRefs {
@@ -305,6 +326,8 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     // 5. Push, unless the remote holds the local tip already.
     if (local === null) return outcome({ state: 'in-sync' });
     if (tracker !== null && (await isAncestor(git, local, tracker))) return outcome({ state: 'in-sync' });
+    // The merged excerpt mode forbids text: the unpushed segment loses it before it leaves (spec §4, §14).
+    if (spec.text) local = (await host.stripUnpushed(tracker, spec.text)) ?? local;
     // Never the first branch of an empty remote: it would become the default branch.
     if (head === null) return outcome({ state: 'pending', reason: 'no-default-branch' });
     const push = await net(['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-recurse-submodules', remote, `${local}:${TRACKER_BRANCH}`]);

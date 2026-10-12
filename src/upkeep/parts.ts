@@ -1,7 +1,6 @@
 // The upkeep parts this release ships (spec §13): content pointer-file
 // refresh and skill reconcile (per worktree), copy pruning, pending syncs and
-// generated-output removal from pin-less worktrees (clone-wide). Later slices
-// add theirs: excerpt sweeps.
+// generated-output removal from pin-less worktrees, and excerpt sweeps (clone-wide).
 import { actorOf } from '../core/context';
 import { readCheckoutConfig } from '../core/host';
 import { autoSync, syncPending, syncRequestOf } from '../core/sync';
@@ -15,6 +14,7 @@ import type { Json } from '../machine-local';
 import { operationInProgress, UPKEEP_STAMPS, worktreeLeaseName } from './checkout';
 import { noteRefreshed, refreshNotice } from './refreshed';
 import type { PartInput, PartOutcome, UpkeepPart } from './run';
+import { excerptSweep } from './sweep';
 
 /** Content pointer files that drifted from the pinned release's shipped text are rewritten, and reported to commit. */
 export const pointerRefresh: UpkeepPart = {
@@ -175,4 +175,4 @@ export const generatedRemoval: UpkeepPart = {
 };
 
 /** Every part this release ships, in the order a pass runs them. */
-export const UPKEEP_PARTS: readonly UpkeepPart[] = [pendingSync, pruneCopiesPart, generatedRemoval, pointerRefresh, skillReconcile];
+export const UPKEEP_PARTS: readonly UpkeepPart[] = [pendingSync, excerptSweep(), pruneCopiesPart, generatedRemoval, pointerRefresh, skillReconcile];

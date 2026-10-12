@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import type { Actor, ReservedHint } from '../core/context';
 import type { MachineLocalStore } from '../machine-local';
 import { MAIN_CONTEXT, type EvidenceSource } from './evidence';
-import type { StepOrigin } from './steps';
+import type { StepOrigin, TranscriptStamp } from './steps';
 import { revealedRoot } from './transcript-roots';
 
 /** The coordination kind (spec §6: seen-here rows; version-free, frozen by the cross-pin contract). */
@@ -43,6 +43,20 @@ export interface SeenHereRow {
   readonly path: string | null;
   /** How far the last cut of this context reached (its last step); null until one did. */
   readonly reach: StepOrigin | null;
+  /** When a sweep last cut this context, and the transcript it read then; null until one did. */
+  readonly swept?: SweptMark | null;
+}
+
+/**
+ * A sweep's mark on a row (spec §14 Sweeps: oldest uncut first, unchanged
+ * skipped): when it last cut the context, a cut that failed included, and,
+ * once a cut reached as far as the context's record does, the transcript
+ * that cut read. A later sweep doesn't read that transcript again until its
+ * size or modification time moves.
+ */
+export interface SweptMark {
+  readonly at: string;
+  readonly stamp: TranscriptStamp | null;
 }
 
 /** The client a session key counts: the MCP client and the shell of one agent client are one. */
@@ -109,6 +123,8 @@ export async function recordSeenHere(store: MachineLocalStore, seen: BindingSeen
     last_at: at,
     path: revealed?.transcript_path ?? current?.path ?? null,
     reach: current?.reach ?? null,
+    // A new binding call is evidence the last cut didn't have: the next sweep reads the transcript again.
+    swept: current?.swept ? { at: current.swept.at, stamp: null } : null,
   }));
 }
 
@@ -122,6 +138,19 @@ export async function noteCutReach(store: MachineLocalStore, handle: string, key
   await store.coordination.update<SeenHereRow>(SEEN_HERE, `${handle}/${key}`, (current) => {
     found = current !== undefined;
     return current === undefined ? undefined : { ...current, reach };
+  });
+  return found;
+}
+
+/**
+ * Notes a sweep's cut of the context `key` on its row for attempt `handle`,
+ * and, when its record was attached, how far it reached. No row is made.
+ */
+export async function noteSwept(store: MachineLocalStore, handle: string, key: string, swept: SweptMark, reach?: StepOrigin): Promise<boolean> {
+  let found = false;
+  await store.coordination.update<SeenHereRow>(SEEN_HERE, `${handle}/${key}`, (current) => {
+    found = current !== undefined;
+    return current === undefined ? undefined : { ...current, swept, ...(reach ? { reach } : {}) };
   });
   return found;
 }

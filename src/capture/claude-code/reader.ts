@@ -3,7 +3,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { grimoireTool, runsGrimoire } from '../grimoire-calls';
 import { jsonLines } from '../jsonl';
-import type { Step, Transcript } from '../steps';
+import { stampOf, type Step, type Transcript } from '../steps';
 
 // Grimoire's own tolerant reader for Claude Code's JSONL transcripts (spec §14
 // Readers), built against what Claude Code 2.1.296 writes (spike A, GOK-126;
@@ -91,7 +91,9 @@ export async function readClaudeCodeTranscript(
   const session = path.basename(transcriptPath).replace(/\.jsonl$/i, '');
   const sessionDir = path.join(path.dirname(transcriptPath), session);
   const file = options.agentId ? await findSubagentTranscript(sessionDir, options.agentId) : transcriptPath;
-  if (!file || !(await isFile(file))) return { found: false };
+  // Stamped before the read: a line written meanwhile moves the stamp, so the next sweep reads it.
+  const stamp = file ? await stampOf(file) : null;
+  if (!file || stamp === null) return { found: false };
 
   const parsed = await parseFile(file);
   await classifySubagents(parsed, sessionDir);
@@ -109,6 +111,7 @@ export async function readClaudeCodeTranscript(
       copiedSteps,
       flushedTo: parsed.flushedTo,
       lines: { read: parsed.read, unknown: parsed.unknown, malformed: parsed.malformed },
+      stamp,
     },
   };
 }
@@ -123,14 +126,6 @@ async function findSubagentTranscript(sessionDir: string, agentId: string): Prom
   }
   const hit = entries.find((entry) => path.basename(entry) === name);
   return hit ? path.join(sessionDir, 'subagents', hit) : null;
-}
-
-async function isFile(file: string): Promise<boolean> {
-  try {
-    return (await stat(file)).isFile();
-  } catch {
-    return false;
-  }
 }
 
 interface Parsed {

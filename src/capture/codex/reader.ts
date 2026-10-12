@@ -4,7 +4,7 @@ import { pipeline } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { grimoireTool, runsGrimoire } from '../grimoire-calls';
 import { jsonLines } from '../jsonl';
-import type { Step, Transcript } from '../steps';
+import { stampOf, type Step, type Transcript } from '../steps';
 
 // Grimoire's own tolerant reader for Codex transcripts (spec §14 Readers), built
 // against what Codex CLI 0.162.1 writes (spike E, GOK-130;
@@ -87,6 +87,8 @@ export async function readCodexTranscript(file: string): Promise<CodexReadResult
   if (compressed && typeof zlib.createZstdDecompress !== 'function') {
     return { found: false, file, unreadable: 'zstd_unavailable' };
   }
+  // Stamped before the read: a line written meanwhile moves the stamp, so the next sweep reads it.
+  const stamp = await stampOf(file);
   let parsed: Parsed;
   try {
     parsed = await parseLines(jsonLines(compressed ? decompressed(file) : createReadStream(file, { encoding: 'utf8' })));
@@ -109,6 +111,7 @@ export async function readCodexTranscript(file: string): Promise<CodexReadResult
       copiedSteps: parsed.copiedSteps,
       flushedTo: parsed.flushedTo,
       lines: { read: parsed.read, unknown: parsed.unknown, malformed: parsed.malformed },
+      ...(stamp !== null ? { stamp } : {}),
     },
   };
 }
