@@ -154,9 +154,10 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   }
   const rank = (t: Target) => (t.calling ? 0 : pending.has(t.key) ? 2 : 1);
   const ordered = [...targets].sort((a, b) => rank(a) - rank(b));
-  // What transcript reads are matched against: every version the ledger records. `none` mode opens no transcript.
-  const versions: SkillVersionTexts =
-    input.mode === 'none' ? new Map() : await beforeDeadline(skillVersionTexts(input.view, input.scanner), deadline, new Map());
+  // What transcript reads are matched against: every version the ledger records; null when they couldn't be read
+  // in time, which leaves every transcript scan's facts partial. `none` mode opens no transcript.
+  const versions: SkillVersionTexts | null =
+    input.mode === 'none' ? new Map() : await beforeDeadline(skillVersionTexts(input.view, input.scanner), deadline, null);
   const bound = new Set(targets.flatMap((target) => (target.context !== null ? [target.context] : [])));
 
   const captures: ContextCapture[] = [];
@@ -378,7 +379,8 @@ class ContextCut {
     private readonly target: Target,
     private readonly deadline: number,
     private readonly claimed: readonly string[],
-    private readonly versions: SkillVersionTexts,
+    /** Null when the ledger's versions couldn't be read: reads are then of an unknown version, and the facts partial. */
+    private readonly versions: SkillVersionTexts | null,
     /** The contexts bound to the attempt: a subagent among them is scanned for its own record, never again for its launcher's. */
     private readonly bound: ReadonlySet<string>,
   ) {
@@ -557,14 +559,15 @@ class ContextCut {
    * The skill reads of a cut context (spec §14 Facts: Read): its whole
    * window, before the excerpt's cut, and the transcripts of the subagents
    * launched in it, found by id, recursively, skipping `grimoire-chores`
-   * ones. A subagent transcript that can't be read leaves the facts
-   * incomplete.
+   * ones. A subagent transcript that can't be read, or ledger versions that
+   * couldn't be read to match reads against, leave the facts incomplete.
    */
   private async scanFacts(cut: Cut, subagents: SubagentReader | undefined): Promise<SkillFacts> {
-    const reads = transcriptSkillReads(cut, cut.steps, this.versions);
+    const versions = this.versions ?? new Map();
+    const reads = transcriptSkillReads(cut, cut.steps, versions);
     const queue = launchedSubagents(cut.steps);
     const launched = new Set<string>();
-    let complete = true;
+    let complete = this.versions !== null;
     while (queue.length > 0) {
       const id = queue.shift()!;
       if (launched.has(id) || this.bound.has(id)) continue;
@@ -576,7 +579,7 @@ class ContextCut {
       }
       if (transcript.agentType === CHORES_AGENT) continue;
       const steps = transcript.steps.slice(transcript.copiedSteps);
-      reads.push(...transcriptSkillReads(transcript, steps, this.versions));
+      reads.push(...transcriptSkillReads(transcript, steps, versions));
       queue.push(...launchedSubagents(steps));
     }
     return { reads, complete, launched };

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { fixturePath, makeTempDir, removeDir } from '#harness';
 import type { CallContext, Core } from '../../src/core';
+import { bundledRules, createScanner, type SecretScanner } from '../../src/scanner';
 import {
   CLAUDE_AGENT,
   CLAUDE_SESSION,
@@ -170,6 +171,158 @@ describe('skill reads in session records', () => {
       expect(record!.fields.skills_read).toEqual([
         { name: 'changelog-entry', version, via: 'file', at: '2026-10-11T03:21:37.110Z', session: CLAUDE_SESSION, context: CLAUDE_AGENT },
       ]);
+    } finally {
+      await removeDir(configDir);
+    }
+  });
+});
+
+describe('which skill_read events a record counts', () => {
+  test('a skill_read made in the claim’s turn before the claim counts: events cover the window the transcript scan covers', async ({ world, grimoire, capture }) => {
+    const codex = await codexHomeWith('codex/transcripts/skill-stub-read', TIDEWATER_ROLLOUT);
+    try {
+      const core = capture.makeCore({ capture: { codexHome: codex.home } });
+      const version = await edit(core, grimoire.ctx, 'tidewater-ledger', TIDEWATER);
+      // The turn opens at 05:05:59.024; the agent reads the skill, then claims.
+      capture.at('2026-10-11T05:05:59.040Z');
+      await core.call('skill_read', { name: 'tidewater-ledger' }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_read', TIDEWATER_THREAD));
+      capture.at('2026-10-11T05:05:59.100Z');
+      const id = await created(core, grimoire.ctx, 'Reconcile');
+      const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_3_0', TIDEWATER_THREAD));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const { attempt } = claim.result;
+      capture.at('2026-10-11T05:06:00.050Z');
+
+      await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_6_0', TIDEWATER_THREAD));
+
+      const [record] = await sessionRecords(world.a, id, attempt);
+      expect(record!.fields.skills_read).toEqual([
+        { name: 'tidewater-ledger', version, via: 'skill_read', at: '2026-10-11T05:05:59.040Z', session: TIDEWATER_THREAD, context: TIDEWATER_THREAD },
+        { name: 'tidewater-ledger', version, via: 'shell', at: '2026-10-11T05:05:59.283Z', session: TIDEWATER_THREAD, context: TIDEWATER_THREAD },
+      ]);
+    } finally {
+      await removeDir(codex.home);
+    }
+  });
+
+  test('an unclaimed close counts the skill_read events made in its window, before the close', async ({ world, grimoire, capture }) => {
+    const codex = await codexHomeWith('codex/transcripts/skill-stub-read', TIDEWATER_ROLLOUT);
+    try {
+      const core = capture.makeCore({ capture: { codexHome: codex.home } });
+      const version = await edit(core, grimoire.ctx, 'tidewater-ledger', TIDEWATER);
+      capture.at('2026-10-11T05:05:58.000Z');
+      const id = await created(core, grimoire.ctx, 'Reconcile');
+      // Before the turn holding the close opened (05:05:59.024): outside the window.
+      capture.at('2026-10-11T05:05:58.700Z');
+      await core.call('skill_read', { name: 'tidewater-ledger' }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_early', TIDEWATER_THREAD));
+      capture.at('2026-10-11T05:05:59.500Z');
+      await core.call('skill_read', { name: 'tidewater-ledger' }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_read', TIDEWATER_THREAD));
+      capture.at('2026-10-11T05:06:00.050Z');
+
+      const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_6_0', TIDEWATER_THREAD));
+
+      expect(closed).toMatchObject({ ok: true });
+      const attempt = (closed as { ok: true; result: { attempt: string } }).result.attempt;
+      const [record] = await sessionRecords(world.a, id, attempt);
+      expect(record!.fields).toMatchObject({ facts: 'scanned' });
+      expect(record!.fields.skills_read).toEqual([
+        { name: 'tidewater-ledger', version, via: 'shell', at: '2026-10-11T05:05:59.283Z', session: TIDEWATER_THREAD, context: TIDEWATER_THREAD },
+        { name: 'tidewater-ledger', version, via: 'skill_read', at: '2026-10-11T05:05:59.500Z', session: TIDEWATER_THREAD, context: TIDEWATER_THREAD },
+      ]);
+    } finally {
+      await removeDir(codex.home);
+    }
+  });
+
+  test('in none mode an unclaimed close counts its context’s skill_read events since the issue was created', async ({ world, grimoire, capture }) => {
+    const codex = await codexHomeWith('codex/transcripts/skill-stub-read', TIDEWATER_ROLLOUT);
+    try {
+      await setExcerptMode(world.a, 'none');
+      const core = capture.makeCore({ capture: { codexHome: codex.home } });
+      const version = await edit(core, grimoire.ctx, 'tidewater-ledger', TIDEWATER);
+      // Before the issue existed: no read for it.
+      capture.at('2026-10-11T05:05:58.700Z');
+      await core.call('skill_read', { name: 'tidewater-ledger' }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_early', TIDEWATER_THREAD));
+      capture.at('2026-10-11T05:05:59.100Z');
+      const id = await created(core, grimoire.ctx, 'Reconcile');
+      capture.at('2026-10-11T05:05:59.500Z');
+      await core.call('skill_read', { name: 'tidewater-ledger' }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_read', TIDEWATER_THREAD));
+      capture.at('2026-10-11T05:06:00.050Z');
+
+      const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_6_0', TIDEWATER_THREAD));
+
+      const attempt = (closed as { ok: true; result: { attempt: string } }).result.attempt;
+      const [record] = await sessionRecords(world.a, id, attempt);
+      expect(record!.fields).toMatchObject({ excerpt: 'off', facts: 'events_only' });
+      expect(record!.fields.skills_read).toEqual([
+        { name: 'tidewater-ledger', version, via: 'skill_read', at: '2026-10-11T05:05:59.500Z', session: TIDEWATER_THREAD, context: TIDEWATER_THREAD },
+      ]);
+    } finally {
+      await removeDir(codex.home);
+    }
+  });
+});
+
+describe('incomplete facts', () => {
+  test('when the ledger’s versions can’t be loaded, transcript reads are of an unknown version and the facts are partial', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const codex = await codexHomeWith('codex/transcripts/skill-stub-read', TIDEWATER_ROLLOUT);
+    try {
+      const core = capture.makeCore({ capture: { codexHome: codex.home } });
+      await edit(core, grimoire.ctx, 'tidewater-ledger', TIDEWATER);
+      capture.at('2026-10-11T05:05:59.100Z');
+      const id = await created(core, grimoire.ctx, 'Reconcile');
+      const claim = await core.call('claim', { id }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_3_0', TIDEWATER_THREAD));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const { attempt } = claim.result;
+      capture.at('2026-10-11T05:06:00.050Z');
+      // A scanner that fails on the version's text: the ledger's versions can't be read.
+      const scanner = createScanner(bundledRules);
+      const failing: SecretScanner = {
+        scan: (text) => {
+          if (text === TIDEWATER) throw new Error('scanner down');
+          return scanner.scan(text);
+        },
+        redact: (text) => scanner.redact(text),
+      };
+      const closer = capture.makeCore({ capture: { codexHome: codex.home }, scanner: failing });
+
+      await closer.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, codexCall(grimoire.ctx, TIDEWATER_THREAD, 'call_6_0', TIDEWATER_THREAD));
+
+      const [record] = await sessionRecords(world.a, id, attempt);
+      expect(record!.fields).toMatchObject({ facts: 'partial' });
+      expect(record!.fields.skills_read).toEqual([
+        { name: 'tidewater-ledger', version: 'unknown', via: 'shell', at: '2026-10-11T05:05:59.283Z', session: TIDEWATER_THREAD, context: TIDEWATER_THREAD },
+      ]);
+      expect((await captureOf(world.a, attempt)).facts_complete).toBe(false);
+    } finally {
+      await removeDir(codex.home);
+    }
+  });
+
+  test('a subagent launched in the window whose transcript can’t be read leaves the facts partial', async ({ world, grimoire, capture }) => {
+    // The subagent session without its subagent's transcript.
+    const configDir = await makeTempDir('grimoire-claude-config-');
+    try {
+      const project = path.join(configDir, 'projects', 'C--Users-user-proj');
+      await mkdir(project, { recursive: true });
+      await cp(fixturePath(`${CLAUDE_TX}/${CLAUDE_SESSION}.jsonl`), path.join(project, `${CLAUDE_SESSION}.jsonl`));
+      const core = capture.makeCore({ capture: { claudeConfigDir: configDir } });
+      capture.at('2026-10-11T03:27:17.500Z');
+      const id = await created(core, grimoire.ctx, 'Changelog');
+      const claim = await core.call('claim', { id }, claudeCall(grimoire.ctx, MAIN_CALL));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const { attempt } = claim.result;
+      capture.at('2026-10-11T03:27:30.000Z');
+
+      await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close_not_flushed'));
+
+      const [record] = await sessionRecords(world.a, id, attempt);
+      expect(record!.fields).toMatchObject({ context: 'main', excerpt: 'cut', facts: 'partial', skills_read: [] });
+      expect((await captureOf(world.a, attempt)).facts_complete).toBe(false);
     } finally {
       await removeDir(configDir);
     }
