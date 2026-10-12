@@ -13,7 +13,8 @@ import type { CallContext, ChoreBrief, ChoreReadResult, ChoreSubmitResult, Core 
 import { readCheckoutConfig, readPerson } from '../core/host';
 import { GrimoireError, type ErrorBody } from '../errors';
 import { findGitDirs, MachineLocalStore } from '../machine-local';
-import { openTracker, type ChoreKind } from '../tracker';
+import { openTracker, type ChoreKind, type TrackerStore } from '../tracker';
+import { dueChores } from '../core/chores';
 import { claudeAnswer, codexAnswer, type ChildAnswer } from './answer';
 import { composeBundle, gatherServed, PROCEDURE, type Refusal, type Served } from './bundle';
 import { capState, checkCaps, countRun, recordRun, RUNS_PER_DAY, type CapState } from './caps';
@@ -110,6 +111,7 @@ export async function runChores(options: RunChoresOptions): Promise<ChoreRunRepo
     const why = 'a runner run is already in progress on this machine';
     throw new GrimoireError('NOT_DUE', `no chore to run: ${why}`, { why });
   }
+  const tracker = await openTracker(options.root, { clock: now });
   try {
     const ctx = await runnerContext(options.root, config.kind, options.env);
     const runs: RunnerRun[] = [];
@@ -120,7 +122,7 @@ export async function runChores(options: RunChoresOptions): Promise<ChoreRunRepo
         const caps = await capState(store, now());
         if (caps.paused_until !== null || caps.next_run_at !== null) break;
       }
-      const outcome = await oneRun(config, ctx, store, options, now);
+      const outcome = await oneRun(config, ctx, store, tracker, options, now);
       if ('why' in outcome) {
         why = outcome.why;
         break;
@@ -135,12 +137,27 @@ export async function runChores(options: RunChoresOptions): Promise<ChoreRunRepo
         : runs.map((run) => run.summary).join('\n');
     return { runner: config.kind, runs, ...(runs.length === 0 && why !== undefined ? { why } : {}), summary, caps };
   } finally {
+    await tracker.close();
     await acquired.lock.release();
   }
 }
 
 /** One iteration: the caps, the billing guard, the start, the spawn and its fix-up. `{why}` when nothing was due. */
-async function oneRun(config: RunnerConfig, ctx: CallContext, store: MachineLocalStore, options: RunChoresOptions, now: () => Date): Promise<RunnerRun | { why: string }> {
+async function oneRun(
+  config: RunnerConfig,
+  ctx: CallContext,
+  store: MachineLocalStore,
+  tracker: TrackerStore,
+  options: RunChoresOptions,
+  now: () => Date,
+): Promise<RunnerRun | { why: string }> {
+  if (options.due) {
+    // Nothing due starts nothing: not even the billing guard's client call.
+    const due = await dueChores(tracker, ctx);
+    if (due.next === null) {
+      return { why: due.paused ? 'the knowledge loop is paused' : `Wiki Maintainer: ${due['wiki-maintainer'].why}; Skill Proposer: ${due['skill-proposer'].why}` };
+    }
+  }
   await checkCaps(store, now());
   await checkBinary(config.binary);
   const work = await workDir();
@@ -155,7 +172,7 @@ async function oneRun(config: RunnerConfig, ctx: CallContext, store: MachineLoca
     }
     const brief = started.result;
     await countRun(store, now());
-    return await iterate(config, ctx, store, options, now, brief, env, checked, work);
+    return await iterate(config, ctx, store, tracker, options, now, brief, env, checked, work);
   } finally {
     await rm(work.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined);
   }
@@ -193,6 +210,7 @@ async function iterate(
   config: RunnerConfig,
   ctx: CallContext,
   store: MachineLocalStore,
+  tracker: TrackerStore,
   options: RunChoresOptions,
   now: () => Date,
   brief: ChoreBrief,
@@ -223,7 +241,7 @@ async function iterate(
       if (page.error.code === 'NOT_FOUND' && input.item !== undefined) return null;
       throw thrown(page.error);
     };
-    const served = await gatherServed(read, await pageItems(options.root));
+    const served = await gatherServed(read, await pageItems(tracker));
     let refusal: Refusal | null = null;
     for (let spawn = 1; spawn <= 2; spawn++) {
       await freshCwd(work);
@@ -255,13 +273,8 @@ async function iterate(
 }
 
 /** The wiki's pages, as items a Wiki Maintainer or Skill Proposer may be served on request. */
-async function pageItems(root: string): Promise<string[]> {
-  const tracker = await openTracker(root);
-  try {
-    return (await (await tracker.read()).wiki.pages()).map((page) => `page:${page.slug}`);
-  } finally {
-    await tracker.close();
-  }
+async function pageItems(tracker: TrackerStore): Promise<string[]> {
+  return (await (await tracker.read()).wiki.pages()).map((page) => `page:${page.slug}`);
 }
 
 /** One spawn of the person's client: the bundle on stdin, the answer read by the client's failure rule. */

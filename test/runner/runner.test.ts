@@ -138,3 +138,139 @@ describe('the runner: a due compile through claude', () => {
     }
   });
 });
+
+describe('the runner: the one fix-up respawn', () => {
+  test('an invalid answer gets exactly one respawn, told the reason codes; the fixed answer compiles', async ({ world, grimoire }) => {
+    const d = await dueCompile(grimoire);
+    // The first answer leaves a batch pair out of the consumption map.
+    const fake = await enabled('claude', world.a.dir, {
+      auth: authStatus('claude-ai'),
+      answers: [claudeAnswer(noPatternAnswer(d.pairs.slice(1))), claudeAnswer(noPatternAnswer(d.pairs))],
+    });
+
+    const report = await runChores({ root: world.a.dir, core: d.core, env: fake.env(), now: d.clock.now, due: true });
+
+    expect(report.runs).toEqual([expect.objectContaining({ kind: 'wiki-maintainer', result: 'compiled', spawns: 2 })]);
+    const runs = fake.calls('claude').filter((call) => call.type === 'answer');
+    expect(runs).toHaveLength(2);
+    // The respawn reads the same bundle, plus why the first answer was refused; each spawn gets a fresh, empty cwd.
+    expect(runs[0]!.stdin).not.toContain('Your previous answer was refused');
+    expect(runs[1]!.stdin).toContain('# Your previous answer was refused');
+    expect(runs[1]!.stdin).toMatch(/Reason codes: .*\S/);
+    expect(runs[1]!.stdin.startsWith(runs[0]!.stdin.replace('# End of the bundle\n', ''))).toBe(true);
+    expect(runs[1]!.cwdEntries).toEqual([]);
+  });
+
+  test('a second invalid answer ends the run failed: never a third spawn', async ({ world, grimoire }) => {
+    const d = await dueCompile(grimoire);
+    const invalid = claudeAnswer(noPatternAnswer(d.pairs.slice(1)));
+    const fake = await enabled('claude', world.a.dir, { auth: authStatus('claude-ai'), answers: [invalid, invalid, invalid] });
+
+    const report = await runChores({ root: world.a.dir, core: d.core, env: fake.env(), now: d.clock.now, due: true });
+
+    expect(report.runs).toEqual([expect.objectContaining({ result: 'failed', spawns: 2 })]);
+    expect(report.runs[0]!.reasons!.length).toBeGreaterThan(0);
+    expect(fake.calls('claude').filter((call) => call.type === 'answer')).toHaveLength(2);
+    // The failed run's record is committed with its reason codes (spec §16 One fix-up).
+    const tracker = await openTracker(world.a.dir);
+    try {
+      const records = await (await tracker.read()).choreRuns.records();
+      expect(records).toEqual([expect.objectContaining({ result: 'failed', origin: 'runner', isolation: 'runner' })]);
+    } finally {
+      await tracker.close();
+    }
+  });
+
+  test('a child that fails (no structured output) ends the run consuming nothing', async ({ world, grimoire }) => {
+    const d = await dueCompile(grimoire);
+    const fake = await enabled('claude', world.a.dir, { auth: authStatus('claude-ai'), answers: [claudeMaxTurns()] });
+
+    const report = await runChores({ root: world.a.dir, core: d.core, env: fake.env(), now: d.clock.now, due: true });
+
+    expect(report.runs).toEqual([expect.objectContaining({ result: 'failed', spawns: 1, reasons: ['child_exit_1'] })]);
+    // Abandoned: no record, and the compile is still due.
+    const tracker = await openTracker(world.a.dir);
+    try {
+      expect(await (await tracker.read()).choreRuns.records()).toEqual([]);
+    } finally {
+      await tracker.close();
+    }
+    expect(report.summary).toContain('nothing consumed');
+  });
+});
+
+describe('the runner: a due compile through codex', () => {
+  test('runs the C4 fallback invocation with each listed MCP server switched off, a strict schema, the bundle on stdin and the answer from -o', async ({ world, grimoire }) => {
+    const d = await dueCompile(grimoire);
+    const listed = JSON.stringify([
+      { name: 'usermcp', enabled: true, disabled_reason: null, transport: { type: 'stdio', command: 'node', args: ['server.js'], env: { TOKEN: 'never-logged' } } },
+      { name: 'my server', enabled: true, disabled_reason: null, transport: { type: 'stdio', command: 'x', args: [], env: null } },
+    ]);
+    // A strict answer: optional fields come back null.
+    const answer = { pages: [], consumption: d.pairs.map((pair) => ({ pair, slugs: null, no_pattern: 'nothing recurring' })), client: 'codex', model: null };
+    const fake = await enabled('codex', world.a.dir, {
+      login: { stdout: '', stderr: 'Logged in using ChatGPT\n', code: 0 },
+      mcp: { stdout: listed, code: 0 },
+      answers: [codexAnswer(answer)],
+    });
+
+    const report = await runChores({ root: world.a.dir, core: d.core, env: fake.env(), now: d.clock.now, due: true });
+
+    expect(report.runs).toEqual([expect.objectContaining({ kind: 'wiki-maintainer', result: 'compiled', spawns: 1, auth_method: 'chatgpt' })]);
+    const calls = fake.calls('codex');
+    const run = calls.find((call) => call.type === 'answer')!;
+    const at = (flag: string) => run.argv[run.argv.indexOf(flag) + 1]!;
+    expect(run.argv).toEqual([
+      'exec',
+      '--json',
+      '--ephemeral',
+      '--ignore-rules',
+      '--skip-git-repo-check',
+      '--cd',
+      run.cwd,
+      '--sandbox',
+      'read-only',
+      '--output-schema',
+      at('--output-schema'),
+      '-o',
+      at('-o'),
+      '-c',
+      'features.apps=false',
+      '-c',
+      'features.plugins=false',
+      '-c',
+      'features.hooks=false',
+      '-c',
+      'notify=[]',
+      '-c',
+      'developer_instructions=""',
+      '-c',
+      'features.shell_tool=false',
+      '-c',
+      'web_search="disabled"',
+      '-c',
+      'skills.include_instructions=false',
+      '-c',
+      'model_provider="openai"',
+      '-c',
+      'mcp_servers.usermcp.enabled=false',
+      '-c',
+      'mcp_servers."my server".enabled=false',
+    ]);
+    expect(run.argv).not.toContain('--ignore-user-config');
+    expect(run.cwdEntries).toEqual([]);
+    expect(gitAncestor(run.cwd)).toBeNull();
+    expect(existsSync(run.cwd)).toBe(false);
+    expect(path.dirname(at('--output-schema'))).not.toBe(run.cwd);
+    // The bundle on stdin: the plain header, the procedure (Codex has no system prompt file), the batch.
+    expect(run.stdin.split('\n')[0]).toMatch(/^grimoire chore bundle/);
+    expect(run.stdin).toContain("You are grimoire's chore runner");
+    for (const pair of d.pairs) expect(run.stdin).toContain(pair);
+    // The MCP list ran the way the exec runs: its overrides, in its cwd and env.
+    const list = calls.filter((call) => call.type === 'mcp').at(-1)!;
+    expect(list.argv).toEqual([...run.argv.slice(run.argv.indexOf('-c'), run.argv.indexOf('mcp_servers.usermcp.enabled=false') - 1), 'mcp', 'list', '--json']);
+    expect(list.cwd).toBe(run.cwd);
+    expect(list.env).toEqual(run.env);
+    expect(calls.filter((call) => call.type === 'login').at(-1)!.env).toEqual(run.env);
+  });
+});
