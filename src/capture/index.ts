@@ -81,6 +81,7 @@ export type {
 } from './steps';
 export {
   eventSkillReads,
+  skillVersionTexts,
   transcriptSkillReads,
   UNKNOWN_VERSION,
   type SkillRead,

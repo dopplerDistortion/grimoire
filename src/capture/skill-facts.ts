@@ -13,7 +13,9 @@
 // then matched against every version the ledger records for that skill: the
 // version whose whole text it shows, else, for a partial read, the one
 // version that contains it, else `unknown`. A read of a stub is no read.
-import { normalizeSkillText, STUB_PREFIX } from '../knowledge';
+import { normalizeSkillText, readSkills, STUB_PREFIX } from '../knowledge';
+import type { SecretScanner } from '../scanner';
+import type { TrackerView } from '../tracker';
 import type { Step, Transcript } from './steps';
 
 /** How a read was seen: a `skill_read` event, a file tool, shell text, or a Claude `Skill` call. */
@@ -182,4 +184,20 @@ function holdsInOrder(text: string, pieces: readonly string[]): boolean {
     from = at + piece.length;
   }
   return true;
+}
+
+/** Every version the ledger in `view` records for each skill, with its text: what reads are matched against. */
+export async function skillVersionTexts(view: TrackerView, scanner: SecretScanner): Promise<SkillVersionTexts> {
+  const book = await readSkills(view, scanner);
+  const found = new Map<string, Map<string, string>>();
+  for (const state of book.skills.values()) {
+    const texts = new Map<string, string>();
+    for (const record of state.records) {
+      if (record.to === null || texts.has(record.to)) continue;
+      const text = await book.text(record.to);
+      if (text !== null) texts.set(record.to, text);
+    }
+    found.set(state.name, texts);
+  }
+  return found;
 }
