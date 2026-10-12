@@ -133,8 +133,26 @@ function stateFacts(issue: IssueDetail) {
   };
 }
 
-function IssueView({ issue, activity, context, reload, flash }: { issue: IssueDetail; activity: readonly ActivityEntry[]; context: IssueContext; reload: () => Promise<void>; flash: number }) {
+/** Identities seen on the tracker: the screen's, plus everyone this issue names (creator, workers, commenters, writers). */
+function peopleSeen(issue: IssueDetail, activity: readonly ActivityEntry[], known: readonly string[]): string[] {
+  const seen = new Set(known);
+  const add = (person: unknown) => {
+    if (typeof person === 'string' && person.includes('@')) seen.add(person);
+  };
+  add(issue.created_by);
+  for (const a of issue.past_attempts) {
+    add(a.assignee);
+    add(a.ended_by);
+  }
+  for (const a of issue.open_attempts) add(a.assignee);
+  for (const comment of issue.comments) add(comment.actor.person);
+  for (const entry of activity) add(entry.person);
+  return [...seen].sort();
+}
+
+function IssueView({ issue, activity, context: screen, reload, flash }: { issue: IssueDetail; activity: readonly ActivityEntry[]; context: IssueContext; reload: () => Promise<void>; flash: number }) {
   const id = issue.id;
+  const context: IssueContext = { ...screen, people: peopleSeen(issue, activity, screen.people) };
   const forgeHost = hostOf(issue.link);
   return (
     <div class="issue" data-issue={id}>

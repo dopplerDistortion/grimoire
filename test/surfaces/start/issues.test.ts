@@ -244,7 +244,9 @@ describe('the Issues screens in a browser, under the CSP', () => {
       await page.waitFor(`document.querySelector('.body-editor') === null && document.querySelector('.body-conflict') === null`);
       const shown = await grimoire.core.call('show', { ref: id }, agent);
 
-      expect(kept).toEqual({ same: true, value: draft, focused: true, caret: 7, scroll: scrolled });
+      expect(kept).toMatchObject({ same: true, value: draft, focused: true, caret: 7 });
+      // Not reset: the browser may move it down by what was inserted above (scroll anchoring), never back to the top.
+      expect(kept.scroll).toBeGreaterThanOrEqual(scrolled);
       expect(scrolled).toBeGreaterThan(0);
       expect(shown.ok && shown.result.body).toBe(MAP.replace('ready to slice.', 'ready to slice into tickets.').replace('## Out of scope', '## Not yet specified\n\n- Refunds.\n\n## Out of scope'));
       expect(await page.report()).toEqual({ violations: [], errors: [] });
