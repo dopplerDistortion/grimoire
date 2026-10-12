@@ -5,8 +5,9 @@
 // - An accept of the proposal decides it `accepted`, unless the skill's
 //   derivation says otherwise: `contested` while a reject of the same
 //   proposal stands against it unsettled, `superseded` when its accept lost a
-//   fork to another change, and `undone` once a restore moved the skill off
-//   the version it made current.
+//   fork to another change (and still after a later change followed the fork,
+//   unless one made its version current again), and `undone` once a restore
+//   moved the skill off the version it made current.
 // - Otherwise a reject decides it `rejected`; a dismiss `dismissed`, until a
 //   reconsider follows it; a `lapse` record (an accept whose checks failed at
 //   accept time) `lapsed`.
@@ -59,7 +60,7 @@ export function proposalStates(proposals: readonly ProposalRecord[], skills: Rea
     const accept = decisions.find((entry) => entry.kind === 'accept');
     if (accept) {
       if (skill?.contested.some((contest) => contest.proposal === record.id)) return decided('contested', accept);
-      if (skill?.superseded.some((loser) => loser.id === accept.id)) return decided('superseded', accept);
+      if (skill && [...skill.superseded, ...skill.lost].some((loser) => loser.id === accept.id)) return decided('superseded', accept);
       const undone = records.some(
         (entry) => entry.kind === 'restore' && accept.to !== null && entry.from === accept.to && held(records, entry.after).has(accept.id),
       );

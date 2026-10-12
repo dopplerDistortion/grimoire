@@ -11,7 +11,10 @@
 // - a delete (or an eject) beats a restore, which beats a change that writes a
 //   version (accept, edit, a recorded stray edit, acknowledge);
 // - between two of the same rank, the lower version hash serves until a human
-//   acknowledges one; the losers are superseded;
+//   acknowledges one; the losers are superseded, and stay so after a later
+//   change follows the fork (an acknowledge picking the other side, or an
+//   edit, restore or delete over both) until a change makes their version
+//   current again;
 // - an accept against a reject of the same proposal is contested, and is
 //   served as accepted, unless a `suspicious` reject is involved: then the
 //   accepted version is served nowhere until a human settles it, and the
@@ -64,6 +67,13 @@ export interface SkillState {
   readonly blocked: boolean;
   /** Heads that lost a fork to `current`: superseded until a human acknowledges one. */
   readonly superseded: readonly LedgerEntry[];
+  /**
+   * Changes that lost a fork a later change has since followed (the side an
+   * acknowledge didn't pick, or the side that wasn't serving when an edit,
+   * restore or delete followed both), whose version no later change made
+   * current again: superseded for good.
+   */
+  readonly lost: readonly LedgerEntry[];
   readonly contested: readonly ContestedDecision[];
   /** Versions withheld by a `suspicious` contested decision. */
   readonly withheld: ReadonlySet<string>;
@@ -128,6 +138,7 @@ function deriveSkill(name: string, records: readonly LedgerEntry[], servable: (v
           ? 'none'
           : 'active';
 
+  const lost = lostSides(records, changes, ancestors, headsOf);
   const contested = contestedDecisions(records, ancestors);
   const withheld = new Set(contested.filter((c) => c.withheld).flatMap((c) => c.accepts.map((a) => a.to).filter((v): v is string => v !== null)));
 
@@ -158,6 +169,7 @@ function deriveSkill(name: string, records: readonly LedgerEntry[], servable: (v
     served,
     blocked,
     superseded,
+    lost,
     contested,
     withheld,
     records: [...records].sort((a, b) => ancestors(a.id).size - ancestors(b.id).size || byCode(a.id, b.id)),
@@ -186,6 +198,49 @@ function precedence(a: LedgerEntry, b: LedgerEntry): number {
     }
   }
   return byCode(a.id, b.id);
+}
+
+/**
+ * The changes that lost a fork some later change followed: for each change
+ * following two or more heads that disagree, every head whose outcome isn't
+ * the one that stood (the version an acknowledge picked; otherwise the one
+ * the fork rules served), unless a change following that one made its version
+ * current again.
+ */
+function lostSides(
+  records: readonly LedgerEntry[],
+  changes: ReadonlySet<string>,
+  ancestors: (id: string) => ReadonlySet<string>,
+  headsOf: (ids: ReadonlySet<string>) => LedgerEntry[],
+): LedgerEntry[] {
+  const byId = new Map(records.map((record) => [record.id, record]));
+  const memo = new Map<string, ReadonlySet<string>>();
+  /** The nearest changes `id` follows, through records that change nothing: the heads it saw are among them. */
+  const nearest = (id: string): ReadonlySet<string> => {
+    const known = memo.get(id);
+    if (known) return known;
+    const found = new Set<string>();
+    for (const parent of byId.get(id)?.after ?? []) {
+      if (!byId.has(parent)) continue;
+      if (changes.has(parent)) found.add(parent);
+      else for (const change of nearest(parent)) found.add(change);
+    }
+    memo.set(id, found);
+    return found;
+  };
+  const lost = new Map<string, LedgerEntry>();
+  const ranked = records.filter((record) => changes.has(record.id));
+  for (const resolver of ranked) {
+    const heads = headsOf(nearest(resolver.id)).sort(precedence);
+    if (heads.length < 2) continue;
+    const stood = resolver.kind === 'acknowledge' ? outcome(resolver) : outcome(heads[0]!);
+    for (const head of heads) {
+      if (outcome(head) === stood || lost.has(head.id)) continue;
+      const again = ranked.some((later) => !REMOVES.has(later.kind) && later.to === head.to && ancestors(later.id).has(resolver.id));
+      if (!again) lost.set(head.id, head);
+    }
+  }
+  return [...lost.values()].sort((a, b) => byCode(a.id, b.id));
 }
 
 /** Accepts and rejects of one proposal that no human change following them all has settled. */

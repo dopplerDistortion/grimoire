@@ -275,12 +275,12 @@ async function exchange(world: GitWorld): Promise<void> {
   await fetchTrackerFrom(world.b, world.a);
 }
 
-/** A restore of `skill` to `to`, written as the restore op will (GOK-168). */
-async function restore(checkout: Checkout, skill: string, to: string): Promise<void> {
+/** A restore or acknowledge of `skill` to the stored version `to`, written as those ops will (GOK-168). */
+async function skillChange(checkout: Checkout, kind: 'restore' | 'acknowledge', skill: string, to: string): Promise<void> {
   const tracker = await openTracker(checkout.dir);
   try {
-    await tracker.transact({ op: 'restore', author: { name: 'Alice', email: 'alice@example.com' }, actor: { kind: 'human', surface: 'cli' } }, async (draft) => {
-      await writeSkillChange(draft, createScanner(bundledRules), { kind: 'restore', skill, to }, { actor: { kind: 'human' }, by: 'alice@example.com', surface: 'cli', clone: 'test-clone' });
+    await tracker.transact({ op: kind, author: { name: 'Alice', email: 'alice@example.com' }, actor: { kind: 'human', surface: 'cli' } }, async (draft) => {
+      await writeSkillChange(draft, createScanner(bundledRules), { kind, skill, to }, { actor: { kind: 'human' }, by: 'alice@example.com', surface: 'cli', clone: 'test-clone' });
       return { result: null };
     });
   } finally {
@@ -326,8 +326,34 @@ describe('derived statuses across clones and later changes', () => {
     const listed = ok(await p.core.call('proposal_list', {}, cli));
     expect(Object.fromEntries(listed.proposals.map((row) => [row.id, row.status]))).toEqual({ [winner!]: 'accepted', [loser!]: 'superseded' });
 
-    await restore(world.a, SKILL, p.base);
+    await skillChange(world.a, 'restore', SKILL, p.base);
     const after = ok(await p.core.call('proposal_list', {}, cli));
-    expect(after.proposals.find((row) => row.id === winner)?.status).toBe('undone');
+    // The restore follows both sides of the fork: the losing side stays superseded.
+    expect(Object.fromEntries(after.proposals.map((row) => [row.id, row.status]))).toEqual({ [winner!]: 'undone', [loser!]: 'superseded' });
+  });
+
+  test.for(['winner', 'loser'] as const)('after a fork of two accepts, a human acknowledging the %s leaves the other side superseded', async (picked, { world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const cli = human(grimoire.ctx);
+    ok(await p.core.call('settings_set', { key: 'proposals.pending_limit', value: 2 }, cli));
+    const { proposal: first } = ok(await submit(p, patchResult(p)));
+    const again = await manualRun(p);
+    const seeds = { ops: [{ op: 'append', text: '\n## Seeds\n\nPrint the seed on failure so the run can be repeated exactly.\n' }] };
+    const { proposal: second } = ok(await submit(again, patchResult(again, seeds)));
+    await share(world);
+    const onA = ok(await p.core.call('proposal_accept', { id: first }, cli));
+    const onB = ok(await p.core.call('proposal_accept', { id: second }, human(agentContext(world.b))));
+    await exchange(world);
+    const sides = [
+      { id: first!, version: onA.version! },
+      { id: second!, version: onB.version! },
+    ].sort((x, y) => (x.version < y.version ? -1 : 1));
+    const [kept, lost] = picked === 'winner' ? [sides[0]!, sides[1]!] : [sides[1]!, sides[0]!];
+
+    await skillChange(world.a, 'acknowledge', SKILL, kept.version);
+
+    expect(ok(await p.core.call('skill_read', { name: SKILL }, grimoire.ctx)).version).toBe(kept.version);
+    const listed = ok(await p.core.call('proposal_list', {}, cli));
+    expect(Object.fromEntries(listed.proposals.map((row) => [row.id, row.status]))).toEqual({ [kept.id]: 'accepted', [lost.id]: 'superseded' });
   });
 });
