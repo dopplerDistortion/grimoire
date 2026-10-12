@@ -5,6 +5,7 @@ export {
   DEFAULT_BUDGET_MS,
   STALE_REF_LOCK_MS,
   type TrackerStore,
+  type TrackerTips,
   type TrackerOptions,
   type WriteSpec,
   type WriteOutcome,
@@ -52,3 +53,4 @@ export {
   type WikiView,
 } from './wiki';
 export type { NewQuarantineRecord, QuarantineDraft, QuarantineRecord, QuarantineView } from './quarantine';
+export { isKnownOp, opEffect, type OpEffect } from './ops';

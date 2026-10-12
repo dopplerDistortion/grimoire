@@ -23,3 +23,4 @@ export { operationInProgress, upgradeInProgress, upgradeSkipNotice, worktreeKey,
 export { UPKEEP_PARTS, generatedRemoval, pendingSync, pointerRefresh, pruneCopiesPart, skillReconcile } from './parts';
 export { refreshGeneratedOutput, type RefreshOptions } from './refresh';
 export { POINTER_REFRESH_RECORDS, refreshNotice, refreshedPointerFiles, type PointerRefreshRecord } from './refreshed';
+export { WORKTREE_WATCH_MS, watchNewWorktrees, type WorktreeWatcher } from './watch';
