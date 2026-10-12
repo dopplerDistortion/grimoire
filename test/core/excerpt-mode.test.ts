@@ -3,9 +3,11 @@
 // `settings set excerpts <mode>`, which re-shows the disclosure. Tightening
 // strips the text from every open attempt's session records in the same commit;
 // loosening warns that every clone applies it at its next cut. Seam 1.
+import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { CallContext } from '../../src/core';
 import { sessionKey } from '../../src/capture/seen-here';
+import { syncPending } from '../../src/core/sync';
 import { agentContext, commitToTracker, fetchTracker, pushTracker, trackerTip, TRACKER_REF } from './support';
 import { attemptDir, CLAUDE_SESSION, claimed, created, DEBRIEF, claudeCall, sessionRecords, setExcerptMode, test } from './capture-support';
 
@@ -139,6 +141,9 @@ describe('settings set excerpts', () => {
     const synced = await core.call('sync', {}, terminal(grimoire.ctx));
 
     expect(synced).toMatchObject({ ok: true, result: { state: 'pushed' } });
+    // The marker set for the tip before its rewrite settles with the push of the rewritten one.
+    expect(await syncPending(path.join(world.a.dir, '.git'))).toBe(false);
+    expect(await core.call('sync_status', {}, terminal(grimoire.ctx))).toMatchObject({ ok: true, result: { pending_since: null } });
     const remote = (await world.a.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]!;
     // Every commit the remote holds: none carries the record with text.
     for (const commit of (await world.a.git(['rev-list', remote])).split('\n')) {
