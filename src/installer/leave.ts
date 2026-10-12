@@ -156,12 +156,12 @@ function describeProcess(entry: LiveProcess): string {
   return `${entry.client ?? 'grimoire'} ${entry.role} (pid ${entry.pid}${entry.worktree ? `, ${entry.worktree}` : ''})`;
 }
 
-async function refuseLive(store: MachineLocalStore): Promise<void> {
+async function refuseLive(store: MachineLocalStore, after = 'nothing changed'): Promise<void> {
   const live = await liveProcesses(store);
   if (live.length === 0) return;
   throw new GrimoireError(
     'BUSY',
-    `grimoire processes still run in this clone: ${live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run leave again; nothing changed`,
+    `grimoire processes still run in this clone: ${live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run leave again; ${after}`,
     { processes: live.map((entry) => ({ ...entry })) },
   );
 }
@@ -318,20 +318,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     say(`  ${TRACKER_REF} and its reflog, but only once the remote holds its tip`);
     say('It never changes the host repo, its tracker branch, the remote-tracking ref or your user-level client files.');
 
-    // The offers. Each answer is acted on only after the confirmation.
-    let release = false;
-    if (pre.held.length > 0) {
-      say(`Open attempts held from this machine (${pre.held.length}):`);
-      for (const entry of pre.held) say(`  ${entry.id} ${entry.attempt}${entry.title ? `: ${entry.title}` : ''}`);
-      release = yes(await prompter.ask('Release them as abandoned before leaving? [y/N] '));
-    }
-    const releasing = new Set(release ? pre.held.map((entry) => entry.attempt) : []);
-    const uncut = pre.uncut.filter((row) => !releasing.has(row.handle));
-    let cut = false;
-    if (uncut.length > 0 && pre.view) {
-      const mode = storeExcerptMode(pre.view);
-      cut = yes(await prompter.ask(`Cut the ${plural(uncut.length, 'bound context')} still uncut and attach their session records (excerpt mode ${mode})? [Y/n] `), true);
-    }
+    // First what would stop leave, then the offers: each answer is acted on only after the confirmation.
     if (report.stray_edits.length > 0) {
       say(`Stray edits to generated copies (${report.stray_edits.length}); leaving loses them:`);
       for (const edit of report.stray_edits) say(`  ${edit.skill} in ${edit.worktree} (${edit.path})${edit.id ? `: ${edit.id}` : ''}`);
@@ -349,6 +336,19 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
         say('Nothing was removed. Copy out what you want to keep, then run leave again.');
         return { ...report, stopped: 'moved-aside' };
       }
+    }
+    let release = false;
+    if (pre.held.length > 0) {
+      say(`Open attempts held from this machine (${pre.held.length}):`);
+      for (const entry of pre.held) say(`  ${entry.id} ${entry.attempt}${entry.title ? `: ${entry.title}` : ''}`);
+      release = yes(await prompter.ask('Release them as abandoned before leaving? [y/N] '));
+    }
+    const releasing = new Set(release ? pre.held.map((entry) => entry.attempt) : []);
+    const uncut = pre.uncut.filter((row) => !releasing.has(row.handle));
+    let cut = false;
+    if (uncut.length > 0 && pre.view) {
+      const mode = storeExcerptMode(pre.view);
+      cut = yes(await prompter.ask(`Cut the ${plural(uncut.length, 'bound context')} still uncut and attach their session records (excerpt mode ${mode})? [Y/n] `), true);
     }
     let push = false;
     let purge = false;
@@ -392,7 +392,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     await pre.tracker.close();
 
     // A process may have started since the preflight.
-    await refuseLive(store);
+    await refuseLive(store, 'nothing was removed yet (what leave committed to the tracker stays)');
     await removeAll(store, commonDir, root, pre.worktrees, env, outcome, report);
   } finally {
     await pre.tracker.close().catch(() => {});
