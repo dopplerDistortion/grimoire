@@ -4,7 +4,7 @@
 // `<dir>/<name>.mjs`. It answers from `<dir>/<name>.plan.json` and records
 // every call as `<dir>/<name>.calls/<n>.json`:
 //
-//   plan: { auth?, login?, mcp?, answers?: [] }  each entry {stdout, stderr?, code, out?}
+//   plan: { auth?, login?, mcp?, answers?: [] }  each entry {stdout, stderr?, code, out?, sleepMs?}
 //
 // - `claude auth status …`  -> plan.auth
 // - `codex login status`    -> plan.login
@@ -40,6 +40,11 @@ writeFileSync(
 if (!entry) {
   process.stderr.write(`fake ${name}: no planned answer for ${type}\n`);
   process.exit(70);
+}
+// A run that hangs (the kill timeout's test): it sleeps first, its pid recorded for the leak check.
+if (entry.sleepMs) {
+  writeFileSync(path.join(dir, `${name}.pid`), String(process.pid));
+  await new Promise((resolve) => setTimeout(resolve, entry.sleepMs));
 }
 if (entry.out !== undefined) {
   const at = argv.indexOf('-o');

@@ -41,6 +41,8 @@ export interface PlannedCall {
   code?: number;
   /** Codex: what the run writes to its `-o` file. */
   out?: string;
+  /** Sleeps this long before answering (a hung client); its pid goes to `<name>.pid`. */
+  sleepMs?: number;
 }
 
 export interface Plan {

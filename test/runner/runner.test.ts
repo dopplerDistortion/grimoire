@@ -7,7 +7,8 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import { runChores } from '../../src/runner';
+import { MachineLocalStore } from '../../src/machine-local';
+import { readRunnerLogs, runChores } from '../../src/runner';
 import { openTracker } from '../../src/tracker';
 import { coreTest as test } from '../core/support';
 import { dueCompile, enabled, noPatternAnswer } from './scenario';
@@ -219,5 +220,41 @@ describe('the runner: a due compile through codex', () => {
     expect(list.cwd).toBe(run.cwd);
     expect(list.env).toEqual(run.env);
     expect(calls.filter((call) => call.type === 'login').at(-1)!.env).toEqual(run.env);
+  });
+});
+
+describe('the runner log', () => {
+  test('keeps each spawn’s stdout and stderr on this machine, and drops the output of a run whose answer failed the secret scan', async ({ world, grimoire }) => {
+    const d = await dueCompile(grimoire);
+    const token = `ghp_${'a1B2c3D4e5'.repeat(3)}abcdef`;
+    const leaky = {
+      ...noPatternAnswer(d.pairs),
+      pages: [{ op: 'create', slug: 'token-leak', title: 'Token leak', kind: 'failure', summary: 'A token.', body: `Use ${token} to log in.\n` }],
+      consumption: d.pairs.map((pair) => ({ pair, slugs: ['token-leak'] })),
+    };
+    const fake = await enabled('claude', world.a.dir, { auth: authStatus('claude-ai'), answers: [claudeAnswer(leaky), claudeAnswer(noPatternAnswer(d.pairs))] });
+
+    const report = await runChores({ root: world.a.dir, core: d.core, env: fake.env(), now: d.clock.now, due: true });
+
+    expect(report.runs).toEqual([expect.objectContaining({ result: 'compiled', spawns: 2 })]);
+    const logs = await readRunnerLogs(new MachineLocalStore(path.join(world.a.dir, '.git')));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ run: report.runs[0]!.run, runner: 'claude', result: 'compiled', dropped: 'secret-scan' });
+    expect(logs[0]!.spawns.map((spawn) => [spawn.stdout, spawn.stderr])).toEqual([
+      ['', ''],
+      ['', ''],
+    ]);
+    expect(JSON.stringify(logs)).not.toContain(token);
+  });
+
+  test('a clean run keeps the output', async ({ world, grimoire }) => {
+    const d = await dueCompile(grimoire);
+    const fake = await enabled('claude', world.a.dir, { auth: authStatus('claude-ai'), answers: [{ ...claudeAnswer(noPatternAnswer(d.pairs)), stderr: 'a warning\n' }] });
+
+    await runChores({ root: world.a.dir, core: d.core, env: fake.env(), now: d.clock.now, due: true });
+
+    const logs = await readRunnerLogs(new MachineLocalStore(path.join(world.a.dir, '.git')));
+    expect(logs).toEqual([expect.objectContaining({ result: 'compiled', spawns: [expect.objectContaining({ code: 0, stderr: 'a warning\n', failure: null })] })]);
+    expect(logs[0]!.spawns[0]!.stdout).toContain('"structured_output"');
   });
 });
