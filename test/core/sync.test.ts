@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect } from 'vitest';
+import { describe, expect, vi } from 'vitest';
 import { autoSync, createCore, syncNow, syncRequestOf, type CallContext, type Core } from '../../src/core';
 import { actorOf } from '../../src/core/context';
 import { openTracker, type NetworkGit, type SyncOutcome, type TrackerStore } from '../../src/tracker';
@@ -737,5 +737,35 @@ describe('concurrent clones', () => {
     expect(remote.pushes()).toBe(2);
     expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
     expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
+  });
+
+  test('a push that meets the remote’s ref lock as the sync’s time runs out, with no listing after it to tell a race, is recorded as refused and backs off', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    const refusing = busyRemote(Infinity, { answers: [CONTENDED[0]!] });
+    const budgetMs = 60_000;
+    // The push takes the rest of the sync's budget: no time is left for a pause and another listing.
+    const realNow = Date.now.bind(Date);
+    const network: NetworkGit = async (cwd, args, options) => {
+      const run = await refusing.network(cwd, args, options);
+      if (args[0] === 'push') vi.spyOn(Date, 'now').mockImplementation(() => realNow() + budgetMs);
+      return run;
+    };
+
+    try {
+      const refused = await withTracker(world.a, (tracker) =>
+        syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), budgetMs, network, pause: refusing.pause }),
+      );
+      expect(refused).toMatchObject({ state: 'pending', reason: 'failed', failure: { class: 'rejected' } });
+      expect(refused.failure?.lostRace).toBeUndefined();
+      expect(refusing.pushes()).toBe(1);
+      expect(refusing.pauses).toHaveLength(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: { class: 'rejected' }, retry_at: expect.any(String) });
   });
 });

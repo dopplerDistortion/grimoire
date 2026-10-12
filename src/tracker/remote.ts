@@ -176,7 +176,9 @@ export function pushedRef(stdout: string, ref: string): PushedRef | null {
  * another push or left stale (git 2.55 says `reference already exists`, with
  * the lock file's `File exists` in the remote's lines), or the push wasn't a
  * fast-forward of the tip it saw. Null: no race (a D/F ref conflict, a hook's
- * refusal).
+ * refusal). Sync checks either against the remote's next listing: a remote
+ * that says it moved but lists no move reaches other refs on push than on
+ * fetch, and refuses as surely.
  */
 export function lostRace(pushed: PushedRef, stderr: string): 'moved' | 'contended' | null {
   if (pushed.flag !== '!') return null;

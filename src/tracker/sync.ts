@@ -289,14 +289,17 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
   let rejection: { readonly tracker: string | null; readonly failure: SyncFailure } | null = null;
   /** Rejections in a row the remote's next listing showed no move after. */
   let unmoved = 0;
+  /** Some rejection in this sync was a lost race: the remote's next listing showed it moved. */
+  let raced = false;
   for (let round = 1; ; round++) {
     // 1. What the remote holds: its tracker tip, and whether it has a default branch.
     const listing = await net(['ls-remote', remote, 'HEAD', TRACKER_BRANCH]);
     if (listing.code !== 0 || listing.timedOut) return failed('ls-remote', listing);
     const { head, tracker } = parseListing(listing.stdout);
-    // No push raced the last one: a lock let go of, or the remote refusing it (a lock left stale, say).
+    // The last push was rejected: a remote that moved since raced it; one that didn't let go of a lock, or refuses it.
     if (rejection !== null) {
       unmoved = rejection.tracker === tracker ? unmoved + 1 : 0;
+      raced ||= unmoved === 0;
       if (unmoved >= UNMOVED_REJECTIONS) return outcome({ state: 'pending', reason: 'failed', failure: rejection.failure });
     }
     rejection = null;
@@ -397,6 +400,8 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
         continue;
       }
     }
-    return outcome({ state: 'pending', reason: 'failed', failure: race ? { ...rejected, lostRace: true } : rejected });
+    // No listing tells this one: a lost race when the remote said it moved, or a held lock while it was moving, unless it showed no move last time.
+    const lost = race !== null && unmoved === 0 && (race === 'moved' || raced);
+    return outcome({ state: 'pending', reason: 'failed', failure: lost ? { ...rejected, lostRace: true } : rejected });
   }
 }
