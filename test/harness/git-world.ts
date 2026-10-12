@@ -101,43 +101,57 @@ function cloneAt(root: string, name: string, identity: GitIdentity): Clone {
 }
 
 /** Builds a world with real git in `root`: init, clone, commit, push, clone. */
-async function buildWorld(root: string): Promise<void> {
+async function buildWorld(root: string): Promise<GitWorld> {
   const remote = path.join(root, 'remote.git');
   await git(root, ['init', '--quiet', '--bare', '--initial-branch=main', remote]);
   const remoteUrl = pathToFileURL(remote).href;
   const a = await cloneInto(root, remoteUrl, 'a', ALICE);
   await a.git(['commit', '--quiet', '--allow-empty', '-m', 'initial commit']);
   await a.git(['push', '--quiet', '--set-upstream', 'origin', 'main']);
-  await cloneInto(root, remoteUrl, 'b', BOB);
+  const b = await cloneInto(root, remoteUrl, 'b', BOB);
+  return { root, remote, remoteUrl, a, b, cleanup: () => removeDir(root) };
+}
+
+/** What a template world holds beyond a fresh world's state, built once and copied with it. */
+export interface WorldTemplate {
+  /** Names the template: worlds asking for the same name share one. */
+  readonly name: string;
+  /** Brings a fresh world to the template's state (with real git and the code under test). */
+  prepare(world: GitWorld): Promise<void>;
 }
 
 /**
- * The world every test file starts its worlds from: built with real git once
- * per file (each test file has its own module instance), then copied. Process
- * starts are what a test costs on a busy Windows machine; a copy starts none.
+ * The worlds a test file starts its worlds from, by template name: each built
+ * with real git once per file (each test file has its own module instance),
+ * then copied. Process starts are what a test costs on a busy Windows
+ * machine; a copy starts none.
  */
-let template: { root: string; ready: Promise<void> } | undefined;
+const templates = new Map<string, { root: string; ready: Promise<void> }>();
 
-function worldTemplate(): { root: string; ready: Promise<void> } {
-  if (!template) {
+function worldTemplate(template: WorldTemplate | undefined): { root: string; ready: Promise<void> } {
+  const name = template?.name ?? '';
+  let built = templates.get(name);
+  if (!built) {
     const root = path.join(os.tmpdir(), `grimoire-git-template-${process.pid}-${randomUUID().slice(0, 8)}`);
     const ready = mkdir(root).then(async () => {
-      await buildWorld(await realpath(root));
       // Removed when the test file's worker exits: no world copied from it needs it afterwards.
       process.once('exit', () => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+      const world = await buildWorld(await realpath(root));
+      await template?.prepare(world);
     });
-    template = { root, ready };
-    ready.catch(() => (template = undefined));
+    built = { root, ready };
+    templates.set(name, built);
+    ready.catch(() => templates.delete(name));
   }
-  return template;
+  return built;
 }
 
 /**
- * Copies the template world into `root`, pointing both clones' `origin` at the
+ * Copies a template world into `root`, pointing both clones' `origin` at the
  * copy's remote. A clone's config is the only place the world names a path.
  */
-async function copyWorld(root: string): Promise<void> {
-  const from = worldTemplate();
+async function copyWorld(root: string, template: WorldTemplate | undefined): Promise<void> {
+  const from = worldTemplate(template);
   await from.ready;
   const source = await realpath(from.root);
   await cp(source, root, { recursive: true, preserveTimestamps: true });
@@ -159,12 +173,14 @@ async function copyWorld(root: string): Promise<void> {
  *
  * The repos are a copy of one built with git once per test file (so within a
  * file every world's initial commit is the same commit): the same files git
- * would have written, with this world's remote URL.
+ * would have written, with this world's remote URL. `template` names further
+ * state built into that one world once (such as an initialized tracker), so
+ * every copy starts with it.
  */
-export async function createGitWorld(): Promise<GitWorld> {
+export async function createGitWorld(template?: WorldTemplate): Promise<GitWorld> {
   const root = await makeTempDir('grimoire-git-');
   try {
-    await copyWorld(root);
+    await copyWorld(root, template);
     const remote = path.join(root, 'remote.git');
     const remoteUrl = pathToFileURL(remote).href;
     const a = cloneAt(root, 'a', ALICE);

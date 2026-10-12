@@ -13,7 +13,6 @@ import {
   coreTest,
   expectRefUnmoved,
   fetchTracker,
-  initializeTracker,
   pushTracker,
   suffixQueue,
   T0,
@@ -32,7 +31,6 @@ afterAll(() => cleanup());
 
 /** coreTest whose clone `a` has a tracker, whether or not the test uses the in-process core. */
 const cliTest = coreTest.extend('a', async ({ world }, { onCleanup }) => {
-  await initializeTracker(world.a, world.a);
   // No detached sync child of a CLI write outlives its test: the world is removed next.
   onCleanup(() => until(async () => (await machineOf(world.a).processes.live({ role: 'sync' })).length === 0, 'the sync children to exit'));
   return world.a;
