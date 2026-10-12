@@ -9,6 +9,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { fixturePath, makeTempDir, removeDir } from '#harness';
 import { parseSessionRecord, serializeSessionRecord } from '../../src/capture/session-record';
+import { putMachineSetting } from '../../src/core/settings';
 import { runDoctor, type DoctorReport } from '../../src/installer/doctor';
 import { MachineLocalStore } from '../../src/machine-local';
 import { openTracker } from '../../src/tracker';
@@ -179,5 +180,27 @@ describe('doctor --readers', () => {
       { check: 'capture.stats', section: 'capture', status: 'ok' },
       { check: 'capture.readers', section: 'capture', status: 'skipped', why: 'the excerpt mode on this machine is none: grimoire never opens a transcript' },
     ]);
+  });
+
+  test('is skipped when this machine caps the mode at none before the clone has a tracker: no transcript is opened', async ({ world }) => {
+    const claudeDir = await makeTempDir('grimoire-claude-config-');
+    try {
+      const project = path.join(claudeDir, 'projects', path.resolve(world.a.dir).replace(/[^a-zA-Z0-9]/g, '-'));
+      await movedTranscript(`${SUBAGENT_COMMIT}/${SESSION}.jsonl`, path.join(project, `${SESSION}.jsonl`), 'C:\\Users\\user\\AppData\\Local\\Temp\\grimoire-gok156\\proj', world.a.dir);
+      await putMachineSetting(path.join(world.a.dir, '.git'), 'capture.excerpts_max', 'none');
+
+      const report = await runDoctor({ root: world.a.dir, env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: claudeDir }, readers: true });
+
+      const { findings, checks } = capture(report);
+      expect(checks.find((run) => run.check === 'capture.readers')).toEqual({
+        check: 'capture.readers',
+        section: 'capture',
+        status: 'skipped',
+        why: 'the excerpt mode on this machine is none: grimoire never opens a transcript',
+      });
+      expect(findings.filter((finding) => finding.kind === 'reader-stats')).toEqual([]);
+    } finally {
+      await removeDir(claudeDir);
+    }
   });
 });

@@ -14,6 +14,7 @@ import { defaultCodexHome } from '../capture/codex/roots';
 import { readerStats, type ReaderStats } from '../capture/reader-stats';
 import { parseSessionRecord } from '../capture/session-record';
 import { revealedRoots } from '../capture/transcript-roots';
+import type { CaptureMode } from '../capture/end';
 import { captureMode } from '../core/capture';
 import type { Json } from '../machine-local';
 import { CAPTURE_STATS, LATE_CUT_DROPS, type LateCutDrops, type TrackerView } from '../tracker';
@@ -119,16 +120,25 @@ function readerLine(stats: ReaderStats): string {
   );
 }
 
+/** A clone with no tracker yet: no store setting, so the store's excerpt mode is its default. */
+const NO_TRACKER: Pick<TrackerView, 'settings'> = { settings: () => new Map() };
+
 /** `--readers`: opt-in, and the only check that opens transcripts. */
 export const READERS_CHECK: DoctorCheck = {
   name: 'capture.readers',
   section: 'capture',
   async run(input: DoctorInput): Promise<CheckOutcome> {
-    const tips = await input.tips();
-    if (tips.local !== null || tips.remotes.size > 0) {
-      const { mode } = await captureMode(await input.view(), input.dirs.commonDir);
-      if (mode === 'none') return { skipped: 'the excerpt mode on this machine is none: grimoire never opens a transcript' };
+    // The mode is always worked out: with no tracker yet, the store's is its default, still lowered by this
+    // machine's cap. A view that can't be read skips the check rather than open a transcript in a mode not known.
+    let mode: CaptureMode;
+    try {
+      const tips = await input.tips();
+      const view = tips.local !== null || tips.remotes.size > 0 ? await input.view() : NO_TRACKER;
+      ({ mode } = await captureMode(view, input.dirs.commonDir));
+    } catch (error) {
+      return { skipped: `the excerpt mode can’t be read, so no transcript is opened: ${messageOf(error)}` };
     }
+    if (mode === 'none') return { skipped: 'the excerpt mode on this machine is none: grimoire never opens a transcript' };
     const { worktrees } = await registeredWorktrees(input.dirs.commonDir);
     const homes = await transcriptHomes(input);
     const stats = await readerStats({ worktrees: worktrees.length > 0 ? worktrees : [input.root], claudeConfigDirs: homes.claude, codexHomes: homes.codex });
