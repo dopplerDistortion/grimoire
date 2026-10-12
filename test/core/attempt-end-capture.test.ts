@@ -1312,3 +1312,35 @@ describe('an ending with nothing to capture', () => {
     }
   });
 });
+
+describe('a person’s ending', () => {
+  test('a close or a release from an unmarked CLI, with or without a terminal, and no agent evidence waits for no flush and reads no binding trailers', async ({ world, grimoire, capture }) => {
+    // The flush wait would hold each ending this long, inside the 10 s budget.
+    const flushWaitMs = 6_000;
+    const core = capture.makeCore({ capture: { flushWaitMs } });
+    const shell: CallContext = { ...grimoire.ctx, surface: 'cli', client: null, evidence: {}, tty: false, nonce: 'nonce-shell' };
+    const endings: [string, CallContext, 'close' | 'release'][] = [
+      ['a close at a terminal', person(grimoire.ctx), 'close'],
+      ['a release at a terminal', person(grimoire.ctx), 'release'],
+      ['a close from a bare shell', shell, 'close'],
+      ['a release from a bare shell', shell, 'release'],
+    ];
+    for (const [ending, ctx, op] of endings) {
+      const id = await created(core, ctx, ending);
+      const claim = await core.call('claim', { id }, ctx);
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const { attempt } = claim.result;
+      capture.at('2026-10-11T03:27:30.000Z');
+      const reads = trailerReads();
+
+      const started = Date.now();
+      const ended = op === 'close' ? await core.call('close', { id, reason: 'done', attempt }, ctx) : await core.call('release', { id, attempt }, ctx);
+      const took = Date.now() - started;
+
+      expect(ended, ending).toMatchObject({ ok: true });
+      expect(took, ending).toBeLessThan(flushWaitMs);
+      expect(trailerReads(), ending).toBe(reads);
+      expect(await sessionRecords(world.a, id, attempt), ending).toEqual([]);
+    }
+  });
+});
