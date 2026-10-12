@@ -189,6 +189,18 @@ export async function fakeEditor(steps: { write?: string; replace?: [string, str
   };
 }
 
+/**
+ * Where a JSON object starts on a screen line: at its start, or right after an
+ * echoed answer. A Windows console writes stdout and stderr asynchronously, so
+ * on a loaded machine the object can land before the newline that ends the
+ * answer the prompt (on stderr) echoed. A key line of a pretty-printed object
+ * (`"details": {`) never starts one.
+ */
+function objectStart(line: string): number {
+  const at = line.indexOf('{');
+  return at === 0 || (at > 0 && !line.slice(0, at).includes('"')) ? at : -1;
+}
+
 /** The last JSON object a terminal screen shows (the CLI's stdout, among prompts and echoes). */
 export function lastJsonOnScreen(screen: string): Record<string, unknown> {
   const lines = screen.split('\n').map((line) => line.trim());
@@ -196,9 +208,10 @@ export function lastJsonOnScreen(screen: string): Record<string, unknown> {
   // Top to bottom, skipping past each object found, so a nested object of a
   // pretty-printed one is never taken for the whole.
   for (let i = 0; i < lines.length; i++) {
-    if (!lines[i]!.startsWith('{')) continue;
+    const start = objectStart(lines[i]!);
+    if (start < 0) continue;
     for (let j = i; j < lines.length; j++) {
-      const parsed = parsedObject(lines.slice(i, j + 1).join('\n'));
+      const parsed = parsedObject([lines[i]!.slice(start), ...lines.slice(i + 1, j + 1)].join('\n'));
       if (parsed) {
         last = parsed;
         i = j;

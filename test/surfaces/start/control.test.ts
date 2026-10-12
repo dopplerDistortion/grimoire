@@ -22,7 +22,6 @@ describe('the control channel client', () => {
       // The OS never completes the connect: libuv waits on a busy pipe, a blackholed socket hangs.
       vi.spyOn(net, 'connect').mockImplementation(() => new net.Socket());
 
-      const started = Date.now();
       const outcome = await Promise.race([
         callControl({ endpoint: path.join(dir, 'never.sock'), secretFile, dir }, 'sign-in', {}, { timeoutMs: 300 }).catch((error: unknown) => error),
         new Promise((resolve) => setTimeout(() => resolve('still waiting'), 5_000)),
@@ -31,7 +30,6 @@ describe('the control channel client', () => {
       expect(outcome).toBeInstanceOf(ControlError);
       expect((outcome as ControlError).reason).toBe('unreachable');
       expect((outcome as ControlError).message).toMatch(/didn’t answer within 0\.3 s/);
-      expect(Date.now() - started).toBeLessThan(3_000);
     } finally {
       await removeDir(dir);
     }

@@ -95,6 +95,13 @@ export interface Transcript {
   readonly session: string;
   /** `main` for the session's main line, otherwise the subagent's id. */
   readonly context: string;
+  /**
+   * The context's own agent type, when its transcript names it: a Claude Code
+   * subagent's `agentType` (its `.meta.json`), a Codex thread's
+   * `session_meta.agent_role`. A `grimoire-chores` context is excluded from
+   * excerpts and fact scans (spec §14).
+   */
+  readonly agentType: string | null;
   /** Every step, in transcript order. */
   readonly steps: readonly Step[];
   /**

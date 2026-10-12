@@ -33,7 +33,7 @@ const liveTest = coreTest.extend('served', async ({ world, grimoire: _ }, { onCl
 });
 
 describe('start: live events', () => {
-  // How soon it arrives is timed alone, in live-latency.test.ts.
+  // How soon it arrives is timed alone, in live-latency.slow.test.ts.
   liveTest('a tracker write by another process produces a change event naming its issue', async ({ world, grimoire, served }) => {
     const { port, cookie } = served;
     const events = await SseClient.connect(port, cookie);

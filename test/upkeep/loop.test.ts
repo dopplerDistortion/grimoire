@@ -31,20 +31,17 @@ function gatedPart(): { part: UpkeepPart; started: Promise<void>; release: () =>
 describe('the upkeep loop', () => {
   coreTest('a tool call issued while a part works is answered without waiting for it', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
-    // Warm the core, so the timing compares a call with a call.
     expect((await core.call('list', {}, ctx)).ok).toBe(true);
     const gated = gatedPart();
     const loop = startUpkeep({ root: world.a.dir, parts: [gated.part] });
     try {
       await gated.started;
 
-      const started = Date.now();
+      // No clock: the part can't finish until it is let go below, so a call that waited for it would never return.
       const created = await core.call('create', { title: 'made during upkeep' }, ctx);
-      const took = Date.now() - started;
 
       expect(created.ok).toBe(true);
       expect(gated.finished()).toBe(false);
-      expect(took).toBeLessThan(3_000);
     } finally {
       gated.release();
       await loop.stop();

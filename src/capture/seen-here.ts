@@ -46,7 +46,7 @@ export interface SeenHereRow {
 }
 
 /** The client a session key counts: the MCP client and the shell of one agent client are one. */
-function clientFamily(client: string): string {
+export function clientFamily(client: string): string {
   if (client.startsWith('codex')) return 'codex';
   if (client.startsWith('claude-code')) return 'claude-code';
   return client;

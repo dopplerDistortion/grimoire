@@ -19,16 +19,24 @@ Package: `@goksening/grimoire` (bin `grimoire`). It is not released yet.
 
 ```sh
 npm ci              # install the dev toolchain (grimoire has no runtime dependencies)
-npm run check       # the full local check, the CI equivalent (below)
-npm test            # Vitest only
+npm run check       # the local check, the CI equivalent (below)
+npm run check:full  # check, then the slow tests
+npm test            # Vitest only, every project (main, then slow)
+npm run test:slow   # the slow tests only, one file at a time
 npm run typecheck   # tsc, for the Node side and the dashboard
 npm run build       # dist/grimoire.mjs, dist/launch.mjs + dist/chunks/ (esbuild) and dist/dashboard/ (Vite)
 ```
 
 `npm run check` runs four steps in order and prints a summary: `typecheck`,
-`test`, `build` (both builds) and `check:deps` (zero runtime dependencies). It
-runs every step even after a failure, and exits non-zero if any step failed. Run
-it before every commit.
+`test:main` (every test but the slow ones, files in parallel), `build` (both
+builds) and `check:deps` (zero runtime dependencies). It runs every step even
+after a failure, and exits non-zero if any step failed. Run it before every
+commit. `npm run check:full` adds `test:slow` last: the tests that assert a
+wall-clock budget or latency, stall or kill real processes, or run many
+concurrent writers. They live in `*.slow.test.ts` files (plus the 40-writer and
+MCP cold-start acceptance tests) and run serially, with the machine to
+themselves. A test that leaves a process it started running fails, and the
+process tree is killed (`test/harness/children.ts`).
 
 **No runtime dependencies.** The package manifest has no `dependencies` field,
 and `check:deps` fails if one appears, or if `optionalDependencies`,

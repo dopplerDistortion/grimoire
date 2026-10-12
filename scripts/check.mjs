@@ -1,13 +1,15 @@
-// The local check, the CI equivalent: typecheck, Vitest, both builds, and the
-// zero-runtime-dependencies check. Runs every step (each one is the npm script
-// of the same name), prints a summary, and exits 1 if any step failed.
+// The local check, the CI equivalent: typecheck, the main Vitest project, both
+// builds, and the zero-runtime-dependencies check. Runs every step (each one is
+// the npm script of the same name), prints a summary, and exits 1 if any step
+// failed. `--full` adds the slow tests (the serial `slow` project: clocks,
+// stalled and killed processes, many writers) last.
 //
-//   npm run check
+//   npm run check        (check:full: npm run check:full)
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const STEPS = ['typecheck', 'test', 'build', 'check:deps'];
+const STEPS = ['typecheck', 'test:main', 'build', 'check:deps', ...(process.argv.includes('--full') ? ['test:slow'] : [])];
 
 /** @param {string} script */
 function runScript(script) {

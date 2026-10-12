@@ -6,10 +6,14 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
   version: string;
 };
 
-// Timing acceptance tests: each runs after every other file, with the machine to itself.
-const ACCEPTANCE = ['test/core/concurrency.test.ts'];
-const COLD_START = ['test/surfaces/mcp/cold-start.test.ts'];
-const LIVE_LATENCY = ['test/surfaces/start/live-latency.test.ts'];
+// The slow tests: whatever asserts a wall-clock budget or latency, stalls or
+// kills real processes, or runs many concurrent writers. They run in the
+// `slow` project, one file at a time with the machine to themselves
+// (`npm run test:slow`; `npm run check:full` = check + test:slow), never
+// beside the main suite's parallel files. Name a new one `*.slow.test.ts`.
+// The 40-writer acceptance test measures the ~10 s write budget; the MCP
+// cold-start test measures the 300 ms opening budget.
+const SLOW = ['src/**/*.slow.test.ts', 'test/**/*.slow.test.ts', 'test/core/concurrency.test.ts', 'test/surfaces/mcp/cold-start.test.ts'];
 
 export default defineConfig({
   define: {
@@ -22,7 +26,8 @@ export default defineConfig({
     },
   },
   test: {
-    // Isolates every test process from the user's and the system's git config.
+    // Isolates every test process from the user's and the system's git config, and fails a test
+    // (or a file's beforeAll) that leaves a process it started running (test/harness/children.ts).
     setupFiles: ['./test/harness/setup.ts'],
     // vi.stubEnv() changes are undone after every test.
     unstubEnvs: true,
@@ -35,16 +40,11 @@ export default defineConfig({
         test: {
           name: 'main',
           include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
-          exclude: [...ACCEPTANCE, ...COLD_START, ...LIVE_LATENCY, 'node_modules/**'],
+          exclude: [...SLOW, 'node_modules/**'],
         },
       },
-      // The write-path acceptance test measures the ~10 s budget under 40 writers,
-      // so it runs after every other file, with the machine to itself.
-      { extends: true, test: { name: 'acceptance', include: ACCEPTANCE, sequence: { groupOrder: 1 } } },
-      // The MCP cold-start test measures the 300 ms opening budget: last, alone.
-      { extends: true, test: { name: 'cold-start', include: COLD_START, sequence: { groupOrder: 2 } } },
-      // The dashboard's live-event test measures the ~2 s from a write to its SSE event: last, alone.
-      { extends: true, test: { name: 'live-latency', include: LIVE_LATENCY, sequence: { groupOrder: 3 } } },
+      // After the main suite when both run (`npm test`), and serially.
+      { extends: true, test: { name: 'slow', include: SLOW, fileParallelism: false, sequence: { groupOrder: 1 } } },
     ],
   },
 });

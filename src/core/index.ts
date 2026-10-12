@@ -27,6 +27,7 @@ import { autoSync as runAutoSync, markSyncPending, sync, syncRequestOf, syncStat
 import { INSTALL_FORMAT_RANGE } from './host';
 import { findGitDirs } from '../machine-local/git-dirs';
 import { VERSION } from '../version';
+import type { CaptureOptions } from '../capture/end';
 
 export type {
   CallContext,
@@ -57,6 +58,8 @@ export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSk
 export { AUTO_SYNC_SETTING, autoSync, markSyncPending, syncNow, syncRequestOf } from './sync';
 export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
 export type { ErrorBody, ErrorCode } from '../errors';
+export { traceCapture, captureMode, type TraceCapture, type CaptureEntry } from './capture';
+export type { CaptureOptions } from '../capture/end';
 
 export type Outcome<R> = { ok: true; result: R } | { ok: false; error: ErrorBody };
 
@@ -92,6 +95,13 @@ export interface CoreOptions {
    * - `off`: neither marks nor syncs (tests, tools that must stay offline).
    */
   readonly autoSync?: 'in-process' | 'off' | ((request: AutoSyncRequest) => void | Promise<void>);
+  /**
+   * Where attempt-end capture finds transcripts and how long it may take
+   * (spec §14): the Claude Code and Codex folders, the home folder rewritten
+   * to `~`, the 10 s cut budget and the 2 s flush wait. Defaults: the clients'
+   * own folders and the spec's budgets.
+   */
+  readonly capture?: CaptureOptions;
 }
 
 export interface Core {
@@ -320,6 +330,7 @@ export function createCore(options: CoreOptions = {}): Core {
           actor,
           scanner,
           requestSync,
+          ...(options.capture ? { capture: options.capture } : {}),
         });
         if (bindings.length > 0) await leaveSeenHereRows(opened, ctx, actor, bindings);
         const syncTip = syncTips.at(-1);
