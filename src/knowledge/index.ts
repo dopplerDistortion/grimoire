@@ -22,6 +22,8 @@ export {
   type LedgerRecord,
 } from './ledger';
 export { deriveSkills, type ContestedDecision, type SkillState, type SkillStatus } from './derive';
+export { proposalSignals, proposalStates, targetedPatterns, viewProposalStates, type ProposalState, type ProposalStatus } from './proposals';
+export { changeLines, diffLines, linesOf, normalizedLines, similarity, type LineDiff } from './line-diff';
 export {
   readSkills,
   writeSkillChange,

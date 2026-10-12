@@ -244,6 +244,18 @@ _Avoid_: Local edit, drift, observed change
 One suggested change to exactly one evolved skill, creating it or patching it, drafted by the Skill Proposer together with its evidence; it never changes once written, and it changes nothing until a human accepts it.
 _Avoid_: Suggestion, candidate, change request, PR
 
+**Pending slot**:
+The bound on skill proposals waiting for a human decision, one per host repo by default and judged on the merged view, so every worktree and clone shares it; while it is full the Skill Proposer isn't due and a proposal submit is refused.
+_Avoid_: Queue, inbox, backlog
+
+**Mechanical checks**:
+The fail-closed rules grimoire's own code applies to a skill proposal before any human sees it (shape, names, base, size, the evidence minimum, repeats, copying, hygiene and the secret scan); a failure is a reason code, never a judgment of the advice.
+_Avoid_: Validation, review, linting
+
+**Risk flag**:
+A fact grimoire computes about a skill proposal and shows its reviewer, such as where each command it adds comes from (its token origin), dangerous patterns or a near-rewrite; it never rejects a proposal by itself.
+_Avoid_: Warning, score, lint
+
 **Skill version**:
 One exact text of an evolved skill, identified by that text alone, so the same words are always the same version.
 _Avoid_: Revision, snapshot, release

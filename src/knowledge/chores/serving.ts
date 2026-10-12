@@ -12,6 +12,9 @@
 //   set aside on a conflicted page;
 // - `decisions`: one line per skill decision since the last compile (Wiki Maintainer);
 // - `skill:<name>`: an evolved skill's served text;
+// - `ledger`: the ledger digest (Skill Proposer): rejected and undone changes
+//   in full (the text of a `suspicious` rejection withheld), one line for
+//   every other ledger record and proposal, and each skill's scorecard;
 // - `handwritten`: the hand-written skills and instruction files by name, and
 //   `handwritten:<path>` for one's text, on request.
 //
@@ -30,6 +33,9 @@ import { parseComment } from '../../tracker/comment';
 import { parseIssue } from '../../tracker/record';
 import { readSkills } from '../book';
 import { parseLedgerRecord } from '../ledger';
+import { diffLines } from '../line-diff';
+import { proposalStates, targetedPatterns } from '../proposals';
+import { deriveScorecards, type TraceFacts } from '../scorecards';
 import type { ChorePair } from './due';
 import { activeQuarantine, flaggedPages, type ActiveQuarantine } from './quarantine';
 import { itemHash, type OpenRun } from './runs';
@@ -57,6 +63,8 @@ export interface ServingContext {
   readonly scanner: SecretScanner;
   /** Every settled pair of the tracker now, by trace (its outcome and flip context). */
   readonly pairs: ReadonlyMap<string, ChorePair>;
+  /** What scorecards need of every sealed trace (the ledger digest); none when absent. */
+  readonly traceFacts?: () => Promise<readonly TraceFacts[]>;
 }
 
 /** The instruction files read as hand-written instructions. */
@@ -65,7 +73,7 @@ const INSTRUCTION_FILES = ['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md', '.cla
 const SKILL_FOLDERS = ['.agents/skills', '.claude/skills', '.codex/skills'];
 
 /** The hand-written skills and instruction files in `root`, as `handwritten:<path>` ids. */
-async function handwritten(root: string): Promise<{ skills: string[]; instructions: string[] }> {
+export async function handwritten(root: string): Promise<{ skills: string[]; instructions: string[] }> {
   const instructions: string[] = [];
   for (const file of INSTRUCTION_FILES) {
     if (await readFile(path.join(root, file)).then(() => true, () => false)) instructions.push(`handwritten:${file}`);
@@ -173,7 +181,7 @@ export class Serving {
       ids.push(`page:${slug}`, ...(await this.sc.view.wiki.conflicts(slug)).map((side) => `side:${slug}/${side.id}`));
     }
     if (run.kind === 'wiki-maintainer') ids.push('decisions');
-    else ids.push(...(await readSkills(this.sc.view, this.sc.scanner)).served.map((skill) => `skill:${skill.name}`));
+    else ids.push(...(await readSkills(this.sc.view, this.sc.scanner)).served.map((skill) => `skill:${skill.name}`), 'ledger');
     ids.push('handwritten');
     return ids;
   }
@@ -217,6 +225,8 @@ export class Serving {
         return this.side(id, rest);
       case 'decisions':
         return colon < 0 && this.sc.run.kind === 'wiki-maintainer' ? this.decisions() : null;
+      case 'ledger':
+        return colon < 0 && this.sc.run.kind === 'skill-proposer' ? this.ledgerDigest() : null;
       case 'skill': {
         const skill = (await readSkills(view, this.sc.scanner)).served.find((s) => s.name === rest);
         return skill ? { item: id, kind: 'evolved-skill', name: skill.name, version: skill.version, description: skill.description, text: skill.text } : null;
@@ -332,6 +342,63 @@ export class Serving {
       .sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : x.id < y.id ? -1 : 1));
     const lines = entries.map((entry) => `- ${entry.at}: ${entry.kind} ${entry.skill}${entry.reason ? ` (${entry.reason})` : ''}`);
     return { item: 'decisions', kind: 'decisions', since, count: lines.length, text: lines.join('\n') };
+  }
+
+  /**
+   * The ledger digest (spec §16 Serving): for every skill the ledger names,
+   * its scorecard and attention flags; each rejected proposal's change in
+   * full, except a `suspicious` rejection's, whose text is withheld; each
+   * change a restore undid in full; and one line for every other ledger
+   * record and proposal.
+   */
+  private async ledgerDigest(): Promise<ServedItem> {
+    const { view, scanner } = this.sc;
+    const book = await readSkills(view, scanner);
+    const states = proposalStates(await view.proposals.records(), book.skills);
+    const facts = (await this.sc.traceFacts?.()) ?? [];
+    const textOf = async (version: string | null) => (version === null ? '' : ((await book.text(version)) ?? ''));
+    const change = async (before: string, after: string) => {
+      const diff = diffLines(before, after);
+      return [...diff.removed.map((line) => `- ${line}`), ...diff.added.map((line) => `+ ${line}`)].join('\n');
+    };
+    const sections: string[] = [];
+    let rejected = 0;
+    let undone = 0;
+    for (const state of book.skills.values()) {
+      const lines = [`## ${state.name}: ${state.status}${state.version ? `, current ${state.version.slice(0, 12)}` : ''}`];
+      const patterns = await targetedPatterns(view, state.records);
+      const card = deriveScorecards(state.name, state.records, facts, { patternOf: (v) => patterns.get(v) ?? null }).find((c) => c.version === state.version);
+      if (card) {
+        lines.push(
+          `scorecard of ${card.version.slice(0, 12)}: read ${card.read}, offered ${card.offered}, pass ${card.pass}, fail ${card.fail}, none ${card.none}, n ${card.n}${card.small_sample ? ' (small sample)' : ''}${card.attention.length > 0 ? `; attention: ${card.attention.join(', ')}` : ''}`,
+        );
+      }
+      for (const proposal of states.filter((s) => s.record.skill === state.name && s.status === 'rejected')) {
+        rejected++;
+        const reason = proposal.decision?.reason ?? '';
+        if (reason === 'suspicious') {
+          lines.push(`### rejected proposal ${proposal.record.id} (suspicious): text withheld`);
+          continue;
+        }
+        lines.push(`### rejected proposal ${proposal.record.id} (${reason}): ${proposal.record.action} of ${proposal.record.skill}`);
+        lines.push(await change(await textOf(proposal.record.base), proposal.record.text));
+      }
+      for (const restore of state.records.filter((record) => record.kind === 'restore' && record.from !== null)) {
+        const maker = state.records.find((record) => record.to === restore.from && record.kind !== 'restore');
+        if (!maker) continue;
+        undone++;
+        lines.push(`### undone change ${(maker.from ?? 'none').slice(0, 12)} -> ${maker.to!.slice(0, 12)} (restored ${restore.at})`);
+        lines.push(await change(await textOf(maker.from), await textOf(maker.to)));
+      }
+      for (const record of state.records) {
+        if (record.kind === 'reject' && record.proposal !== undefined) continue;
+        lines.push(`- ${record.at}: ${record.kind} ${record.skill}${record.reason ? ` (${record.reason})` : ''}`);
+      }
+      sections.push(lines.join('\n'));
+    }
+    const others = states.filter((s) => s.status !== 'rejected').map((s) => `- ${s.record.at}: proposal ${s.record.id}, ${s.record.action} of ${s.record.skill}: ${s.status}`);
+    if (others.length > 0) sections.push(['## proposals', ...others].join('\n'));
+    return { item: 'ledger', kind: 'ledger-digest', skills: book.skills.size, rejected, undone, text: sections.join('\n\n') };
   }
 
   private async tracePart(id: string, prefix: string, rest: string): Promise<ServedItem | null> {

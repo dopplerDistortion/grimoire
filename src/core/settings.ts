@@ -167,6 +167,12 @@ const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(
     fallback: () => 2,
     ...wholeNumber(1, 100),
   },
+  'proposals.pending_limit': {
+    scope: 'store',
+    description: 'the most skill proposals that may wait for human review at once, judged on the merged view',
+    fallback: () => 1,
+    ...wholeNumber(1, 16),
+  },
   'chores.propose_fails': {
     scope: 'store',
     description: 'how many fails among the compiles no Skill Proposer run consumed yet make the Skill Proposer due',

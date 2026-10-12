@@ -11,6 +11,7 @@ import {
   skillVersionOf,
   SkillTextError,
   STUB_PREFIX,
+  targetedPatterns,
   writeSkillChange,
   type LedgerEntry,
   type ServedSkill,
@@ -23,7 +24,7 @@ import { checkHygiene, type SecretScanner } from '../scanner';
 import type { DeliveryState, OfferedSkill, TrackerView } from '../tracker';
 import { ledgerFile } from '../tracker/layout';
 import { offeredSkills } from '../generated/offered';
-import { deriveScorecards, type AttentionFlag, type Scorecard, type TraceFacts } from '../knowledge/scorecards';
+import { deriveScorecards, type AttentionFlag, type Scorecard, type TargetedPattern, type TraceFacts } from '../knowledge/scorecards';
 import { traceCapture } from './capture';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import { define, oneLine, writer, type OpEnv } from './op';
@@ -317,7 +318,7 @@ export const skillShow = define({
         provenance: state.current
           ? { ...shownChange(state.current), origin: origin(state.current), actor: { ...state.current.actor }, commit: commits.get(state.current.id) ?? null }
           : null,
-        scorecards: deriveScorecards(state.name, state.records, traces),
+        scorecards: deriveScorecards(state.name, state.records, traces, { patternOf: patternOf(await targetedPatterns(view, state.records)) }),
         attention: [],
       };
       shown.attention = [...(shown.scorecards.find((card) => card.version === state.version)?.attention ?? [])];
@@ -478,7 +479,13 @@ export const skillEdit = define({
 });
 
 /** What scorecards need of every sealed trace in `view` (spec §18): its start and end facts, outcome, and captured reads. */
-async function traceFacts(view: TrackerView): Promise<TraceFacts[]> {
+/** A scorecard option from the targeted patterns of a skill's versions. */
+export function patternOf(patterns: ReadonlyMap<string, TargetedPattern>): (version: string) => TargetedPattern | null {
+  return (version) => patterns.get(version) ?? null;
+}
+
+/** What scorecards need of every sealed trace in `view`. */
+export async function traceFacts(view: TrackerView): Promise<TraceFacts[]> {
   const traces: TraceFacts[] = [];
   for (const attempt of view.allAttempts()) {
     if (attempt.end === null) continue;

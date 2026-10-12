@@ -65,6 +65,7 @@ import { parseSetting, serializeSettings, settingLine, settingLines, type StoreS
 import { WikiDraftState, WikiReader, type WikiDraft, type WikiView } from './wiki';
 import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type QuarantineView } from './quarantine';
 import { ChoreRunDraftState, ChoreRunReader, type ChoreRunDraft, type ChoreRunView } from './chore-runs';
+import { ProposalDraftState, ProposalReader, type ProposalDraft, type ProposalView } from './proposals';
 
 /** What every read sees: the tracker at one tip. */
 export interface TrackerView {
@@ -131,6 +132,8 @@ export interface TrackerView {
   readonly quarantine: QuarantineView;
   /** The records of the chore runs that ended (spec §16), read on first use. */
   readonly choreRuns: ChoreRunView;
+  /** The skill proposal records (spec §18), read on first use. */
+  readonly proposals: ProposalView;
 }
 
 /** A sha256 in hex: how ledger records and skill versions are named. */
@@ -219,6 +222,8 @@ export interface TrackerDraft extends TrackerView {
   readonly quarantine: QuarantineDraft;
   /** Chore-run records as this round adds them. */
   readonly choreRuns: ChoreRunDraft;
+  /** Skill proposals as this round adds them. */
+  readonly proposals: ProposalDraft;
 }
 
 function byOrder(a: IssueRecord, b: IssueRecord): number {
@@ -299,6 +304,7 @@ export class Snapshot implements TrackerView {
   readonly wiki: WikiReader;
   readonly quarantine: QuarantineReader;
   readonly choreRuns: ChoreRunReader;
+  readonly proposals: ProposalReader;
 
   constructor(parts: SnapshotParts) {
     this.tip = parts.tip;
@@ -323,6 +329,7 @@ export class Snapshot implements TrackerView {
     this.wiki = new WikiReader(parts.source, parts.rootTree);
     this.quarantine = new QuarantineReader(() => this.ledgerFiles());
     this.choreRuns = new ChoreRunReader(parts.source, parts.rootTree);
+    this.proposals = new ProposalReader(parts.source, parts.rootTree);
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -474,6 +481,7 @@ export class Draft implements TrackerDraft {
   readonly wiki: WikiDraftState;
   readonly quarantine: QuarantineDraftState;
   readonly choreRuns: ChoreRunDraftState;
+  readonly proposals: ProposalDraftState;
 
   constructor(
     private readonly base: Snapshot,
@@ -486,6 +494,7 @@ export class Draft implements TrackerDraft {
     private readonly randomHandle: () => string = randomAttemptHandle,
   ) {
     this.choreRuns = new ChoreRunDraftState(base.choreRuns);
+    this.proposals = new ProposalDraftState(base.proposals);
     this.wiki = new WikiDraftState(base.wiki, now, () => this.choreRuns.records());
     this.quarantine = new QuarantineDraftState(base.quarantine, now);
   }
@@ -830,6 +839,7 @@ export class Draft implements TrackerDraft {
     for (const [file, edit] of this.wiki.fileEdits()) edits.set(file, edit);
     for (const [file, edit] of this.quarantine.fileEdits()) edits.set(file, edit);
     for (const [file, edit] of this.choreRuns.fileEdits()) edits.set(file, edit);
+    for (const [file, edit] of this.proposals.fileEdits()) edits.set(file, edit);
     return edits;
   }
 }
