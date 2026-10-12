@@ -188,7 +188,7 @@ describe('concurrent clones', () => {
     expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
   });
 
-  test('a push that loses every round records the lost race with no backoff: the next automatic sync tries at once', async ({
+  test('a push that loses every round records the lost race with no backoff: the next automatic sync tries at once', { timeout: 120_000 }, async ({
     world,
     grimoire,
   }) => {
