@@ -695,4 +695,31 @@ describe('concurrent clones', () => {
     await expectFoldedPush(world, grimoire, fromBob);
     expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
   });
+
+  test('a push that loses the race round after round to a busy clone keeps fetching, folding and pushing until it lands', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    // Another clone pushes during each of Alice's first four pushes: four lost races in a row.
+    const counter = path.join(world.root, 'raced').replaceAll('\\', '/');
+    const hook = [
+      '#!/bin/sh',
+      'unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES',
+      'export GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=bob@example.com GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=bob@example.com',
+      `n=$(cat "${counter}" 2>/dev/null || echo 0)`,
+      `[ "$n" -ge 4 ] && exit 0`,
+      `echo $((n + 1)) > "${counter}"`,
+      'tip=$(git rev-parse refs/heads/grimoire/tracker)',
+      'git update-ref refs/heads/grimoire/tracker "$(git commit-tree "$tip^{tree}" -p "$tip" -m busy)"',
+      '',
+    ].join('\n');
+    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), hook, { mode: 0o755 });
+
+    const synced = await ok(grimoire.core.call('sync', {}, grimoire.ctx));
+    expect(synced).toMatchObject({ state: 'pushed' });
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
+  });
 });
