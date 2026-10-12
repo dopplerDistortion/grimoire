@@ -110,4 +110,31 @@ describe('status', () => {
       await removeDir(home);
     }
   });
+
+  test('after an upgrade, a changed hook-group hash or a moved position, each with the `/hooks` step', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    const home = await makeTempDir('grimoire-codex-home-');
+    try {
+      const env = { ...process.env, CODEX_HOME: home };
+      const facts = STATUS_FACTS.filter((fact) => fact.key === 'codex_hook');
+      const declaring = path.join(await realpath(root), '.codex', 'config.toml');
+      // Approved before the upgrade, for the definition the old release had.
+      await writeFile(path.join(home, 'config.toml'), `[hooks.state.'${declaring}:session_start:0:0']\ntrusted_hash = "sha256:the-old-release-hook"\n`);
+      const modified = await readStatus({ root, env, facts });
+      // Approved as it is now, then a group lands before grimoire's: its position moves to 1.
+      await writeFile(path.join(home, 'config.toml'), `[hooks.state.'${declaring}:session_start:0:0']\ntrusted_hash = "${codexHookHash()}"\n`);
+      const toml = path.join(root, '.codex', 'config.toml');
+      const { readFile } = await import('node:fs/promises');
+      await writeFile(toml, `[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "echo mine"\n\n${await readFile(toml, 'utf8')}`);
+      const moved = await readStatus({ root, env, facts });
+
+      expect(modified.report.codex_hook).toMatchObject({ trust: 'modified', position: 0, declared_hash: codexHookHash() });
+      expect(modified.lines).toEqual([expect.any(String), expect.stringMatching(/definition changed since it was approved; approve it again in `\/hooks`/)]);
+      expect(moved.report.codex_hook).toMatchObject({ trust: 'needs-approval', position: 1, key: `${declaring}:session_start:1:0` });
+      expect(moved.lines[1]).toMatch(/until you approve it in `\/hooks`/);
+    } finally {
+      await removeDir(home);
+    }
+  });
 });
