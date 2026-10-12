@@ -6,12 +6,13 @@
 import { describe, expect } from 'vitest';
 import type { CallContext } from '../../src/core';
 import { openTracker } from '../../src/tracker';
-import { parseLedgerRecord } from '../../src/knowledge';
+import { parseLedgerRecord, writeSkillChange } from '../../src/knowledge';
+import { bundledRules, createScanner } from '../../src/scanner';
 import { dashboard, terminal } from './chore-support';
 import { createResult, manualRun, ok, PAGE, patchResult, PORTS, proposer, SKILL, SKILL_V1, submit, type ProposerRun } from './proposer-support';
-import { coreTest as test, fetchTracker, pushTracker, trackerFile, trackerTip, TRACKER_REF } from './support';
+import { agentContext, coreTest as test, fetchTracker, fetchTrackerFrom, pushTracker, trackerFile, trackerTip, TRACKER_REF } from './support';
 import { fileIn, pinAndCommit } from '../generated/support';
-import type { Checkout } from '#harness';
+import type { Checkout, GitWorld } from '#harness';
 
 /**
  * A patch citing exactly the evidence minimum: the page, two of the failing
@@ -261,5 +262,74 @@ describe('the human-only gate', () => {
     // Without a TTY the CLI is no human surface for a decision.
     expect(await p.core.call('proposal_accept', { id: proposal }, { ...human(agent), tty: false })).toMatchObject({ ok: false, error: { code: 'HUMAN_ONLY' } });
     expect(ok(await p.core.call('proposal_list', {}, { ...human(agent), tty: false })).pending).toEqual([proposal]);
+  });
+});
+
+/** Clone b takes a's tracker as its own, so the two decide apart until they fold. */
+async function share(world: GitWorld): Promise<void> {
+  await pushTracker(world.a);
+  await fetchTracker(world.b);
+  await world.b.git(['update-ref', TRACKER_REF, 'refs/remotes/origin/grimoire/tracker']);
+}
+
+async function exchange(world: GitWorld): Promise<void> {
+  await fetchTrackerFrom(world.a, world.b);
+  await fetchTrackerFrom(world.b, world.a);
+}
+
+/** A restore of `skill` to `to`, written as the restore op will (GOK-168). */
+async function restore(checkout: Checkout, skill: string, to: string): Promise<void> {
+  const tracker = await openTracker(checkout.dir);
+  try {
+    await tracker.transact({ op: 'restore', author: { name: 'Alice', email: 'alice@example.com' }, actor: { kind: 'human', surface: 'cli' } }, async (draft) => {
+      await writeSkillChange(draft, createScanner(bundledRules), { kind: 'restore', skill, to }, { actor: { kind: 'human' }, by: 'alice@example.com', surface: 'cli', clone: 'test-clone' });
+      return { result: null };
+    });
+  } finally {
+    await tracker.close();
+  }
+}
+
+describe('derived statuses across clones and later changes', () => {
+  test('an accept on one clone against a suspicious reject on another reads contested, withholding the accepted version until a human skill change settles it', async ({
+    world,
+    grimoire,
+  }) => {
+    const p = await proposer(grimoire, world);
+    const { proposal } = ok(await submit(p, patchResult(p)));
+    await share(world);
+    ok(await p.core.call('proposal_reject', { id: proposal, reason: 'suspicious', quarantine: false }, human(agentContext(world.b))));
+    const accepted = ok(await p.core.call('proposal_accept', { id: proposal }, human(grimoire.ctx)));
+    await exchange(world);
+
+    for (const clone of [world.a, world.b]) {
+      expect(ok(await p.core.call('proposal_show', { id: proposal }, human(agentContext(clone)))).status, clone.dir).toBe('contested');
+      expect(ok(await p.core.call('skill_read', { name: SKILL }, agentContext(clone))).version, clone.dir).toBe(p.base);
+    }
+    // A human edit that follows both decisions settles it: the accept stands.
+    ok(await p.core.call('skill_edit', { name: SKILL, text: `${SKILL_V1}${PORTS}8. Ask a human when nothing else works.\n`, base: accepted.version }, human(grimoire.ctx)));
+    expect(ok(await p.core.call('proposal_show', { id: proposal }, human(grimoire.ctx))).status).toBe('accepted');
+  });
+
+  test('two accepts of different proposals on two clones: the losing side reads superseded; a restore off an accepted version makes it undone', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const cli = human(grimoire.ctx);
+    ok(await p.core.call('settings_set', { key: 'proposals.pending_limit', value: 2 }, cli));
+    const { proposal: first } = ok(await submit(p, patchResult(p)));
+    const again = await manualRun(p);
+    const seeds = { ops: [{ op: 'append', text: '\n## Seeds\n\nPrint the seed on failure so the run can be repeated exactly.\n' }] };
+    const { proposal: second } = ok(await submit(again, patchResult(again, seeds)));
+    await share(world);
+    const onA = ok(await p.core.call('proposal_accept', { id: first }, cli));
+    const onB = ok(await p.core.call('proposal_accept', { id: second }, human(agentContext(world.b))));
+    await exchange(world);
+
+    const [winner, loser] = onA.version! < onB.version! ? [first, second] : [second, first];
+    const listed = ok(await p.core.call('proposal_list', {}, cli));
+    expect(Object.fromEntries(listed.proposals.map((row) => [row.id, row.status]))).toEqual({ [winner!]: 'accepted', [loser!]: 'superseded' });
+
+    await restore(world.a, SKILL, p.base);
+    const after = ok(await p.core.call('proposal_list', {}, cli));
+    expect(after.proposals.find((row) => row.id === winner)?.status).toBe('undone');
   });
 });
