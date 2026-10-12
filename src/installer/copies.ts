@@ -4,7 +4,11 @@
 // The launcher↔package contract (frozen, §21):
 //   pkg/<version>/                  the package's files (package.json, dist/, ...)
 //   pkg/<version>/dist/launch.mjs   the entry: `launch(args, info)`
-//   pkg/<version>/.complete         JSON {"integrity": <npm's tarball integrity, or null>}
+//   pkg/<version>/.complete         JSON {"integrity": <npm's tarball integrity, or null>, …}
+//
+// `.complete` may only gain fields; the launcher reads only that it exists.
+// Since GOK-150 it also records `files`: each file's sha256 as installed,
+// which `doctor` compares the copy with.
 //
 // A copy is unpacked into a temp folder inside `pkg/` (so on the same volume)
 // and renamed into place with its `.complete` already written, all under the
@@ -58,15 +62,70 @@ export function copyDir(store: MachineLocalStore, version: string): string {
   return path.join(pkgDir(store), version);
 }
 
-async function readComplete(dir: string): Promise<{ integrity: string | null } | null> {
+/** What `.complete` records: npm's tarball integrity, and (since GOK-150) each file's sha256 as installed. */
+interface CompleteMarker {
+  readonly integrity: string | null;
+  /** POSIX path relative to the copy → sha256 hex; null for a copy installed before files were recorded. */
+  readonly files: Readonly<Record<string, string>> | null;
+}
+
+async function readComplete(dir: string): Promise<CompleteMarker | null> {
   const text = await readTextIfExists(path.join(dir, COMPLETE_MARKER));
   if (text === undefined) return null;
   try {
-    const parsed = JSON.parse(text) as { integrity?: unknown };
-    return { integrity: typeof parsed.integrity === 'string' ? parsed.integrity : null };
+    const parsed = JSON.parse(text) as { integrity?: unknown; files?: unknown };
+    const files = parsed.files !== null && typeof parsed.files === 'object' && !Array.isArray(parsed.files) ? (parsed.files as Record<string, string>) : null;
+    return { integrity: typeof parsed.integrity === 'string' ? parsed.integrity : null, files };
   } catch {
-    return { integrity: null };
+    return { integrity: null, files: null };
   }
+}
+
+/** Every file of a copy but `.complete`, by POSIX path relative to it, with its sha256 (hex). */
+async function fileHashes(dir: string): Promise<Record<string, string>> {
+  const hashes: Record<string, string> = {};
+  const walk = async (folder: string, prefix: string): Promise<void> => {
+    const entries = await readdir(folder, { withFileTypes: true });
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (relative === COMPLETE_MARKER) continue;
+      const file = path.join(folder, entry.name);
+      if (entry.isDirectory()) await walk(file, relative);
+      else hashes[relative] = createHash('sha256').update(await readFile(file)).digest('hex');
+    }
+  };
+  await walk(dir, '');
+  return hashes;
+}
+
+/** A copy checked against what `.complete` recorded when it was installed (`doctor`). */
+export type CopyCheck =
+  | { readonly status: 'missing' }
+  /** Installed before files were recorded: only its presence and package.json can be checked. */
+  | { readonly status: 'unverified'; readonly dir: string }
+  | { readonly status: 'intact'; readonly dir: string }
+  | { readonly status: 'corrupt'; readonly dir: string; readonly changed: string[]; readonly missing: string[]; readonly extra: string[] };
+
+/** Compares `pkg/<version>/` with the file hashes its `.complete` recorded. Reads only. */
+export async function verifyCopy(store: MachineLocalStore, version: string): Promise<CopyCheck> {
+  const dir = copyDir(store, version);
+  const complete = await readComplete(dir);
+  if (!complete) return { status: 'missing' };
+  let manifest: { name?: unknown; version?: unknown } | null = null;
+  try {
+    manifest = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown };
+  } catch {
+    manifest = null;
+  }
+  const packageOk = manifest?.name === PACKAGE_NAME && manifest.version === version;
+  if (complete.files === null) {
+    return packageOk ? { status: 'unverified', dir } : { status: 'corrupt', dir, changed: ['package.json'], missing: [], extra: [] };
+  }
+  const actual = await fileHashes(dir);
+  const changed = Object.keys(complete.files).filter((file) => actual[file] !== undefined && actual[file] !== complete.files![file]);
+  const missing = Object.keys(complete.files).filter((file) => actual[file] === undefined);
+  const extra = Object.keys(actual).filter((file) => complete.files![file] === undefined);
+  return changed.length + missing.length + extra.length === 0 ? { status: 'intact', dir } : { status: 'corrupt', dir, changed, missing, extra };
 }
 
 /** npm's SRI form of a tarball's hash. */
@@ -163,7 +222,8 @@ export async function installCopy(store: MachineLocalStore, version: string, sou
     try {
       const integrity = await populate(temp, source);
       await checkPackage(temp, version);
-      await writeFile(path.join(temp, COMPLETE_MARKER), `${JSON.stringify({ integrity })}\n`);
+      // The files as installed, so `doctor` can tell a copy changed since (spec §12, the pinned copy and its integrity).
+      await writeFile(path.join(temp, COMPLETE_MARKER), `${JSON.stringify({ integrity, files: await fileHashes(temp) })}\n`);
       await retryTransient(() => rename(temp, dir));
       return { status: 'installed', version, dir, integrity };
     } catch (error) {

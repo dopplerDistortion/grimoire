@@ -35,3 +35,20 @@ provenance and sanitizing are in `../README.md`.
 | `hooks-list-timeout-changed.json` | `timeout` 10 → 11 at the same position: same key, new hash, `"modified"`. |
 | `hooks-list-second-clone.json` | The clone: same hash, a key under the clone's path, `"untrusted"`. |
 | `hooks-list-linked-worktree.json` | Listed with the worktree as `cwd`: the hook's `key` and `sourcePath` are the **main checkout's** file, `"trusted"`. |
+
+## The real bootstrap (GOK-150)
+
+Spike E's listings run a bootstrap stand-in. These were taken again, with
+Codex 0.162.1 (`codex app-server` over stdio, not logged in: `hooks/list`
+needs no model), for grimoire's real `.codex/config.toml` block as
+`codexBlockBody()` writes it, so `status` and `doctor` reproduce the hash
+Codex trusts for the shipped bootstrap. Same method as above: the probe
+parsed each response and wrote it back with `JSON.stringify`; the user name
+and the probe's temp folder name were replaced (`USER`, `gok150`).
+
+| File | What it shows |
+| -- | -- |
+| `project-config-real-bootstrap.toml` | The input: grimoire's marked block, written by `codexBlockBody()` (not by Codex). |
+| `hooks-list-real-bootstrap-untrusted.json` | A fresh `CODEX_HOME` with the project trusted: grimoire's group at `…:session_start:0:0`, `trustStatus: "untrusted"`, `currentHash: sha256:477d56a9…`, the value `codexHookHash()` computes. |
+| `hooks-list-real-bootstrap-trusted.json` | The same after the `/hooks` trust write (`config/batchWrite` on `hooks.state`): `"trusted"`. |
+| `user-config-real-bootstrap.toml` | That user's `config.toml` as Codex left it: the project trust, then the `[hooks.state.'<key>']` table it wrote. |

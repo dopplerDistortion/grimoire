@@ -1,0 +1,7 @@
+[projects.'C:\Users\USER\AppData\Local\Temp\gok150\repo']
+trust_level = "trusted"
+
+[hooks.state]
+
+[hooks.state.'C:\Users\USER\AppData\Local\Temp\gok150\repo\.codex\config.toml:session_start:0:0']
+trusted_hash = "sha256:477d56a9e5112c275975ffbff621b60ae75787d58ff466984c6ff6adc5170a7c"

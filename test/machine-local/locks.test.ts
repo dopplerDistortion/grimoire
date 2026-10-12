@@ -87,6 +87,22 @@ describe('locks', () => {
     expect((await store.locks.acquire('fairness')).status).toBe('acquired');
   });
 
+  test('the listing names every lock, those whose names are kept as a hash included', async ({ world }) => {
+    const store = await storeOf(world.a.dir);
+    await store.locks.acquire('records/pointer-refresh', { ttlMs: 1 });
+    await store.locks.acquire('start');
+    await sleep(20);
+
+    const listed = await store.locks.list();
+
+    expect(listed.map(({ name, state }) => [name, state.status]).sort()).toEqual(
+      [
+        ['records/pointer-refresh', 'stale'],
+        ['start', 'held'],
+      ].sort(),
+    );
+  });
+
   test('read-modify-write updates from N processes are never lost', async ({ world }) => {
     const feature = await world.a.addWorktree('feature');
     const n = 6;

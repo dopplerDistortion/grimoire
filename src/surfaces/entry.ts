@@ -44,6 +44,12 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
     const { runInitVerb } = await import('./cli/init');
     return runInitVerb(withFrom(rest.slice(1)), { bin: options.bin });
   }
+  if (rest[0] === 'status' || rest[0] === 'doctor') {
+    const { runHealthVerb } = await import('./cli/health');
+    // Through the shell shim the repo is the shim's own checkout, whatever the cwd, unless the command names a --from.
+    const start = from ?? options.startDir;
+    return runHealthVerb(rest[0], rest.slice(1), start === undefined ? {} : { startDir: start });
+  }
   if (rest[0] === 'start' || rest[0] === 'open') {
     const { runOpenVerb, runStartVerb } = await import('./start/run');
     const run = rest[0] === 'start' ? runStartVerb : runOpenVerb;

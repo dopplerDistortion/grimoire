@@ -7,6 +7,7 @@
 // home and repo rewrite. Keys this release doesn't know are kept.
 import { formatLine, lineValue, parseLines } from '../tracker/lines';
 import { compareReach, type Reach } from '../tracker/fold-records';
+import type { RecordProblem } from '../tracker/check';
 import type { EvidenceSource } from './evidence';
 import type { ExcerptStatus } from './cut';
 import type { StepOrigin } from './steps';
@@ -149,6 +150,16 @@ export function parseSessionRecord(bytes: Buffer): SessionRecord {
     text: body === '' ? null : body,
     extra,
   };
+}
+
+/**
+ * What `doctor` finds wrong with a stored session record whose lines are
+ * already canonical: null when its bytes are what capture writes for what it
+ * holds (every key in its order, unknown keys kept after them, the excerpt as
+ * it was cut).
+ */
+export function sessionRecordProblem(bytes: Buffer): RecordProblem | null {
+  return serializeSessionRecord(parseSessionRecord(bytes)).equals(bytes) ? null : { kind: 'non-canonical', why: 'it differs from what the canonical serializer writes for it' };
 }
 
 /**
