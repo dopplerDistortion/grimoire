@@ -41,15 +41,20 @@ setTimeout(() => {
 }, Number(delay));
 `;
 
-/** Puts a git answering `delayMs` late in place of the next git the core runs whose arguments match `command`. */
-function slowNextGit(command: RegExp, delayMs: number, doneFile: string): { restore(): void } {
-  let left = 1;
+/**
+ * Puts a git answering `delayMs` late in place of the next `times` gits the
+ * core runs whose arguments match `command`. The first writes `doneFile` when
+ * it finishes, the n-th `<doneFile>.<n>`: `doneFiles` lists those started.
+ */
+function slowNextGit(command: RegExp, delayMs: number, doneFile: string, times = 1): { restore(): void; doneFiles(): string[] } {
+  const started: string[] = [];
   vi.mocked(childProcess.spawn).mockImplementation(((name: string, args: readonly string[], options: childProcess.SpawnOptions) => {
-    if (name !== 'git' || left === 0 || !command.test(args.join(' '))) return realSpawn(name, args, options);
-    left--;
-    return realSpawn(process.execPath, ['-e', SLOW_GIT, '--', String(delayMs), doneFile, '::git', ...args], options);
+    if (name !== 'git' || started.length === times || !command.test(args.join(' '))) return realSpawn(name, args, options);
+    const done = started.length === 0 ? doneFile : `${doneFile}.${started.length + 1}`;
+    started.push(done);
+    return realSpawn(process.execPath, ['-e', SLOW_GIT, '--', String(delayMs), done, '::git', ...args], options);
   }) as unknown as typeof childProcess.spawn);
-  return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn) };
+  return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn), doneFiles: () => [...started] };
 }
 
 /** Claude Code's spike-A subagent session: the main line launched one subagent, which called grimoire. */
@@ -1341,6 +1346,44 @@ describe('a person’s ending', () => {
       expect(took, ending).toBeLessThan(flushWaitMs);
       expect(trailerReads(), ending).toBe(reads);
       expect(await sessionRecords(world.a, id, attempt), ending).toEqual([]);
+    }
+  });
+});
+
+describe('a reopen superseding several attempts', () => {
+  test('cuts them all within one budget: the attempts it supersedes share it', async ({ world, grimoire, capture }) => {
+    // Each superseded attempt's trailer read stalls past the budget: with a budget each, the reopen would take two.
+    const budgetMs = 4_000;
+    // Inside the 5 s git stall time, so the slow gits answer (and write their done files) rather than being killed.
+    const gitDelayMs = 4_500;
+    const core = capture.makeCore({ capture: { budgetMs } });
+    const id = await created(core, grimoire.ctx, 'Left open twice');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:30.000Z');
+    expect(await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'))).toMatchObject({ ok: true });
+    // Two attempts an agent opened, left open on the closed issue as folds can leave them.
+    const tip = (await trackerTip(world.a))!;
+    const opened: Record<string, string> = {};
+    for (const handle of ['at-a0a0a0', 'at-b1b1b1']) {
+      for (const file of ['start.md', 'issue-at-start.md']) {
+        opened[`${attemptDir(id, handle)}/${file}`] = await trackerFile(world.a, tip, `${attemptDir(id, attempt)}/${file}`);
+      }
+    }
+    await commitToTracker(world.a, opened);
+    const slow = slowNextGit(TRAILER_READ, gitDelayMs, path.join(world.root, 'slow-git-done'), 2);
+    try {
+      const started = Date.now();
+      const reopened = await core.call('reopen', { id, comment: 'Not done after all.' }, person(grimoire.ctx));
+      const took = Date.now() - started;
+
+      expect(reopened).toMatchObject({ ok: true });
+      expect(slow.doneFiles().length).toBeGreaterThan(0);
+      // One budget plus room for the commit on a loaded machine; two budgets would be 8 s.
+      expect(took).toBeLessThan(2 * budgetMs - 1_000);
+    } finally {
+      slow.restore();
+      // The slow gits still run in the repo: let them finish before the repo goes.
+      for (const done of slow.doneFiles()) for (let waited = 0; !existsSync(done) && waited < gitDelayMs + 5_000; waited += 100) await sleep(100);
     }
   });
 });
