@@ -1,6 +1,7 @@
 // Sync (spec §4, Sync; §3, Refs): fetch → fold → push of the tracker with the
 // explicit refspec, so a teammate's plain `git fetch` brings it. Failures come
 // back in the outcome, never as throws: the caller records them.
+import { setTimeout as sleep } from 'node:timers/promises';
 import { GrimoireError } from '../errors';
 import type { GitRun } from '../git/run';
 import { remoteTrackerRef, TRACKER_BRANCH } from './layout';
@@ -50,6 +51,8 @@ export interface SyncFailure {
   readonly class: SyncFailureClass;
   /** The remote's message, userinfo stripped. */
   readonly message: string;
+  /** Every push round lost a race to other pushes: the remote is busy, not refusing, so no backoff follows. */
+  readonly lostRace?: true;
 }
 
 export interface SyncOutcome {
@@ -106,8 +109,15 @@ export interface TrackerRefs {
   readonly remotes: ReadonlyMap<string, string>;
 }
 
-/** A lost push race is retried this many times in all (spec §4: retries on non-fast-forward). */
-const PUSH_ROUNDS = 3;
+/**
+ * A lost push race is retried, rounds this many in all and never past the
+ * sync's deadline (spec §4: retries on non-fast-forward). Each lost race is
+ * another clone's push landing, so two clones syncing at once settle within a
+ * few rounds; the pause before each retry keeps them from running in step.
+ */
+const PUSH_ROUNDS = 10;
+/** The pause before retry n after a lost race is a random share of n times this. */
+const RACE_PAUSE_MS = 100;
 /** Missing objects in a partial clone are backfilled in at most this many rounds (spec §4). */
 const BACKFILL_ROUNDS = 2;
 
@@ -342,14 +352,21 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     }
     if (push.timedOut) return failed('push', push);
     const pushed = pushedRef(push.stdout.toString('utf8'), TRACKER_BRANCH);
-    if (pushed && lostRace(pushed, push.stderr) && round < PUSH_ROUNDS) continue;
+    const raced = pushed !== null && lostRace(pushed, push.stderr);
+    if (raced && round < PUSH_ROUNDS) {
+      const pauseMs = Math.random() * RACE_PAUSE_MS * round;
+      if (spec.deadline === undefined || Date.now() + pauseMs < spec.deadline) {
+        await sleep(pauseMs);
+        continue;
+      }
+    }
     if (pushed?.flag === '!') {
       const reason = /\(([^)]*)\)\s*$/.exec(pushed.summary)?.[1] ?? pushed.summary;
       const said = remoteLines(push.stderr);
       return outcome({
         state: 'pending',
         reason: 'failed',
-        failure: { class: 'rejected', message: recordable(said ? `${reason}: ${said}` : reason) },
+        failure: { class: 'rejected', message: recordable(said ? `${reason}: ${said}` : reason), ...(raced ? { lostRace: true } : {}) },
       });
     }
     return failed('push', push);
