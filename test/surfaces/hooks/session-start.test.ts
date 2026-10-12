@@ -8,7 +8,13 @@ import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { gitTest, readFixture, readFixtureJson, type GitWorld } from '#harness';
-import { createCore } from '../../../src/core';
+import { createCore, type CallContext } from '../../../src/core';
+import { listStrayEdits, SERVED_SET_CACHE, sessionStartFastPath, tipPairKey } from '../../../src/generated';
+import { skillVersionOf } from '../../../src/knowledge';
+import { MachineLocalStore } from '../../../src/machine-local';
+import { openTracker } from '../../../src/tracker';
+import { worktreeLeaseName } from '../../../src/upkeep/checkout';
+import { writeInto } from '../../generated/support';
 import { runUpkeep } from '../../../src/upkeep';
 import { agentContext, initializeTracker } from '../../core/support';
 import { installed } from '../../upkeep/support';
@@ -21,6 +27,24 @@ const LINE = 'grimoire: 1 chore is due; run the grimoire-chores skill';
 /** What Claude Code is told when the hook wrote skill stubs (spike C, B1). */
 const RELOAD = '{"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true}}';
 const NOTES = '---\nname: release-notes\ndescription: Use when recording a change in the release notes.\n---\n# Release notes\n\nCreate `changes/<slug>.md`.\n';
+const NOTES_V2 = `${NOTES}Never edit \`CHANGELOG.md\`.\n`;
+const COPY = '.grimoire/skills/release-notes/SKILL.md';
+
+/** A person at their terminal in clone a. */
+function terminalOf(world: GitWorld): CallContext {
+  return { ...agentContext(world.a), surface: 'cli', client: null, evidence: {}, tty: true };
+}
+
+/** Commits a new version of release-notes, refreshing no worktree (as on another machine, or before the next upkeep). */
+async function editServed(world: GitWorld, text: string, base: string | null): Promise<void> {
+  const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
+  try {
+    const edit = await core.call('skill_edit', { name: 'release-notes', text, base }, terminalOf(world));
+    if (!edit.ok) throw new Error(JSON.stringify(edit.error));
+  } finally {
+    await core.close();
+  }
+}
 
 /** Clone a installed and committed on this pin, its tracker serving one evolved skill, and no generated output yet. */
 async function withServedSkill(world: GitWorld): Promise<string> {
@@ -31,7 +55,7 @@ async function withServedSkill(world: GitWorld): Promise<string> {
   await initializeTracker(world.a, world.a);
   const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
   try {
-    const edit = await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, { ...agentContext(world.a), surface: 'cli', client: null, evidence: {}, tty: true });
+    const edit = await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, terminalOf(world));
     if (!edit.ok) throw new Error(JSON.stringify(edit.error));
   } finally {
     await core.close();
@@ -150,26 +174,40 @@ describe('the skill fast path', () => {
     expect(second).toEqual({ code: 0, output: '' });
   });
 
-  gitTest('it never removes or replaces generated output, and writes nothing mid-merge', async ({ world }) => {
+  gitTest('it writes only what differs: a copy holding an older version is rewritten and the stubs left as they are; a hand edit is saved as a stray edit before the served text goes back; nothing is removed', async ({
+    world,
+  }) => {
     const root = await withServedSkill(world);
-    const write = async (file: string, text: string) => {
-      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
-      await writeFile(path.join(root, file), text);
-    };
-    await write('.agents/skills/grimoire-retired/SKILL.md', 'a stub nothing serves\n');
-    await write('.agents/skills/grimoire-retired/.gitignore', '*\n');
-    await write('.grimoire/skills/release-notes/SKILL.md', 'edited by hand\n');
-    await write('.grimoire/skills/release-notes/.gitignore', '*\n');
+    await hook(root, CLAUDE[0]!);
+    const stub = path.join(root, '.claude/skills/grimoire-release-notes/SKILL.md');
+    const stubWritten = (await stat(stub)).mtimeMs;
+    await writeInto(root, '.agents/skills/grimoire-retired/SKILL.md', 'a stub nothing serves\n');
+    await writeInto(root, '.agents/skills/grimoire-retired/.gitignore', '*\n');
+    await editServed(world, NOTES_V2, skillVersionOf(NOTES));
 
-    const kept = await hook(root, CLAUDE[0]!);
+    const newer = await hook(root, CLAUDE[0]!);
 
-    expect(kept.output).toBe('');
+    expect(newer).toEqual({ code: 0, output: `${RELOAD}\n` });
+    expect(await readFile(path.join(root, COPY), 'utf8')).toBe(NOTES_V2);
+    expect((await stat(stub)).mtimeMs).toBe(stubWritten);
     expect(await readFile(path.join(root, '.agents/skills/grimoire-retired/SKILL.md'), 'utf8')).toBe('a stub nothing serves\n');
-    expect(await readFile(path.join(root, '.grimoire/skills/release-notes/SKILL.md'), 'utf8')).toBe('edited by hand\n');
-    // A stub would point at a copy that doesn't hold the served text: none is written.
-    expect(await exists(path.join(root, '.claude/skills/grimoire-release-notes'))).toBe(false);
 
-    await rm(path.join(root, '.grimoire', 'skills'), { recursive: true });
+    await writeFile(path.join(root, COPY), 'edited by hand\n');
+    const edited = await hook(root, CLAUDE[0]!);
+
+    expect(JSON.parse(edited.output)).toEqual({
+      hookSpecificOutput: { hookEventName: 'SessionStart', reloadSkills: true, additionalContext: 'grimoire: stray edit to release-notes: Record or Discard' },
+    });
+    expect(await readFile(path.join(root, COPY), 'utf8')).toBe(NOTES_V2);
+    const strays = await listStrayEdits(new MachineLocalStore(path.join(root, '.git')));
+    expect(strays).toEqual([expect.objectContaining({ skill: 'release-notes', text: 'edited by hand\n', base: skillVersionOf(NOTES_V2), path: COPY })]);
+    // Nothing more to write: no reload, and the stray edit still waits for a human.
+    expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: 'grimoire: stray edit to release-notes: Record or Discard\n' });
+    expect(await hook(root, CODEX[0]!)).toEqual({ code: 0, output: 'grimoire: stray edit to release-notes: Record or Discard\n' });
+  });
+
+  gitTest('it writes nothing mid-merge', async ({ world }) => {
+    const root = await withServedSkill(world);
     await world.a.commitFile('shared.txt', 'base\n');
     await world.a.git(['switch', '--quiet', '-c', 'other']);
     await world.a.commitFile('shared.txt', 'theirs\n');
@@ -179,7 +217,56 @@ describe('the skill fast path', () => {
 
     const merging = await hook(root, CLAUDE[0]!);
 
-    expect(merging.output).toBe('');
+    expect(merging).toEqual({ code: 0, output: '' });
+    for (const folder of folders) expect(await exists(path.join(root, folder)), folder).toBe(false);
+  });
+
+  gitTest('a session start whose tracker didn’t move serves from the served-set cache, keyed by the tip pair; once the tip pair moves it reads the tracker again', async ({
+    world,
+  }) => {
+    const root = await withServedSkill(world);
+    await hook(root, CLAUDE[0]!);
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    const tracker = await openTracker(root);
+    const tips = await tracker.tips();
+    await tracker.close();
+    const cached = await store.caches.read<{ tips: string; skills: { name: string; text: string }[] }>(SERVED_SET_CACHE, 1);
+    expect(cached).toMatchObject({ tips: tipPairKey(tips), skills: [{ name: 'release-notes', text: NOTES }] });
+
+    // A cache naming the tips the tracker is at is trusted as it is: the ledger isn't read.
+    const CACHED = NOTES.replace('Create', 'Cached: create');
+    await store.caches.put(SERVED_SET_CACHE, 1, { ...cached, skills: [{ ...cached!.skills[0], text: CACHED }] });
+    await rm(path.join(root, '.grimoire', 'skills'), { recursive: true });
+    await hook(root, CLAUDE[0]!);
+    expect(await readFile(path.join(root, COPY), 'utf8')).toBe(CACHED);
+
+    await editServed(world, NOTES_V2, skillVersionOf(NOTES));
+    await hook(root, CLAUDE[0]!);
+    expect(await readFile(path.join(root, COPY), 'utf8')).toBe(NOTES_V2);
+  });
+
+  gitTest('while another process holds the worktree’s lease the hook writes nothing; a fast path waiting for it reads the served set again, so a delivery-off committed meanwhile is never undone', async ({
+    world,
+  }) => {
+    const root = await withServedSkill(world);
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    const held = await store.leases.acquire(await worktreeLeaseName(root), { ttlMs: 60_000 });
+    if (held.status !== 'acquired') throw new Error('the lease was held');
+
+    expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: '' });
+    for (const folder of folders) expect(await exists(path.join(root, folder)), folder).toBe(false);
+
+    const waiting = sessionStartFastPath(store, root, { leaseWaitMs: 60_000 });
+    const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
+    try {
+      const off = await core.call('settings_set', { key: 'skills.delivery', value: false }, terminalOf(world));
+      expect(off).toMatchObject({ ok: true });
+    } finally {
+      await core.close();
+    }
+    await held.lease.release();
+
+    expect(await waiting).toMatchObject({ wrote: [] });
     for (const folder of folders) expect(await exists(path.join(root, folder)), folder).toBe(false);
   });
 });

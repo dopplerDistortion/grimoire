@@ -17,6 +17,7 @@ import { assign, deleteIssue, outcomeSet, reassign, reopen } from './human-ops';
 import { resolve } from './resolve';
 import { settingsGet, settingsSet } from './settings';
 import { skillEdit, skillList, skillRead, skillShow } from './skills';
+import { skillDiscard, skillRecord, skillStrays } from './stray-edits';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
@@ -55,6 +56,7 @@ export type { AssignResult, ReassignResult, ReopenResult, Reblocked, DeleteResul
 export type { ResolveResult } from './resolve';
 export type { SettingsResult, SettingsSetResult, ShownSetting, SettingScope } from './settings';
 export type { SkillListResult, SkillReadResult, SkillEditResult, SkillShowResult, ShownSkill, ShownChange, SkillProvenance, SkillOrigin } from './skills';
+export type { ShownStrayEdit, SkillStraysResult, SkillRecordResult, SkillDiscardResult } from './stray-edits';
 export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, ShownSide } from './wiki';
 export type { QuarantineResult } from './quarantine';
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
@@ -169,6 +171,9 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   settingsSet,
   skillShow,
   skillEdit,
+  skillStrays,
+  skillRecord,
+  skillDiscard,
   wikiList,
   wikiShow,
   wikiEdit,

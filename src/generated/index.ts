@@ -4,11 +4,34 @@
 // Upkeep (src/upkeep) schedules the reconcile; the core asks for a refresh
 // when the served set changes.
 import type { ReconcileReport } from './reconcile';
+import { strayEditNotice } from './stray';
 
 export { mayHoldGeneratedOutput, reconcileWorktree, MOVED_ASIDE, type ReconcileMode, type ReconcileReport } from './reconcile';
-export { ledgerMayExist, readServedFingerprint, readServedSet, servedFingerprint, servedSetOf, sharedScanner, type ServedSet } from './served';
+export {
+  cachedServedSet,
+  ledgerMayExist,
+  readServedFingerprint,
+  readServedSet,
+  SERVED_SET_CACHE,
+  servedFingerprint,
+  servedSetOf,
+  sharedScanner,
+  tipPairKey,
+  type ServedSet,
+} from './served';
 export { comparablePath, pathListFile, readPathList, updatePathList } from './path-list';
-export { setAsideStrayEdit, STRAY_EDITS, type StrayEdit } from './stray';
+export {
+  dropStrayEdit,
+  listStrayEdits,
+  openAttemptsOf,
+  readStrayEdit,
+  setAsideStrayEdit,
+  strayEditNotice,
+  STRAY_EDITS,
+  type StrayEdit,
+  type StrayEditEntry,
+} from './stray';
+export { sessionStartFastPath, FAST_PATH_LEASE_WAIT_MS, type FastPathOptions, type FastPathResult } from './fast-path';
 export {
   CHORE_CARRIER,
   COPY_ROOT,
@@ -28,7 +51,7 @@ export function reconcileNotices(report: ReconcileReport, where: string | null):
   return [
     ...report.unplaced.map((entry) => `evolved skill ${entry.skill} reaches agents${at} only through skill_list and skill_read: ${entry.path}: ${entry.why}`),
     ...report.movedAside.map((entry) => `grimoire moved ${entry.path}${at} to ${entry.to}: the grimoire- prefix is reserved for grimoire's skill stubs`),
-    ...report.strayEdits.map((entry) => `stray edit to ${entry.skill}${at}: Record or Discard`),
+    ...report.strayEdits.map((entry) => strayEditNotice(entry.skill, where)),
     ...report.left.map((entry) => `grimoire left ${entry.path}${at} alone: ${entry.why}`),
   ];
 }

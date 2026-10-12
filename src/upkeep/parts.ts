@@ -9,7 +9,7 @@ import { openTracker } from '../tracker';
 import { pruneCopies } from '../installer/copies';
 import { refreshContentPointers } from '../installer/refresh';
 import { registeredWorktrees } from '../installer/worktrees';
-import { ledgerMayExist, mayHoldGeneratedOutput, readServedSet, reconcileNotices, reconcileResult, reconcileWorktree, type ServedSet } from '../generated';
+import { cachedServedSet, ledgerMayExist, mayHoldGeneratedOutput, reconcileNotices, reconcileResult, reconcileWorktree, type ServedSet } from '../generated';
 import type { Json } from '../machine-local';
 import { operationInProgress, UPKEEP_STAMPS, worktreeLeaseName } from './checkout';
 import { noteRefreshed, refreshNotice } from './refreshed';
@@ -87,9 +87,13 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The served set, read once per pass from the tracker (after this pass's sync folded what it fetched). */
+/**
+ * The served set, read once per pass (after this pass's sync folded what it
+ * fetched) through the served-set cache, which it keeps warm for the
+ * SessionStart fast path.
+ */
 function servedOf(input: PartInput): Promise<ServedSet> {
-  return input.once('served-set', () => readServedSet(input.root));
+  return input.once('served-set', () => cachedServedSet(input.store, input.root));
 }
 
 /**

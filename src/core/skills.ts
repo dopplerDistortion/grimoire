@@ -362,7 +362,7 @@ function lineAt(text: string, at: number): number {
 }
 
 /** A human's draft as a canonical `SKILL.md`, or INVALID naming what is wrong with it. */
-function draftParts(name: string, draft: string): SkillParts {
+export function draftParts(name: string, draft: string): SkillParts {
   let parts: SkillParts;
   try {
     parts = parseSkillText(normalizeSkillText(draft));
@@ -383,7 +383,7 @@ function draftParts(name: string, draft: string): SkillParts {
  * (src/knowledge/book.ts): a git conflict marker would leave the version
  * current but never served, so it is refused here instead.
  */
-function servable(text: string): void {
+export function servable(text: string): void {
   const hygiene = checkHygiene(text);
   if (hygiene.status !== 'checked') throw invalid({ text: 'could not be checked for conflict markers, so it is not committed' });
   const marker = hygiene.findings.find((finding) => finding.check === 'conflict-marker');
@@ -395,7 +395,7 @@ function servable(text: string): void {
 }
 
 /** INVALID unless the secret scan ran and found nothing (spec §18, Secrets): a hit blocks the commit. */
-function scanned(scanner: SecretScanner, text: string): void {
+export function scanned(scanner: SecretScanner, text: string): void {
   const scan = scanner.scan(text);
   if (scan.status !== 'scanned') throw invalid({ text: 'could not be secret-scanned, so it is not committed' });
   const [hit] = scan.hits;
