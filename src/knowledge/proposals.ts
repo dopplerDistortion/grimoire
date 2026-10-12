@@ -79,9 +79,10 @@ export async function viewProposalStates(view: Pick<TrackerView, 'ledgerFiles' |
 /** What due-ness needs to know of the proposals (spec §16): the pending slot, and proposals gone stale since a time. */
 export async function proposalSignals(view: Pick<TrackerView, 'ledgerFiles' | 'proposals'>): Promise<ProposalSignals> {
   const states = await viewProposalStates(view);
-  const pending = states.find((state) => state.status === 'pending')?.record.id ?? null;
+  const pending = states.filter((state) => state.status === 'pending');
   return {
-    pending,
+    pending: pending[0]?.record.id ?? null,
+    pendingCount: pending.length,
     staleOrLapsedSince: (at) => states.some((state) => state.staleSince !== null && (at === null || state.staleSince > at)),
   };
 }

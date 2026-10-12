@@ -266,6 +266,19 @@ describe('chore_submit: repeats, the pending slot and moved bases', () => {
     expect(other).toMatchObject({ result: 'proposed' });
   });
 
+  test('with proposals.pending_limit 2 the Skill Proposer stays due with one pending proposal, and a second may wait; then the slot is full', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    ok(await submit(p, patchResult(p)));
+    ok(await p.core.call('settings_set', { key: 'proposals.pending_limit', value: 2 }, terminal(grimoire.ctx)));
+
+    const second = await manualRun(p);
+    const seeds = { ops: [{ op: 'append', text: '\n## Seeds\n\nPrint the seed on failure so the run can be repeated exactly.\n' }] };
+    expect(ok(await submit(second, patchResult(second, seeds)))).toMatchObject({ result: 'proposed' });
+
+    const full = await p.core.call('chore_start', { kind: 'skill-proposer', manual: true }, p.chores);
+    expect(full).toMatchObject({ ok: false, error: { code: 'NOT_DUE', details: { why: expect.stringContaining('pending human review') } } });
+  });
+
   test('a proposal whose commit landed but whose run end was lost replays proposed on a retry, without PENDING_LIMIT or a second commit', async ({ world, grimoire }) => {
     const p = await proposer(grimoire, world);
     const submitted = ok(await submit(p, patchResult(p)));

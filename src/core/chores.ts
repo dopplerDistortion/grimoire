@@ -68,6 +68,7 @@ export function choreThresholds(view: Pick<TrackerView, 'settings'>): ChoreThres
     batchPasses: n('chores.batch_passes'),
     strikes: n('chores.strikes'),
     proposeFails: n('chores.propose_fails'),
+    pendingLimit: n('proposals.pending_limit'),
   };
 }
 
