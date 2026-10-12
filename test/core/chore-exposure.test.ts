@@ -208,3 +208,22 @@ describe('an atomic chore_start', () => {
     expect(started.ok ? claim : started).toMatchObject({ ok: false, error: { code: 'NOT_ISOLATED' } });
   });
 });
+
+describe('run-record updates', () => {
+  test('a chore_read racing chore_abandon never reopens the abandoned run', async ({ grimoire }) => {
+    const { core } = await dueCore(grimoire);
+    const subagent = codexSubagent(grimoire.ctx);
+    const started = await core.call('chore_start', {}, subagent);
+    if (!started.ok) throw new Error('chore_start failed');
+    const run = started.result.run;
+
+    const [, abandoned] = await Promise.all([core.call('chore_read', { run }, subagent), core.call('chore_abandon', { run, reason: 'stop' }, subagent)]);
+    expect(abandoned).toMatchObject({ ok: true, result: { abandoned: true } });
+
+    // Abandoned is terminal: the run stays ended, and its context is free.
+    expect(await core.call('chore_read', { run }, subagent)).toMatchObject({ ok: false, error: { code: 'NOT_FOUND', details: { state: 'abandoned' } } });
+    expect(await core.call('chore_abandon', { run, reason: 'again' }, subagent)).toMatchObject({ ok: true, result: { replayed: true } });
+    const id = await newIssue(core, grimoire.ctx, 'After the abandon');
+    expect(await core.call('claim', { id }, subagent)).toMatchObject({ ok: true });
+  });
+});

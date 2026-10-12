@@ -103,6 +103,16 @@ export function writeRun(store: MachineLocalStore, run: OpenRun): Promise<void> 
   return store.records.write(OPEN_RUNS, run.id, run as never);
 }
 
+/**
+ * Changes the run `id` under the run records' machine-local lock, so updates
+ * never race (a read-modify-write each). Ended and abandoned are terminal: a
+ * run that is no longer open is left as it is. Returns the run as stored
+ * afterwards, or undefined when there is none.
+ */
+export async function updateRun(store: MachineLocalStore, id: string, change: (open: OpenRun) => OpenRun): Promise<OpenRun | undefined> {
+  return store.records.update<OpenRun>(OPEN_RUNS, id, (current) => (current === undefined || current.state !== 'open' ? current : change(current)));
+}
+
 /** Drops the run `id` (a start that didn't complete); false if it wasn't there. */
 export function removeRun(store: MachineLocalStore, id: string): Promise<boolean> {
   return store.records.remove(OPEN_RUNS, id);

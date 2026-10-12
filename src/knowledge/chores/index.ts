@@ -33,6 +33,7 @@ export {
   readRun,
   removeRun,
   servedLog,
+  updateRun,
   writeRun,
   type ChoreOrigin,
   type ExposureMark,

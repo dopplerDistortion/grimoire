@@ -31,6 +31,7 @@ import {
   readRun,
   removeRun,
   Serving,
+  updateRun,
   writeRun,
   LEASE_MS,
   type ChoreOrigin,
@@ -307,6 +308,11 @@ async function heldRun(store: MachineLocalStore, ctx: CallContext, id: string, n
   return run;
 }
 
+/** NOT_FOUND for a run that has ended or been abandoned. */
+function ended(id: string, state: string): GrimoireError {
+  return new GrimoireError('NOT_FOUND', `the chore run ${id} has ended (${state})`, { run: id, state });
+}
+
 export interface ChoreReadResult {
   run: string;
   /** The served items: whole, or a part of one cut at its `text` (`offset`, `continues`). */
@@ -331,7 +337,7 @@ export const choreRead = define({
     const store = storeOf(tracker, ctx);
     const now = tracker.now();
     const run = await heldRun(store, ctx, input.run, now);
-    if (run.state !== 'open') throw new GrimoireError('NOT_FOUND', `the chore run ${run.id} has ended (${run.state})`, { run: run.id, state: run.state });
+    if (run.state !== 'open') throw ended(run.id, run.state);
     const view = await tracker.read();
     const serving = await servingOf(view, run, ctx, scanner, now);
     const item = input.item?.trim() ?? null;
@@ -341,7 +347,9 @@ export const choreRead = define({
     const ids = item === null ? run.manifest : await serving.itemIds(item);
     const page = await pageOf(serving, ids, pageStart(input.cursor, item), pageEnvelope(run.id));
     await logServed(store, run.id, page.served, now);
-    await writeRun(store, { ...run, last_call_at: now.toISOString() });
+    // Renews the lease, unless the run ended meanwhile: a terminal state is never reopened.
+    const renewed = await updateRun(store, run.id, (open) => ({ ...open, last_call_at: now.toISOString() }));
+    if (renewed?.state !== 'open') throw ended(run.id, renewed?.state ?? 'abandoned');
     return { run: run.id, items: page.items, ...(page.next !== null ? { truncated: true as const, cursor: page.next } : {}) };
   },
 });
@@ -371,10 +379,14 @@ export const choreAbandon = define({
     const now = tracker.now();
     const run = await heldRun(store, ctx, input.run, now);
     const summary = `grimoire chores: ${KIND_NAMES[run.kind]} run ${run.id} abandoned; nothing consumed`;
-    if (run.state === 'abandoned') return { run: run.id, kind: run.kind, abandoned: true, replayed: true, summary };
-    if (run.state !== 'open') throw new GrimoireError('NOT_FOUND', `the chore run ${run.id} has ended (${run.state})`, { run: run.id, state: run.state });
     const at = now.toISOString();
-    await writeRun(store, { ...run, state: 'abandoned', ended_at: at, last_call_at: at, reason: input.reason.trim().slice(0, 2_000) });
-    return { run: run.id, kind: run.kind, abandoned: true, summary };
+    let changed = false;
+    const after = await updateRun(store, run.id, (open) => {
+      changed = true;
+      return { ...open, state: 'abandoned', ended_at: at, last_call_at: at, reason: input.reason.trim().slice(0, 2_000) };
+    });
+    const state = after?.state ?? run.state;
+    if (state !== 'abandoned') throw ended(run.id, state);
+    return { run: run.id, kind: run.kind, abandoned: true, ...(changed ? {} : { replayed: true as const }), summary };
   },
 });
