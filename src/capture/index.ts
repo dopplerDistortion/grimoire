@@ -83,3 +83,13 @@ export type {
   ToolResultStep,
   Transcript,
 } from './steps';
+export {
+  eventSkillReads,
+  skillVersionTexts,
+  transcriptSkillReads,
+  UNKNOWN_VERSION,
+  type SkillRead,
+  type SkillReadEventFacts,
+  type SkillReadVia,
+  type SkillVersionTexts,
+} from './skill-facts';

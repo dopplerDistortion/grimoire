@@ -19,6 +19,19 @@ export type AttemptOpening = 'claim' | 'assign' | 'unclaimed-close';
 export type AttemptEnding = 'done' | 'canceled' | 'release' | 'release-abandoned' | 'reassign' | 'superseded';
 export type Verdict = 'pass' | 'fail' | 'none';
 
+/**
+ * One evolved skill a checkout offered at an attempt's opening (spec §14
+ * Facts, Offered): per stub, the ledger version whose normalized text equals
+ * the checkout's copy; else `unknown` with the copy's hash; or `missing`, the
+ * stub present but the copy absent. Never the ledger's current pointer.
+ */
+export type OfferedSkill =
+  | { readonly name: string; readonly version: string; readonly hash?: undefined }
+  | { readonly name: string; readonly version: 'unknown'; readonly hash: string };
+
+/** The store's evolved-skill delivery switch as it stood at an attempt's opening. */
+export type DeliveryState = 'on' | 'off';
+
 /** `start.md`. */
 export interface AttemptStart {
   /** The person who holds the attempt (an email): always a person, never an agent. */
@@ -31,6 +44,14 @@ export interface AttemptStart {
   readonly start_commit: string;
   /** Whether the opening context had been exposed to the wiki. */
   readonly wiki_exposed: boolean;
+  /** The delivery switch at the opening; absent in a `start.md` that doesn't record it. */
+  readonly delivery?: DeliveryState;
+  /**
+   * The evolved skills the opening checkout offered, by name; absent when the
+   * opening had no checkout of the attempt's own (a human assign), so nothing
+   * is known of what it offered.
+   */
+  readonly skills_offered?: readonly OfferedSkill[];
   readonly extra: Readonly<Record<string, string>>;
 }
 
@@ -134,7 +155,7 @@ const strings = (values: Values, key: string): string[] => {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 };
 
-const START_KEYS = ['assignee', 'actor', 'opened', 'at', 'start_commit', 'wiki_exposed'];
+const START_KEYS = ['assignee', 'actor', 'opened', 'at', 'start_commit', 'wiki_exposed', 'delivery', 'skills_offered'];
 const START_KNOWN = new Set(START_KEYS);
 
 export function serializeStart(start: AttemptStart): Buffer {
@@ -146,11 +167,15 @@ export function serializeStart(start: AttemptStart): Buffer {
     formatLine('start_commit', start.start_commit),
     formatLine('wiki_exposed', start.wiki_exposed),
   ];
+  if (start.delivery !== undefined) lines.push(formatLine('delivery', start.delivery));
+  if (start.skills_offered !== undefined) lines.push(formatLine('skills_offered', start.skills_offered));
   return serialize(lines, start.extra, START_KNOWN);
 }
 
 export function parseStart(bytes: Buffer): AttemptStart {
   const { values, extra } = frontmatter(bytes, START_KNOWN);
+  const delivery = values.get('delivery');
+  const offered = offeredSkills(values.get('skills_offered'));
   return {
     assignee: str(values, 'assignee'),
     actor: obj(values, 'actor'),
@@ -158,8 +183,24 @@ export function parseStart(bytes: Buffer): AttemptStart {
     at: str(values, 'at'),
     start_commit: str(values, 'start_commit'),
     wiki_exposed: values.get('wiki_exposed') === true,
+    ...(delivery === 'on' || delivery === 'off' ? { delivery } : {}),
+    ...(offered !== undefined ? { skills_offered: offered } : {}),
     extra,
   };
+}
+
+/** The offered skills a `start.md` holds: an entry it can't read is skipped. */
+function offeredSkills(value: unknown): OfferedSkill[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const offered: OfferedSkill[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue;
+    const { name, version, hash } = item as { name?: unknown; version?: unknown; hash?: unknown };
+    if (typeof name !== 'string' || typeof version !== 'string') continue;
+    if (version !== 'unknown') offered.push({ name, version });
+    else if (typeof hash === 'string') offered.push({ name, version, hash });
+  }
+  return offered;
 }
 
 const END_KNOWN = new Set(['ended', 'ended_by', 'at', 'debrief', 'worker_kind', 'wiki_exposed', 'field_changes', 'requested']);

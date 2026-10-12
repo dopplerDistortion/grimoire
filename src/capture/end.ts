@@ -12,8 +12,8 @@ import type { AttemptRecord, TrackerDraft, TrackerView } from '../tracker';
 import { boundContexts, readBindings, type Binding } from './bindings';
 import { CLAUDE_CODE_READER_VERSION, cutClaudeCode, readClaudeCodeTranscript } from './claude-code';
 import { defaultClaudeConfigDir, findClaudeTranscript } from './claude-code/roots';
-import { CODEX_READER_VERSION, cutCodex } from './codex';
-import { defaultCodexHome } from './codex/roots';
+import { CODEX_READER_VERSION, cutCodex, readCodexTranscript } from './codex';
+import { defaultCodexHome, findCodexTranscript } from './codex/roots';
 import { CHORES_AGENT, emptyCut, isChoresContext, type BindingCall, type Cut, type CutEvidence } from './cut';
 import type { EvidenceSource } from './evidence';
 import { pathRewriter, type PathSpellings } from './paths';
@@ -28,7 +28,8 @@ import {
   type SessionRecord,
   withoutText,
 } from './session-record';
-import { isCall, type TranscriptStamp } from './steps';
+import { isCall, type Step, type Transcript, type TranscriptStamp } from './steps';
+import { eventSkillReads, skillVersionTexts, transcriptSkillReads, type SkillRead, type SkillVersionTexts } from './skill-facts';
 import { revealedRoot, revealedRoots } from './transcript-roots';
 
 /** The excerpt mode (spec §14 The setting): `excerpts`, `facts` or `none`. */
@@ -69,8 +70,10 @@ export interface EndingCall {
   readonly at: string;
 }
 
-/** A `skill_read` event as the machine-local store keeps it (spec §6). */
+/** A `skill_read` event as the machine-local store keeps it (spec §6, §8: `{skill, version, at, actor, nonce}`). */
 export interface SkillReadEvent {
+  readonly skill?: unknown;
+  readonly version?: unknown;
   readonly at: string;
   readonly actor: Readonly<Record<string, unknown>>;
 }
@@ -174,6 +177,11 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
   const picked = sweep ? [...sweep.only] : [];
   const position = (t: Target) => picked.indexOf(t.key);
   const ordered = [...targets].sort((a, b) => rank(a) - rank(b) || position(a) - position(b));
+  // What transcript reads are matched against: every version the ledger records; null when they couldn't be read
+  // in time, which leaves every transcript scan's facts partial. `none` mode opens no transcript.
+  const versions: SkillVersionTexts | null =
+    input.mode === 'none' ? new Map() : await beforeDeadline(skillVersionTexts(input.view, input.scanner), deadline, null);
+  const bound = new Set(found.flatMap((target) => (target.context !== null ? [target.context] : [])));
 
   const captures: ContextCapture[] = [];
   const claimed: string[] = [];
@@ -186,7 +194,7 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
       captures.push({ key: target.key, record: placeholder(target, cutAt), cut: false, row: false });
       continue;
     }
-    const cut = new ContextCut(input, target, deadline, claimed, claudeDirs);
+    const cut = new ContextCut(input, target, deadline, claimed, versions, bound, claudeDirs);
     const record = Date.now() >= deadline ? null : await beforeDeadline(target.calling && traceable(target) ? cut.waitingForFlush(started) : cut.once(), deadline, null);
     await sweep?.afterCut?.();
     // A chores context's transcript is excluded from excerpts and fact scans (spec §14): it gets no record.
@@ -374,6 +382,31 @@ async function beforeDeadline<T, F>(work: Promise<T>, deadline: number, fallback
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Reads the own transcript of a subagent launched in a context's window, by its id; null when it can't be found. */
+type SubagentReader = (agentId: string) => Promise<Transcript | null>;
+
+/** A context's cut, where it was looked for, and how to reach the subagents its window launched. */
+interface CutFound {
+  readonly cut: Cut;
+  readonly roots: string[];
+  readonly source: EvidenceSource | null;
+  readonly subagents?: SubagentReader;
+}
+
+/** A context's skill reads (spec §14 Facts: Read), and whether every transcript the scan covers was read. */
+interface SkillFacts {
+  readonly reads: SkillRead[];
+  readonly complete: boolean;
+  /** The subagents launched in the window, by id: their own `skill_read` events count for the context too. */
+  readonly launched: ReadonlySet<string>;
+}
+
+/** The subagents a window launched, by id, other than `grimoire-chores` ones (whose transcripts are never scanned). */
+function launchedSubagents(steps: readonly Step[]): string[] {
+  const chores = new Set(steps.flatMap((step) => (step.kind === 'subagent_launch' && step.agentType === CHORES_AGENT ? [step.id] : [])));
+  return steps.flatMap((step) => (step.kind === 'subagent_result' && step.agentId !== null && !chores.has(step.id) ? [step.agentId] : []));
+}
+
 /** Cutting one context: locating its transcript, the cut, and the record it gives. */
 class ContextCut {
   /** The call ids its window holds, once cut: no later excerpt of the trace may hold them. */
@@ -392,6 +425,10 @@ class ContextCut {
     private readonly target: Target,
     private readonly deadline: number,
     private readonly claimed: readonly string[],
+    /** Null when the ledger's versions couldn't be read: reads are then of an unknown version, and the facts partial. */
+    private readonly versions: SkillVersionTexts | null,
+    /** The contexts bound to the attempt: a subagent among them is scanned for its own record, never again for its launcher's. */
+    private readonly bound: ReadonlySet<string>,
     /** Other Claude Code config folders hooks revealed: searched when the transcript isn't in the default one. */
     private readonly claudeDirs: readonly string[] = [],
   ) {
@@ -435,9 +472,10 @@ class ContextCut {
     if (input.mode === 'none') return { record: this.factsOnly('off'), callIds: null };
     if (family !== 'claude-code' && family !== 'codex') return { record: this.factsOnly('no_transcript'), callIds: null };
     try {
-      const { cut, roots, source } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
+      const { cut, roots, source, subagents } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
       if (isChoresContext(cut)) this.chores = true;
-      return { record: this.fromCut(cut, source, roots), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}) };
+      const facts = cut.window === null || this.chores ? null : await beforeDeadline(this.scanFacts(cut, subagents), this.deadline, null);
+      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}) };
     } catch {
       // A reader that throws is one grimoire can't trust on this transcript.
       const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };
@@ -464,7 +502,7 @@ class ContextCut {
    * its tool-use id; else the transcript holding the context's tool-use ids;
    * else the spawn-env session, trusted only if its transcript holds the call.
    */
-  private async cutClaude(): Promise<{ cut: Cut; roots: string[]; source: EvidenceSource | null }> {
+  private async cutClaude(): Promise<CutFound> {
     const { input, target } = this;
     const configDir = input.options?.claudeConfigDir ?? defaultClaudeConfigDir();
     const projects = path.join(configDir, 'projects');
@@ -529,7 +567,12 @@ class ContextCut {
     });
     // The spawn-env session counts only if its transcript holds the call: one past its flushed end doesn't.
     if (source === 'spawn-env' && cut.status === 'cut' && cut.window === null) return { cut: emptyCut(cut, 'unmatched'), roots: [], source };
-    return { cut, roots: cut.status === 'not_found' ? [location.transcript] : [], source };
+    const transcript = location.transcript;
+    const subagents: SubagentReader = async (agentId) => {
+      const read = await readClaudeCodeTranscript(transcript, { agentId });
+      return read.found ? read.transcript : null;
+    };
+    return { cut, roots: cut.status === 'not_found' ? [location.transcript] : [], source, subagents };
   }
 
   /** Finds a transcript in the config folder capture looks in, then in each one hooks revealed (spec §14 Roots). */
@@ -543,7 +586,7 @@ class ContextCut {
   }
 
   /** A Codex context: its thread's own transcript, searched by thread id in the hook-revealed home, else the default one. */
-  private async cutCodex(): Promise<{ cut: Cut; roots: string[]; source: EvidenceSource | null }> {
+  private async cutCodex(): Promise<CutFound> {
     const { input, target } = this;
     const revealed = target.session !== null ? await revealedRoot(input.store, target.session).catch(() => undefined) : undefined;
     const codexHome = (revealed?.client === 'codex' ? revealed.root : undefined) ?? input.options?.codexHome ?? defaultCodexHome();
@@ -562,18 +605,84 @@ class ContextCut {
       paths: this.paths,
       scanner: input.scanner,
     });
-    return { cut, roots: cut.status === 'not_found' ? [codexHome] : [], source: target.source };
+    const deadline = this.deadline;
+    const subagents: SubagentReader = async (thread) => {
+      const found = await findCodexTranscript({ codexHome, context: thread, deadline });
+      if (found.status !== 'found') return null;
+      const read = await readCodexTranscript(found.file);
+      return read.found ? read.transcript : null;
+    };
+    return { cut, roots: cut.status === 'not_found' ? [codexHome] : [], source: target.source, subagents };
   }
 
-  private fromCut(cut: Cut, source: EvidenceSource | null, roots: readonly string[]): SessionRecord {
+  /**
+   * The skill reads of a cut context (spec §14 Facts: Read): its whole
+   * window, before the excerpt's cut, and the transcripts of the subagents
+   * launched in it, found by id, recursively, skipping `grimoire-chores`
+   * ones. A subagent transcript that can't be read, or ledger versions that
+   * couldn't be read to match reads against, leave the facts incomplete.
+   */
+  private async scanFacts(cut: Cut, subagents: SubagentReader | undefined): Promise<SkillFacts> {
+    const versions = this.versions ?? new Map();
+    const reads = transcriptSkillReads(cut, cut.steps, versions);
+    const queue = launchedSubagents(cut.steps);
+    const launched = new Set<string>();
+    let complete = this.versions !== null;
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (launched.has(id) || this.bound.has(id)) continue;
+      launched.add(id);
+      const transcript = subagents ? await subagents(id).catch(() => null) : null;
+      if (transcript === null) {
+        complete = false;
+        continue;
+      }
+      if (transcript.agentType === CHORES_AGENT) continue;
+      const steps = transcript.steps.slice(transcript.copiedSteps);
+      reads.push(...transcriptSkillReads(transcript, steps, versions));
+      queue.push(...launchedSubagents(steps));
+    }
+    return { reads, complete, launched };
+  }
+
+  /**
+   * This context's `skill_read` events from `since` (epoch ms) to the ending
+   * call, and those of the subagents its window launched: each credited to
+   * the context that made it.
+   */
+  private eventReads(since: number, launched: ReadonlySet<string>, own: { session: string | null; context: string | null }): SkillRead[] {
+    const { input, target } = this;
+    const ended = Date.parse(input.call.at);
+    return input.skillReads.flatMap((event) => {
+      const at = Date.parse(event.at);
+      if (!(at >= since && at <= ended)) return [];
+      const actor = event.actor as Actor;
+      if (sessionKey(actor) === target.key) return eventSkillReads([event], own);
+      const context = contextOf(actor);
+      const fromSubagent = own.session !== null && actor.session === own.session && context !== null && launched.has(context);
+      return fromSubagent ? eventSkillReads([event], { session: own.session, context }) : [];
+    });
+  }
+
+  /** Where this context's `skill_read` events start counting when no window was found. */
+  private eventsSince(): number {
+    return eventFloor(this.input, this.target.key);
+  }
+
+  private fromCut(cut: Cut, source: EvidenceSource | null, roots: readonly string[], scanned: SkillFacts | null = null): SessionRecord {
     const { input } = this;
     const windowFound = cut.window !== null;
     const failed = cut.status === 'not_found' || cut.status === 'unreadable' || cut.status === 'unmatched' || cut.status === 'budget';
     const excerpt: RecordExcerptStatus = failed || input.mode === 'excerpts' ? cut.status : 'off';
     const notes: RecordNote[] = [...cut.notes];
     if (excerpt === 'off' && input.capped) notes.push('capped');
-    // No window (every binding call past the flushed end): nothing was scanned, and nothing to show yet.
-    const facts: FactsStatus = failed ? (cut.status as FactsStatus) : windowFound ? 'scanned' : 'partial';
+    // No window (every binding call past the flushed end): nothing was scanned, and nothing to show yet. A scan the
+    // budget overtook, or one that couldn't read a subagent launched in the window, is partial.
+    const facts: FactsStatus = failed ? (cut.status as FactsStatus) : windowFound && scanned?.complete === true ? 'scanned' : 'partial';
+    const own = { session: cut.session === '' ? null : cut.session, context: cut.context === '' ? null : cut.context };
+    // Events count over the span the transcript scan covers: the window, from the prompt opening its first turn.
+    const since = windowFound ? Date.parse(cut.window!.start.at) : this.eventsSince();
+    const reads = [...(scanned?.reads ?? []), ...this.eventReads(since, scanned?.launched ?? new Set(), own)];
     const text = excerpt === 'cut' && windowFound ? cut.excerpt : null;
     return {
       client: cut.client.name,
@@ -590,7 +699,7 @@ class ContextCut {
       excerpt,
       excerpt_notes: notes,
       facts,
-      skills_read: [],
+      skills_read: byTime(reads),
       commits: [],
       reach: cut.reach,
       cut_at: input.call.at,
@@ -607,11 +716,11 @@ class ContextCut {
    */
   private factsOnly(excerpt: 'off' | 'no_transcript'): SessionRecord {
     const { input, target } = this;
-    const opened = Date.parse(input.attempt?.start.at ?? input.call.at);
+    const since = this.eventsSince();
     const ended = Date.parse(input.call.at);
     const events = input.skillReads.filter((event) => {
       const at = Date.parse(event.at);
-      return at >= opened && at <= ended && sessionKey(event.actor as Actor) === target.key;
+      return at >= since && at <= ended && sessionKey(event.actor as Actor) === target.key;
     });
     const latest = events.reduce<string | null>((last, event) => (last === null || Date.parse(event.at) > Date.parse(last) ? event.at : last), null);
     return {
@@ -619,9 +728,33 @@ class ContextCut {
       excerpt,
       excerpt_notes: excerpt === 'off' && input.capped ? ['capped'] : [],
       facts: 'events_only',
+      skills_read: byTime(this.eventReads(since, new Set(), { session: target.session, context: target.context })),
       reach: latest === null ? null : { at: latest, ref: String(events.length) },
     };
   }
+}
+
+/**
+ * Where a context's `skill_read` events start counting when no window says
+ * which turn its work began in (epoch ms): when the attempt opened, for a
+ * context bound later. The context that opened it may have read a skill in
+ * the turn before its claim, and an unclaimed close's attempt opens only at
+ * the close: theirs count from the context's previous ending, the issue's
+ * previous attempt's end, or the issue's creation, whichever came last.
+ */
+function eventFloor(input: EndCaptureInput, key: string): number {
+  const { attempt, view } = input;
+  const ended = Date.parse(input.call.at);
+  if (attempt !== null && sessionKey(attempt.start.actor as Actor) !== key) return Date.parse(attempt.start.at);
+  let floor = Date.parse(view.issue(input.issue)?.created_at ?? '');
+  if (!Number.isFinite(floor)) floor = -Infinity;
+  for (const other of view.allAttempts()) {
+    if (other.end === null || other.id === attempt?.id) continue;
+    if (other.issue !== input.issue && !other.sessions.has(key)) continue;
+    const at = Date.parse(other.end.at);
+    if (at > floor && at <= ended) floor = at;
+  }
+  return attempt === null ? floor : Math.min(floor, Date.parse(attempt.start.at));
 }
 
 function emptyRecord(target: Target, cutAt: string): SessionRecord {
@@ -708,4 +841,9 @@ export async function sealSessionRecords(
     }
   }
   return written;
+}
+
+/** Reads in the order they were made; reads made at the same instant keep their order. */
+function byTime(reads: readonly SkillRead[]): SkillRead[] {
+  return [...reads].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
