@@ -597,10 +597,14 @@ describe('concurrent clones', () => {
 
     // The background syncs alone: no explicit sync runs.
     const remote = (await remoteTracker(world.a))!;
-    for (const [checkout, ctx] of [[world.a, grimoire.ctx], [world.b, bobCtx]] as const) {
+    const clones = [[world.a, grimoire.ctx], [world.b, bobCtx]] as const;
+    // Both clones' sync status first: a sync that failed names its cause before any list falls short.
+    for (const [checkout, ctx] of clones) {
+      expect(await ok(grimoire.core.call('sync_status', {}, ctx))).toMatchObject({ failure: null, pending_since: null });
       // Asked of the remote, which has every object: the remote holds this clone's tip.
       expect(await gitResult(world.remote, ['merge-base', '--is-ancestor', (await trackerTip(checkout))!, remote])).toMatchObject({ code: 0 });
-      expect(await ok(grimoire.core.call('sync_status', {}, ctx))).toMatchObject({ failure: null, pending_since: null });
+    }
+    for (const [checkout, ctx] of clones) {
       await checkout.git(['fetch', '--quiet']);
       const rows = (await ok(grimoire.core.call('list', { status: 'done' }, ctx))).rows.map((row) => row.id);
       expect(rows.sort()).toEqual([...closed].sort());
@@ -663,5 +667,32 @@ describe('concurrent clones', () => {
     await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), hook, { mode: 0o755 });
 
     await expectFoldedPush(world, grimoire, fromBob);
+  });
+
+  test('a push that meets another push holding the remote’s ref lock fetches, folds and pushes again, with no failure or backoff', async ({
+    world,
+    grimoire,
+  }) => {
+    const { fromBob, moveOnce } = await raceSetup(world, grimoire);
+    // Bob's push holds the lock on the remote's grimoire/tracker while Alice's tries to take it, then lands.
+    const lock = path.join(world.remote, 'refs', 'heads', 'grimoire', 'tracker.lock').replaceAll('\\', '/');
+    const flag = path.join(world.root, 'locked').replaceAll('\\', '/');
+    const script = path.join(world.root, 'locked.sh').replaceAll('\\', '/');
+    await writeFile(
+      script,
+      [
+        '#!/bin/sh',
+        `if [ -e "${flag}" ]; then exec git receive-pack "$1"; fi`,
+        `: > "${flag}"; : > "${lock}"`,
+        'git receive-pack "$1"; code=$?',
+        `rm -f "${lock}"; ${moveOnce('$1')}`,
+        'exit $code',
+        '',
+      ].join('\n'),
+    );
+    await world.a.git(['config', 'remote.origin.receivepack', `sh ${script}`]);
+
+    await expectFoldedPush(world, grimoire, fromBob);
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
   });
 });
