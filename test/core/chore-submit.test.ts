@@ -11,8 +11,22 @@ import { describe, expect } from 'vitest';
 import type { CallContext, ChoreBrief, ChoreReadResult, Core } from '../../src/core';
 import { servedLog } from '../../src/knowledge/chores';
 import { MachineLocalStore } from '../../src/machine-local';
-import { choreAgent, Clock, DEBRIEF, terminal } from './chore-support';
-import { coreTest as test, T0, trackerFile, trackerTip, TRACKER_REF, type Grimoire } from './support';
+import type { Clone, GitWorld } from '#harness';
+import { openTracker } from '../../src/tracker';
+import { choreAgent, Clock, DEBRIEF, putPage, terminal } from './chore-support';
+import {
+  agentContext,
+  commitToTracker,
+  coreTest as test,
+  fetchTracker,
+  fetchTrackerFrom,
+  pushTracker,
+  T0,
+  trackerFile,
+  trackerTip,
+  TRACKER_REF,
+  type Grimoire,
+} from './support';
 
 function ok<T>(outcome: { ok: true; result: T } | { ok: false; error: unknown }): T {
   if (!outcome.ok) throw new Error(`call failed: ${JSON.stringify(outcome.error)}`);
@@ -334,6 +348,177 @@ describe('chore_submit: the fail-closed guards', () => {
     ok(await d.core.call('chore_submit', { run: brief.run, result }, d.chores));
     const kept = await store(world).records.list<{ text?: string; reasons: string[] }>('chore-results');
     expect(kept.map((entry) => entry.value)).toMatchObject([{ reasons: ['missing_pair'], text: JSON.stringify(result) }]);
+  });
+});
+
+/** Clone b takes clone a's tracker as its own: from here the two write apart until they fold. */
+async function bothClones(world: GitWorld): Promise<void> {
+  await pushTracker(world.a);
+  await fetchTracker(world.b);
+  await world.b.git(['update-ref', TRACKER_REF, 'refs/remotes/origin/grimoire/tracker']);
+}
+
+async function fold(checkout: Clone): Promise<void> {
+  const tracker = await openTracker(checkout.dir);
+  try {
+    await tracker.fold({ author: { ...checkout.identity }, actor: { kind: 'human', client: 'cli', nonce: 'fold' } });
+  } finally {
+    await tracker.close();
+  }
+}
+
+describe('chore_submit: clones, late submits and replays', () => {
+  test('two clones compiling the same batch merge their records by union: both pages, both runs in the log, the pairs compiled', async ({
+    world,
+    grimoire,
+  }) => {
+    const d = await due(grimoire, { fails: 2, passes: 0 });
+    await bothClones(world);
+    const onB = { core: grimoire.makeCore({ clock: d.clock.now }), chores: await choreAgent(agentContext(world.b)) };
+    const runA = await startAndRead(d);
+    const runB = await startAndRead({ ...d, ...onB });
+    expect(runB.pairs).toEqual(runA.pairs);
+
+    ok(await d.core.call('chore_submit', { run: runA.run, result: { pages: [create('a-page')], consumption: allTo(runA, 'a-page') } }, d.chores));
+    ok(await onB.core.call('chore_submit', { run: runB.run, result: { pages: [create('b-page')], consumption: allTo(runB, 'b-page') } }, onB.chores));
+    await fetchTrackerFrom(world.a, world.b);
+    await fold(world.a);
+
+    const tip = (await trackerTip(world.a))!;
+    const records = (await world.a.git(['ls-tree', '-r', '--name-only', tip, 'knowledge/chore-runs/'])).split('\n').sort();
+    expect(records).toEqual([runA.run, runB.run].map((run) => `knowledge/chore-runs/${run[3]}/${run[4]}/${run}.md`).sort());
+    const log = (await trackerFile(world.a, tip, 'knowledge/wiki/log.md')).split('\n').filter((line) => line.startsWith('- '));
+    expect(log.sort()).toEqual(
+      [
+        `- ${d.clock.now().toISOString()}: Wiki Maintainer run ${runA.run} compiled 2 traces into 1 page: [a-page](pages/a-page.md)`,
+        `- ${d.clock.now().toISOString()}: Wiki Maintainer run ${runB.run} compiled 2 traces into 1 page: [b-page](pages/b-page.md)`,
+      ].sort(),
+    );
+    const index = await trackerFile(world.a, tip, 'knowledge/wiki/index.md');
+    expect(index).toContain('[About a-page](pages/a-page.md)');
+    expect(index).toContain('[About b-page](pages/b-page.md)');
+    expect(await d.core.call('chore_start', { kind: 'wiki-maintainer' }, d.chores)).toMatchObject({ ok: false, error: { code: 'NOT_DUE' } });
+  });
+
+  test('a late submit is accepted while nothing newer started and its inputs are unconsumed; after a newer run, or a compile of its pairs, RUN_SUPERSEDED', async ({
+    world,
+    grimoire,
+  }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const result = (brief: ChoreBrief) => ({ pages: [], consumption: allNoPattern(brief) });
+
+    // The lease lapsed, and a newer run started: the old one is superseded.
+    const old = await startAndRead(d);
+    d.clock.advance(1.1);
+    const newer = await startAndRead(d);
+    const before = await trackerTip(world.a);
+    expect(await d.core.call('chore_submit', { run: old.run, result: result(old) }, d.chores)).toMatchObject({ ok: false, error: { code: 'RUN_SUPERSEDED' } });
+    expect(await trackerTip(world.a)).toBe(before);
+
+    // The newer run's lease lapsed too, but nothing started since and its inputs are unconsumed: accepted.
+    d.clock.advance(1.1);
+    expect(ok(await d.core.call('chore_submit', { run: newer.run, result: result(newer) }, d.chores))).toMatchObject({ result: 'compiled' });
+
+    // Another clone compiled a late run's pairs meanwhile: superseded.
+    d.clock.advance(1);
+    await work(d.core, grimoire.ctx, 'fail', 'Later fail');
+    d.clock.advance(25);
+    const late = await startAndRead(d);
+    await bothClones(world);
+    const onB = { core: grimoire.makeCore({ clock: d.clock.now }), chores: await choreAgent(agentContext(world.b)) };
+    const there = await startAndRead({ ...d, ...onB });
+    ok(await onB.core.call('chore_submit', { run: there.run, result: result(there) }, onB.chores));
+    await fetchTrackerFrom(world.a, world.b);
+    d.clock.advance(1.1);
+    expect(await d.core.call('chore_submit', { run: late.run, result: result(late) }, d.chores)).toMatchObject({
+      ok: false,
+      error: { code: 'RUN_SUPERSEDED', message: expect.stringContaining(there.run) },
+    });
+  });
+
+  test('a retried submit replays its answer: after a compile nothing is written again; a refused submit retried with its key keeps the fix-up', async ({
+    world,
+    grimoire,
+  }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const bad = { run: brief.run, result: { pages: [], consumption: [] }, idempotency_key: 'k1' };
+    const first = ok(await d.core.call('chore_submit', bad, d.chores));
+    expect(ok(await d.core.call('chore_submit', bad, d.chores))).toEqual({ ...first, replayed: true });
+
+    const good = { run: brief.run, result: { pages: [], consumption: allNoPattern(brief) }, idempotency_key: 'k2' };
+    const compiled = ok(await d.core.call('chore_submit', good, d.chores));
+    expect(compiled).toMatchObject({ result: 'compiled' });
+    const tip = await trackerTip(world.a);
+    expect(ok(await d.core.call('chore_submit', good, d.chores))).toEqual({ ...compiled, replayed: true });
+    expect(ok(await d.core.call('chore_submit', { run: brief.run, result: {} }, d.chores))).toEqual({ ...compiled, replayed: true });
+    expect(await trackerTip(world.a)).toBe(tip);
+  });
+
+  test('accepted and failed submits ask for the automatic sync of their commit; a refused one does not', async ({ world, grimoire }) => {
+    const asked: string[] = [];
+    const d = await due(grimoire, { fails: 1, passes: 0 }, { autoSync: ({ tip }) => void asked.push(tip) });
+    const before = asked.length;
+    const brief = await startAndRead(d);
+    ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: [] } }, d.chores));
+    expect(asked.length).toBe(before);
+    ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: [] } }, d.chores));
+    const failedAt = await trackerTip(world.a);
+    const again = await startAndRead(d);
+    ok(await d.core.call('chore_submit', { run: again.run, result: { pages: [], consumption: allNoPattern(again) } }, d.chores));
+    await d.core.close();
+    expect(asked.slice(before)).toEqual([failedAt, await trackerTip(world.a)]);
+  });
+});
+
+describe('chore_submit: citations and conflicted pages', () => {
+  test('only served items may be cited: an unread trace, or an update of an unread page, is refused', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    await putPage(world.a, world.a, 'known', []);
+    const brief = ok(await d.core.call('chore_start', {}, d.chores));
+    const refused = ok(
+      await d.core.call(
+        'chore_submit',
+        { run: brief.run, result: { pages: [{ op: 'update', slug: 'known', base_hash: 'x', body: 'How known goes wrong, again.\n' }], consumption: allTo(brief, 'known') } },
+        d.chores,
+      ),
+    );
+    expect(refused).toMatchObject({ result: 'invalid', reasons: ['unserved'] });
+    expect(Object.keys(refused.problems!).sort()).toEqual(['consumption[0].pair', 'consumption[0].slugs', 'pages[0].slug']);
+  });
+
+  test('a reconciling update clears the conflicted mark, records the side it resolved, keeps both sides’ sources and measures the shrink against the larger side', async ({
+    world,
+    grimoire,
+  }) => {
+    const clock = new Clock(T0);
+    const core = grimoire.makeCore({ clock: clock.now });
+    const chores = await choreAgent(grimoire.ctx);
+    await putPage(world.a, world.a, 'port-binding', ['at-aaaaaa']);
+    const sideBody = 'The other clone’s much longer account of the port binding failure.\n'.repeat(60);
+    const side = `---\nslug: "port-binding"\nfields: ["body"]\nsources: ["at-bbbbbb"]\nat: "${T0.toISOString()}"\n---\n${sideBody}`;
+    const sideId = createHash('sha256').update(side).digest('hex');
+    await commitToTracker(world.a, { [`knowledge/wiki/conflicts/port-binding/${sideId}.md`]: side });
+
+    const brief = ok(await core.call('chore_start', {}, chores));
+    expect(brief.conflicted).toEqual(['port-binding']);
+    const items = (await readAll(core, chores, brief.run)).flatMap((page) => page.items);
+    const version = items.find((item) => item.item === 'page:port-binding')!.version as string;
+    const update = (body: string) => ({ run: brief.run, result: { pages: [{ op: 'update', slug: 'port-binding', base_hash: version, body }], consumption: [] } });
+
+    const shrunk = ok(await core.call('chore_submit', update(sideBody.slice(0, Math.floor(sideBody.length * 0.7))), chores));
+    expect(shrunk).toMatchObject({ result: 'invalid', reasons: ['page_shrinks'] });
+    const reconciled = ok(await core.call('chore_submit', update(sideBody.slice(0, Math.ceil(sideBody.length * 0.8))), chores));
+
+    expect(reconciled).toMatchObject({ result: 'compiled', pages: 1 });
+    expect(reconciled.summary).toBe(`grimoire chores: compile done, 0 traces, 1 page (0 created, 1 updated), 1 conflict resolved; run ${brief.run}`);
+    const tip = (await trackerTip(world.a))!;
+    expect(await world.a.git(['ls-tree', '-r', '--name-only', tip, 'knowledge/wiki/conflicts/'])).toBe('');
+    expect(await trackerFile(world.a, tip, 'knowledge/wiki/pages/port-binding.md')).toContain('sources: ["at-aaaaaa","at-bbbbbb"]');
+    expect(await trackerFile(world.a, tip, `knowledge/chore-runs/${brief.run[3]}/${brief.run[4]}/${brief.run}.md`)).toContain(`resolved: ["port-binding/${sideId}"]`);
+    expect(await trackerFile(world.a, tip, 'knowledge/wiki/log.md')).toContain(`compiled 0 traces into 1 page: [port-binding](pages/port-binding.md), resolving 1 conflict`);
+    const listed = ok(await core.call('wiki_list', {}, terminal(grimoire.ctx)));
+    expect(listed.pages).toMatchObject([{ slug: 'port-binding', conflicted: false }]);
   });
 });
 
