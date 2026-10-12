@@ -11,6 +11,7 @@ import type { AssignResult, DeleteResult, OutcomeSetResult, ReassignResult, Reop
 import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
 import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult } from './skills';
+import type { SkillDiscardResult, SkillRecordResult, SkillStraysResult } from './stray-edits';
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
 import type { PurgeSessionResult, PurgeTraceResult } from './purge';
@@ -131,6 +132,9 @@ export interface OpResults {
   skill_read: SkillReadResult;
   skill_edit: SkillEditResult;
   skill_show: SkillShowResult;
+  skill_strays: SkillStraysResult;
+  skill_record: SkillRecordResult;
+  skill_discard: SkillDiscardResult;
   wiki_list: WikiListResult;
   wiki_show: WikiShowResult;
   wiki_edit: WikiEditResult;

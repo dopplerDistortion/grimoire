@@ -41,6 +41,21 @@ export class Caches {
     return value;
   }
 
+  /** The value stored at exactly `version`, or undefined: a cache whose validity the caller judges (a key inside the value). */
+  async read<T>(name: string, version: number): Promise<T | undefined> {
+    const stored = parseCache(await readTextIfExists(this.file(name)), name);
+    return stored?.cache_version === version ? (stored.value as T) : undefined;
+  }
+
+  /** Stores `value` at `version`, unless a newer release's version of the cache is there (it stays for that release). */
+  async put<T>(name: string, version: number, value: T): Promise<void> {
+    const file = this.file(name);
+    const stored = parseCache(await readTextIfExists(file), name);
+    if (stored && stored.cache_version > version) return;
+    const doc: CacheFile = { name, cache_version: version, value };
+    await writeFileAtomic(file, `${JSON.stringify(doc)}\n`);
+  }
+
   /** Drops the cache, so the next `get` rebuilds it. */
   async invalidate(name: string): Promise<void> {
     await removeFile(this.file(name));

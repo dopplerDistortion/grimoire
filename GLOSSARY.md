@@ -86,6 +86,14 @@ _Avoid_: Skill mirror, skill copy, skill shim
 The evolved-skill copies and skill stubs grimoire writes into every worktree that pins a release, byte for byte from what is served, each in a folder that ignores itself; it exists only where a pin is, nobody commits it, and a path git tracks is never written over.
 _Avoid_: Generated files, build output, cache
 
+**Served set**:
+The evolved skills agents get in a clone right now, each at its served version, derived from the skill ledger in the merged tracker view and the delivery switch; each machine caches it, keyed by the tracker tip pair.
+_Avoid_: Active skills, current skills, skill list
+
+**SessionStart fast path**:
+The SessionStart hook's own pass over its worktree's generated output: before the client lists skills, it writes whatever differs from the served set, under the worktree's lease, and never removes or moves anything.
+_Avoid_: Hook reconcile, quick refresh
+
 ### Tracking
 
 **Issue**:
@@ -183,6 +191,18 @@ _Avoid_: Scan, crawl, harvest
 **Late record**:
 A session record that reaches an attempt through a fold after another clone ended it: admitted when it was cut before that end, dropped and counted when cut after it.
 _Avoid_: Stray record, orphan record
+
+**Observed commit**:
+A commit a bound context was seen making: git's creation line in the result of its own commit, cherry-pick or revert command (or a subagent's it launched), or a creating entry in its worktree's HEAD reflog timed inside one of its tool calls; recorded in that context's session record, never inferred from hashes a log or show printed.
+_Avoid_: Attempt commit, session commit, detected commit
+
+**Referenced commit**:
+A commit on any branch of the clone whose `Refs:` trailer names the issue, made while the attempt was open; recorded in the trace's `end.md` beside the observed commits of its session records.
+_Avoid_: Linked commit, mentioned commit
+
+**Agent skill edit**:
+A commit that changes the generated evolved-skill copies (`.grimoire/skills/**`) made by an agent: an observed commit of an agent context, or a referenced commit carrying a known agent co-author trailer (marked agent-assisted in a human attempt); a merge counts only when a merged copy matches neither parent.
+_Avoid_: Skill commit, stray commit
 
 **Excerpt mode**:
 The store setting (`excerpts`, `facts` or `none`) that decides what capture ever commits: excerpt text and facts, facts only, or nothing read from a transcript at all; a machine may only lower it for its own sessions.

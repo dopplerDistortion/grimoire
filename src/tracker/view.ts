@@ -169,7 +169,7 @@ export interface NewComment {
 /** An attempt a write opens; the draft adds its time and start commit. */
 export type NewAttempt = Omit<AttemptStart, 'at' | 'start_commit' | 'extra'>;
 /** The seal a write puts on an open attempt; the draft adds its time. */
-export type NewEnd = Omit<AttemptEnd, 'at' | 'extra'>;
+export type NewEnd = Omit<AttemptEnd, 'at' | 'extra' | 'commits'> & { readonly commits?: AttemptEnd['commits'] };
 /** A verdict a write records; the draft adds its time. */
 export type NewOutcome = Omit<AttemptOutcome, 'at' | 'extra'>;
 /** A purge tombstone a write records; the draft adds its time. */
@@ -933,7 +933,7 @@ export class Draft implements TrackerDraft {
   sealAttempt(handle: string, end: NewEnd): void {
     const attempt = this.attempt(handle);
     if (!attempt || attempt.end) throw new Error(`attempt ${handle} is not open`);
-    this.sealed.set(handle, { ...end, at: this.now.toISOString(), extra: {} });
+    this.sealed.set(handle, { ...end, commits: end.commits ?? [], at: this.now.toISOString(), extra: {} });
   }
 
   putOutcome(handle: string, outcome: NewOutcome): void {

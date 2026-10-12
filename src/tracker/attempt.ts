@@ -67,6 +67,14 @@ export interface AttemptEnd {
   readonly wiki_exposed: boolean;
   /** Issue fields changed during the attempt, its own close included. */
   readonly field_changes: readonly string[];
+  /**
+   * The referenced commits (spec §14 Facts: Commits): commits on any branch
+   * whose `Refs:` trailer names the issue, committed inside the attempt, each
+   * `{hash, via: "referenced", at, subject, files, added, removed}` (a hash
+   * the sealing clone lacked: bare), flagged `agent_skill_edit` or
+   * `agent_assisted`. Observed commits live in the session records.
+   */
+  readonly commits: readonly unknown[];
   /** For a `superseded` seal: the ending the call asked for (replays match on it). */
   readonly requested?: string;
   readonly extra: Readonly<Record<string, string>>;
@@ -150,6 +158,10 @@ const obj = (values: Values, key: string): Record<string, unknown> => {
   const value = values.get(key);
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 };
+const objects = (values: Values, key: string): Record<string, unknown>[] => {
+  const value = values.get(key);
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item)) : [];
+};
 const strings = (values: Values, key: string): string[] => {
   const value = values.get(key);
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
@@ -203,7 +215,7 @@ function offeredSkills(value: unknown): OfferedSkill[] | undefined {
   return offered;
 }
 
-const END_KNOWN = new Set(['ended', 'ended_by', 'at', 'debrief', 'worker_kind', 'wiki_exposed', 'field_changes', 'requested']);
+const END_KNOWN = new Set(['ended', 'ended_by', 'at', 'debrief', 'worker_kind', 'wiki_exposed', 'field_changes', 'commits', 'requested']);
 
 export function serializeEnd(end: AttemptEnd): Buffer {
   const lines = [
@@ -214,6 +226,7 @@ export function serializeEnd(end: AttemptEnd): Buffer {
     formatLine('worker_kind', end.worker_kind),
     formatLine('wiki_exposed', end.wiki_exposed),
     formatLine('field_changes', end.field_changes),
+    formatLine('commits', end.commits),
   ];
   if (end.requested !== undefined) lines.push(formatLine('requested', end.requested));
   return serialize(lines, end.extra, END_KNOWN);
@@ -231,6 +244,7 @@ export function parseEnd(bytes: Buffer): AttemptEnd {
     worker_kind: str(values, 'worker_kind', 'human'),
     wiki_exposed: values.get('wiki_exposed') === true,
     field_changes: strings(values, 'field_changes'),
+    commits: objects(values, 'commits'),
     ...(typeof requested === 'string' ? { requested } : {}),
     extra,
   };

@@ -15,10 +15,11 @@
 // - Every path component is lstat'ed: nothing is written, moved or removed
 //   through a symlink, junction or other reparse point.
 //
-// Three modes: `reconcile` (upkeep in a worktree on this pin), `missing` (the
-// SessionStart fast path: only folders that are absent are written; nothing is
-// replaced, moved or removed) and `remove` (upkeep in a worktree that pins no
-// release: everything grimoire generated goes, under every guard).
+// Three modes: `reconcile` (upkeep in a worktree on this pin), `fast-path`
+// (the SessionStart fast path: what differs from the served set is written,
+// a changed copy saved as a stray edit first, but nothing is moved aside or
+// removed in a hook) and `remove` (upkeep in a worktree that pins no release:
+// everything grimoire generated goes, under every guard).
 import { randomBytes } from 'node:crypto';
 import { cp, lstat, mkdir, readdir, rename, rm, rmdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -42,7 +43,7 @@ import {
   type StubClient,
 } from './texts';
 
-export type ReconcileMode = 'reconcile' | 'missing' | 'remove';
+export type ReconcileMode = 'reconcile' | 'fast-path' | 'remove';
 
 /** What reconciling one worktree did. Paths are POSIX, relative to the worktree. */
 export interface ReconcileReport {
@@ -293,14 +294,12 @@ export async function reconcileWorktree(
     }
     if (found.state === 'folder') {
       const current = await readCheckoutText(abs(`${folder}/${SKILL_FILE}`));
-      if (mode === 'missing') {
-        // Only a missing file of grimoire's own folder is written; anything there stays for upkeep.
-        if (!found.gitignore || current.state !== 'absent') return found.gitignore && current.state === 'text' && current.text === files.skill;
-        if (!(await put(folder, SKILL_FILE, files.skill))) return false;
-        if (!isListed(folder)) added.push(abs(folder));
-        return true;
-      }
       if (!found.gitignore && !isListed(folder)) {
+        // Moving a folder aside is upkeep's, never a hook's.
+        if (mode === 'fast-path') {
+          unplaced('a folder grimoire didn’t make is there; upkeep moves it aside');
+          return false;
+        }
         if (!(await moveAside(folder))) {
           unplaced('a folder grimoire didn’t make is there');
           return false;
@@ -335,7 +334,7 @@ export async function reconcileWorktree(
       if (copied) copyState[skill.name] = skill.version;
       for (const stub of stubs) {
         if (copied) await place(stub.wanted, { kind: 'stub', client: stub.client });
-        else if (mode !== 'missing') await removeUnwanted(stub.wanted.folder, skill.name, { kind: 'stub', client: stub.client });
+        else if (mode !== 'fast-path') await removeUnwanted(stub.wanted.folder, skill.name, { kind: 'stub', client: stub.client });
       }
     }
   }
@@ -357,7 +356,7 @@ export async function reconcileWorktree(
     if (mode === 'reconcile' && kind.kind === 'stub') await moveAside(folder);
   }
 
-  if (mode !== 'missing') {
+  if (mode !== 'fast-path') {
     for (const { folder, skill, kind } of await existingFolders(worktree)) {
       if (wanted.has(comparablePath(abs(folder)))) continue;
       await removeUnwanted(folder, skill, kind);

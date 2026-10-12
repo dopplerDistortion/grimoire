@@ -88,6 +88,13 @@ export interface TrackerStore {
    * (null where a ref is missing). The dashboard's live events poll it.
    */
   tips(): Promise<TrackerTips>;
+  /**
+   * The tip pair, after the checks a read makes before it loads the view:
+   * NOT_SYNCED without a tracker (no tracker ref, or none holding the root
+   * `config.yml` names), UPGRADE_REQUIRED when a tip's `format` marker is
+   * outside this release's range. For a caller that may skip the read.
+   */
+  check(): Promise<TrackerTips>;
   /** The store's clock: the instant reads judge staleness by. */
   now(): Date;
   /**
@@ -331,6 +338,18 @@ class GitTrackerStore implements TrackerStore {
 
   async tips(): Promise<TrackerTips> {
     return this.resolveTips();
+  }
+
+  async check(): Promise<TrackerTips> {
+    const tips = await this.resolveTips();
+    await this.checkTracker(tips);
+    for (const tip of new Set([tips.local, tips.remote])) {
+      if (!tip) continue;
+      const { tree } = await this.objects.commit(tip);
+      const marker = await this.objects.fileAt(tree, FORMAT_FILE);
+      checkTrackerMarker(marker ? parseMarker(marker.toString('utf8')) : null);
+    }
+    return tips;
   }
 
   async read(): Promise<TrackerView> {
