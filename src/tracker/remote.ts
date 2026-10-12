@@ -171,11 +171,16 @@ export function pushedRef(stdout: string, ref: string): PushedRef | null {
  * Whether a rejected push only lost a race, so fetch, fold and push again:
  * the remote moved since the fetch (git saw it in the ref advertisement), or
  * another push moved it while this one ran (the remote's compare-and-set
- * failed). A D/F ref conflict or a hook's refusal is no race.
+ * failed), or another push held the ref's lock when this one came to take it
+ * (git 2.55 says `reference already exists`, with the lock file's `File
+ * exists` in the remote's lines). A D/F ref conflict or a hook's refusal is
+ * no race; a lock left stale keeps refusing, so the last round records it.
  */
 export function lostRace(pushed: PushedRef, stderr: string): boolean {
   if (pushed.flag !== '!') return false;
   if (/^\[rejected\]/.test(pushed.summary)) return /non-fast-forward|fetch first|stale info/.test(pushed.summary);
   if (!/^\[remote rejected\]/.test(pushed.summary)) return false;
-  return /incorrect old value|failed to lock|is at [0-9a-f]+ but expected/.test(`${pushed.summary}\n${remoteLines(stderr)}\n${stderr}`);
+  return /incorrect old value|failed to lock|is at [0-9a-f]+ but expected|\.lock'?: File exists/.test(
+    `${pushed.summary}\n${remoteLines(stderr)}\n${stderr}`,
+  );
 }

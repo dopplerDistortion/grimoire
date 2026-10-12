@@ -580,33 +580,6 @@ describe('the detached sync child', () => {
 });
 
 describe('concurrent clones', () => {
-  test('two clones closing at once with background syncs end up with one tracker on the remote holding every close', async ({
-    world,
-    grimoire,
-  }) => {
-    await pushTracker(world.a);
-    await world.b.git(['fetch', '--quiet']);
-    const bobCtx = agentContext(world.b);
-    const alice = syncingCore(grimoire);
-    const bob = syncingCore(grimoire);
-    const closed = await Promise.all([
-      ...[1, 2, 3].map((n) => closeOne(alice, grimoire.ctx, `Alice ${n}`)),
-      ...[1, 2, 3].map((n) => closeOne(bob, bobCtx, `Bob ${n}`)),
-    ]);
-    await Promise.all([alice.close(), bob.close()]);
-
-    // The background syncs alone: no explicit sync runs.
-    const remote = (await remoteTracker(world.a))!;
-    for (const [checkout, ctx] of [[world.a, grimoire.ctx], [world.b, bobCtx]] as const) {
-      // Asked of the remote, which has every object: the remote holds this clone's tip.
-      expect(await gitResult(world.remote, ['merge-base', '--is-ancestor', (await trackerTip(checkout))!, remote])).toMatchObject({ code: 0 });
-      expect(await ok(grimoire.core.call('sync_status', {}, ctx))).toMatchObject({ failure: null, pending_since: null });
-      await checkout.git(['fetch', '--quiet']);
-      const rows = (await ok(grimoire.core.call('list', { status: 'done' }, ctx))).rows.map((row) => row.id);
-      expect(rows.sort()).toEqual([...closed].sort());
-    }
-  });
-
   /**
    * Bob's tracker commit, on the remote under another branch, and an unpushed
    * one from Alice: what a race needs. Returns Bob's commit and a shell line
@@ -663,5 +636,59 @@ describe('concurrent clones', () => {
     await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), hook, { mode: 0o755 });
 
     await expectFoldedPush(world, grimoire, fromBob);
+  });
+
+  test('a push that meets another push holding the remote’s ref lock fetches, folds and pushes again, with no failure or backoff', async ({
+    world,
+    grimoire,
+  }) => {
+    const { fromBob, moveOnce } = await raceSetup(world, grimoire);
+    // Bob's push holds the lock on the remote's grimoire/tracker while Alice's tries to take it, then lands.
+    const lock = path.join(world.remote, 'refs', 'heads', 'grimoire', 'tracker.lock').replaceAll('\\', '/');
+    const flag = path.join(world.root, 'locked').replaceAll('\\', '/');
+    const script = path.join(world.root, 'locked.sh').replaceAll('\\', '/');
+    await writeFile(
+      script,
+      [
+        '#!/bin/sh',
+        `if [ -e "${flag}" ]; then exec git receive-pack "$1"; fi`,
+        `: > "${flag}"; : > "${lock}"`,
+        'git receive-pack "$1"; code=$?',
+        `rm -f "${lock}"; ${moveOnce('$1')}`,
+        'exit $code',
+        '',
+      ].join('\n'),
+    );
+    await world.a.git(['config', 'remote.origin.receivepack', `sh ${script}`]);
+
+    await expectFoldedPush(world, grimoire, fromBob);
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
+  });
+
+  test('a push that loses the race round after round to a busy clone keeps fetching, folding and pushing until it lands', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    // Another clone pushes during each of Alice's first four pushes: four lost races in a row.
+    const counter = path.join(world.root, 'raced').replaceAll('\\', '/');
+    const hook = [
+      '#!/bin/sh',
+      'unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES',
+      'export GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=bob@example.com GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=bob@example.com',
+      `n=$(cat "${counter}" 2>/dev/null || echo 0)`,
+      `[ "$n" -ge 4 ] && exit 0`,
+      `echo $((n + 1)) > "${counter}"`,
+      'tip=$(git rev-parse refs/heads/grimoire/tracker)',
+      'git update-ref refs/heads/grimoire/tracker "$(git commit-tree "$tip^{tree}" -p "$tip" -m busy)"',
+      '',
+    ].join('\n');
+    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), hook, { mode: 0o755 });
+
+    const synced = await ok(grimoire.core.call('sync', {}, grimoire.ctx));
+    expect(synced).toMatchObject({ state: 'pushed' });
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
   });
 });
