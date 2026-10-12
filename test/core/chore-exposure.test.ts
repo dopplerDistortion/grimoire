@@ -6,6 +6,8 @@
 // `Grimoire-Actor` with its basis afterwards. A context holding an open chore
 // run never claims or writes issues, and a run's lease lapses after 60 minutes
 // without a chore call.
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { Checkout } from '#harness';
 import type { CallContext, Core } from '../../src/core';
@@ -177,5 +179,51 @@ describe('chore contexts and the lease', () => {
       error: { code: 'NOT_ISOLATED' },
     });
     expect(await core.call('chore_read', { run: 'cr-zzzzzzzzzz' }, subagent)).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+  });
+});
+
+describe('an atomic chore_start', () => {
+  test('a start whose exposure mark fails leaves no run behind, and a claim racing a start from the same session never lands beside a run', async ({ world, grimoire }) => {
+    const { core } = await dueCore(grimoire);
+    const root = codexRoot(grimoire.ctx);
+    // A file where the exposure marks' folder goes: marking the session fails.
+    const marks = path.join(world.a.dir, '.git', 'grimoire', 'records', 'chore-exposure');
+    await mkdir(path.dirname(marks), { recursive: true });
+    await writeFile(marks, 'in the way');
+    const failed = await core.call('chore_start', {}, root).catch(() => ({ ok: false as const }));
+    expect(failed.ok).toBe(false);
+    await rm(marks);
+
+    // Nothing of the start holds: the session is no chore context, and the chore is still due.
+    const id = await newIssue(core, grimoire.ctx, 'After a failed start');
+    const claimed = await core.call('claim', { id }, root);
+    if (!claimed.ok) throw new Error(`claim failed: ${JSON.stringify(claimed.error)}`);
+    expect(await attemptFile(world.a, id, claimed.result.attempt, 'start.md')).toMatch(/^wiki_exposed: false$/m);
+    await core.call('close', { id, attempt: claimed.result.attempt, reason: 'done', debrief: DEBRIEF }, root);
+
+    // A claim and a start from one session at once: exactly one of them holds.
+    const raced = await newIssue(core, grimoire.ctx, 'Raced');
+    const [started, claim] = await Promise.all([core.call('chore_start', {}, root), core.call('claim', { id: raced }, codexRoot(grimoire.ctx, 'nonce-race'))]);
+    expect([started.ok, claim.ok].filter(Boolean)).toHaveLength(1);
+    expect(started.ok ? claim : started).toMatchObject({ ok: false, error: { code: 'NOT_ISOLATED' } });
+  });
+});
+
+describe('run-record updates', () => {
+  test('a chore_read racing chore_abandon never reopens the abandoned run', async ({ grimoire }) => {
+    const { core } = await dueCore(grimoire);
+    const subagent = codexSubagent(grimoire.ctx);
+    const started = await core.call('chore_start', {}, subagent);
+    if (!started.ok) throw new Error('chore_start failed');
+    const run = started.result.run;
+
+    const [, abandoned] = await Promise.all([core.call('chore_read', { run }, subagent), core.call('chore_abandon', { run, reason: 'stop' }, subagent)]);
+    expect(abandoned).toMatchObject({ ok: true, result: { abandoned: true } });
+
+    // Abandoned is terminal: the run stays ended, and its context is free.
+    expect(await core.call('chore_read', { run }, subagent)).toMatchObject({ ok: false, error: { code: 'NOT_FOUND', details: { state: 'abandoned' } } });
+    expect(await core.call('chore_abandon', { run, reason: 'again' }, subagent)).toMatchObject({ ok: true, result: { replayed: true } });
+    const id = await newIssue(core, grimoire.ctx, 'After the abandon');
+    expect(await core.call('claim', { id }, subagent)).toMatchObject({ ok: true });
   });
 });

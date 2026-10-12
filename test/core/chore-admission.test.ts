@@ -3,6 +3,8 @@
 // open attempt. Contexts are built from seam-2 fixtures: Claude Code's real
 // PreToolUse payloads through grimoire's own hook, and real `_meta` from Claude
 // Code and Codex `tools/call`s.
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import { clientIn, evidenceIn } from '../../src/surfaces/cli/shell';
@@ -127,5 +129,26 @@ describe('the admission table', () => {
       ok: true,
       result: { kind: 'wiki-maintainer', origin: 'scheduled' },
     });
+  });
+});
+
+describe('the unidentified rule fails closed', () => {
+  test('with no git email, or with the seen-here rows unreadable, an unidentified caller is refused while an attempt is held on this machine', async ({ world, grimoire }) => {
+    const core = await dueCore(grimoire);
+    const created = await core.call('create', { title: 'Held work' }, grimoire.ctx);
+    if (!created.ok) throw new Error('create failed');
+    expect((await core.call('claim', { id: created.result.id }, grimoire.ctx)).ok).toBe(true);
+
+    // No git email: grimoire can't tell whose the held attempt is, so it can't admit.
+    const anonymous = { ...genericCall(grimoire.ctx), person: { ...grimoire.ctx.person, email: null } };
+    const refused = await core.call('chore_start', {}, anonymous);
+    expect(refused).toMatchObject(notIsolated);
+    expect(refused.ok ? '' : refused.error.details.hint).toMatch(/user\.email/);
+
+    // Seen-here rows that can't be read: grimoire can't tell the attempt isn't held here.
+    await mkdir(path.join(world.a.dir, '.git', 'grimoire', 'coordination', 'seen-here', 'unreadable.json'), { recursive: true });
+    const unreadable = await core.call('chore_start', {}, genericCall(grimoire.ctx));
+    expect(unreadable).toMatchObject(notIsolated);
+    expect(unreadable.ok ? '' : unreadable.error.details.hint).toMatch(/doctor/);
   });
 });
