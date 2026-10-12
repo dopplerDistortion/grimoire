@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { createGitWorld, git, gitTest as test, HARNESS_GIT_CONFIG } from '#harness';
+import { createGitWorld, git, gitTest as test, HARNESS_GIT_CONFIG, type WorldTemplate } from '#harness';
+import { removeWorldTemplates } from './git-world';
 
 describe('a git world (bare remote, clones a and b)', () => {
   test('a commit pushed from clone a is visible in clone b after git fetch', async ({ world }) => {
@@ -97,6 +98,48 @@ describe('createGitWorld', () => {
     await world.cleanup();
 
     expect(existsSync(world.root)).toBe(false);
+  });
+
+  // setup.ts runs removeWorldTemplates after every test file: a worker's exit handlers don't run.
+  it('removeWorldTemplates removes the template worlds built so far; the next world builds its template again', async () => {
+    const roots: string[] = [];
+    const template: WorldTemplate = { name: 'removed', prepare: async (world) => void roots.push(world.root) };
+    const first = await createGitWorld(template);
+    await first.cleanup();
+    expect(roots).toHaveLength(1);
+    expect(existsSync(roots[0]!)).toBe(true);
+
+    await removeWorldTemplates();
+
+    expect(existsSync(roots[0]!)).toBe(false);
+    const again = await createGitWorld(template);
+    try {
+      expect(roots).toHaveLength(2);
+      expect(await again.a.git(['log', '--format=%s'])).toBe('initial commit');
+    } finally {
+      await again.cleanup();
+    }
+  });
+
+  it('a template whose build fails leaves no folder behind, and the next world asking for it builds it again', async () => {
+    const roots: string[] = [];
+    let fail = true;
+    const template: WorldTemplate = {
+      name: 'failing',
+      prepare: async (world) => {
+        roots.push(world.root);
+        if (fail) throw new Error('the template failed to build');
+      },
+    };
+
+    await expect(createGitWorld(template)).rejects.toThrow('the template failed to build');
+
+    expect(roots).toHaveLength(1);
+    expect(existsSync(roots[0]!)).toBe(false);
+    fail = false;
+    const world = await createGitWorld(template);
+    await world.cleanup();
+    expect(roots).toHaveLength(2);
   });
 });
 

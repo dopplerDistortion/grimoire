@@ -128,14 +128,34 @@ export interface WorldTemplate {
  */
 const templates = new Map<string, { root: string; ready: Promise<void> }>();
 
+/** Every template root this file built, until removeWorldTemplates removes it, with its exit fallback. */
+const templateRoots = new Map<string, { ready: Promise<void>; onExit: () => void }>();
+
+/**
+ * Removes every template world this test file built (setup.ts runs it after
+ * each file: a Vitest worker's exit handlers don't run). A world asked for
+ * afterwards builds its template again.
+ */
+export async function removeWorldTemplates(): Promise<void> {
+  templates.clear();
+  const roots = [...templateRoots];
+  templateRoots.clear();
+  for (const [root, { ready, onExit }] of roots) {
+    await ready.catch(() => undefined);
+    process.off('exit', onExit);
+    await removeDir(root);
+  }
+}
+
 function worldTemplate(template: WorldTemplate | undefined): { root: string; ready: Promise<void> } {
   const name = template?.name ?? '';
   let built = templates.get(name);
   if (!built) {
     const root = path.join(os.tmpdir(), `grimoire-git-template-${process.pid}-${randomUUID().slice(0, 8)}`);
+    // Only a fallback: removeWorldTemplates removes it once the file is done.
+    const onExit = () => rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+    process.once('exit', onExit);
     const ready = mkdir(root).then(async () => {
-      // Removed when the test file's worker exits: no world copied from it needs it afterwards.
-      process.once('exit', () => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
       const world = await buildWorld(await realpath(root));
       await template?.prepare(world);
       // git's sample hooks never run (none is named as a hook), but every copy would write them
@@ -143,10 +163,17 @@ function worldTemplate(template: WorldTemplate | undefined): { root: string; rea
       for (const hooks of [path.join(world.remote, 'hooks'), path.join(world.a.dir, '.git', 'hooks'), path.join(world.b.dir, '.git', 'hooks')]) {
         for (const file of await readdir(hooks)) if (file.endsWith('.sample')) await rm(path.join(hooks, file));
       }
+    }).catch(async (error: unknown) => {
+      // A failed build leaves nothing behind, and the next world asking for it builds it again.
+      if (templates.get(name)?.root === root) templates.delete(name);
+      templateRoots.delete(root);
+      process.off('exit', onExit);
+      await removeDir(root);
+      throw error;
     });
     built = { root, ready };
     templates.set(name, built);
-    ready.catch(() => templates.delete(name));
+    templateRoots.set(root, { ready, onExit });
   }
   return built;
 }
