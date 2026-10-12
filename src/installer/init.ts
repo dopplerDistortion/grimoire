@@ -378,6 +378,21 @@ function trackerLine(plan: TrackerPlan, remote: string | null, listing: RemoteLi
   }
 }
 
+/** The pins each side of a conflicted config.yml names (`ours` above `=======`, as `git checkout --ours` takes it); null when it has no conflict markers. */
+function conflictedPins(text: string): { ours: string | null; theirs: string | null } | null {
+  const lines = normalizedText(text).split('\n');
+  const start = lines.findIndex((line) => line.startsWith('<<<<<<<'));
+  if (start < 0) return null;
+  const middle = lines.findIndex((line, i) => i > start && line.startsWith('======='));
+  const stop = lines.findIndex((line, i) => i > middle && line.startsWith('>>>>>>>'));
+  const pinIn = (part: readonly string[]) => part.map((line) => /^version:[ \t]*["']?([^"'\s#]+)/.exec(line)?.[1]).find((pin) => pin !== undefined) ?? null;
+  const shared = pinIn([...lines.slice(0, start), ...(stop < 0 ? [] : lines.slice(stop + 1))]);
+  return {
+    ours: pinIn(lines.slice(start + 1, middle < 0 ? undefined : middle)) ?? shared,
+    theirs: middle < 0 ? shared : pinIn(lines.slice(middle + 1, stop < 0 ? undefined : stop)) ?? shared,
+  };
+}
+
 /** Step 1 of an upgrade: what the plan adds to init's (spec §21). */
 function upgradeLines(upgrade: UpgradeReport, formats: ReleaseFormats): string[] {
   const lines = [
@@ -439,6 +454,18 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       upgrade: { from: inProgress.from, to: inProgress.to },
       command,
     });
+  }
+
+  // A merge left config.yml conflicted: the higher pin's file is taken whole, then that pin's init runs (spec §21).
+  const sides = existing === null ? null : conflictedPins(existing.text);
+  if (sides !== null) {
+    const higher = sides.ours === null ? 'theirs' : sides.theirs !== null && compareSemver(sides.theirs, sides.ours) > 0 ? 'theirs' : 'ours';
+    const pin = sides[higher];
+    throw new GrimoireError(
+      'INVALID',
+      `${CONFIG_PATH} has merge conflicts${sides.ours && sides.theirs ? ` between grimoire ${sides.ours} and ${sides.theirs}` : ''}: take the higher pin’s file whole (\`git checkout --${higher} -- ${CONFIG_PATH}\`), then run \`${pin ? joinCommand(pin) : 'that pin’s init'}\`; nothing changed`,
+      { ours: sides.ours, theirs: sides.theirs, command: `git checkout --${higher} -- ${CONFIG_PATH}` },
+    );
   }
 
   // A checkout pinned to another version: that version's init is the one to run.
@@ -576,7 +603,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     const others: UpgradeReport['other_worktrees'] = [];
     for (const entry of pins) if ((await worktreeKey(entry.worktree)) !== own) others.push({ worktree: entry.worktree, pin: entry.pin });
     const live = (await store.processes.live().catch(() => []))
-      .filter((record) => record.pin === from && record.pid !== process.pid)
+      .filter((record) => record.pin === from)
       .map((record) => ({ pid: record.pid, role: record.role, client: record.client, worktree: record.worktree }));
     const order = compareSemver(version, from);
     upgrade = {
@@ -598,7 +625,8 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   }
 
   // The questions, then the plan.
-  const clients = await chooseClients(root, flags, prompter);
+  // An upgrade keeps the clients and the adapter decision the install made: its one question is the consent.
+  const clients = await chooseClients(root, flags, upgrading ? null : prompter);
   let mode: ExcerptMode | null;
   if (trackerPlan.action === 'mint' || trackerPlan.action === 'replace') {
     mode = await chooseMode(flags, prompter, say);
@@ -613,7 +641,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       await tracker.close();
     }
   }
-  const adapter = await chooseAdapter(root, flags, existing?.adapter ?? null, prompter);
+  const adapter = await chooseAdapter(root, flags, existing?.adapter ?? null, upgrading ? null : prompter);
   const npmScript = (await stat(path.join(root, 'package.json')).catch(() => null))?.isFile() === true;
   const pointerOptions: PointerOptions = { clients, npmScript, adapter: adapter.placement };
   let filePlan: FilePlan = await planFiles(root, desiredEntries(pointerOptions));

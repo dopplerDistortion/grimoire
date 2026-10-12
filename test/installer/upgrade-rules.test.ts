@@ -91,6 +91,54 @@ describe('init --upgrade', () => {
     expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
   });
 
+  gitTest('the plan, asked once: the pins, each marker, the files, the hooks, the other worktrees, live old-pin processes, the disclosure and the revert note', async ({ world }) => {
+    await installOld(world.a);
+    const other = await world.a.addWorktree('feature');
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const server = await store.processes.register({ role: 'mcp', client: 'claude-code', worktree: other.dir, pin: OLD, pathSource: null });
+    try {
+      const plan = await initAt(world.a.dir, NEW, { flags: { upgrade: true, yes: false }, extra: { dryRun: true } });
+      expect(plan.report.dry_run).toBe(true);
+      expect(plan.report.upgrade).toMatchObject({
+        from: OLD,
+        to: NEW,
+        direction: 'upgrade',
+        resumed: false,
+        markers: [
+          { marker: 'store', format: 1, compat: 1, verdict: 'stays' },
+          { marker: 'machine', format: 1, compat: 1, verdict: 'stays' },
+          { marker: 'install', format: 1, compat: 1, verdict: 'stays' },
+        ],
+        codex_hook: 'unchanged',
+        other_worktrees: [{ worktree: other.dir, pin: OLD }],
+        live_on_old_pin: [{ pid: process.pid, role: 'mcp', client: 'claude-code', worktree: other.dir }],
+        commit: { paths: ['.grimoire/config.yml'] },
+      });
+      for (const line of [
+        `Upgrade: grimoire ${OLD} → ${NEW}`,
+        'store: stays at format 1, compat 1',
+        'Hooks: grimoire’s hook definitions stay as they are; no Codex re-approval.',
+        `Other worktrees keep their own pins until they take this upgrade by merge or rebase: ${other.dir} (${OLD})`,
+        `Running on ${OLD}, never stopped: mcp (claude-code) pid ${process.pid}`,
+        'Excerpt mode: facts.',
+        'Reverting the upgrade’s commit undoes it; the launcher never moves back.',
+      ]) {
+        expect(plan.said).toContain(line);
+      }
+      // A plan only: nothing changed, and no upgrade is in progress.
+      expect(await pinOf(world.a.dir)).toBe(OLD);
+      expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+
+      // At a terminal, the one consent; declining changes nothing.
+      const declined = initAt(world.a.dir, NEW, { flags: { upgrade: true }, answers: [{ when: /Go ahead\?/, type: 'n' }] });
+      await expect(declined).rejects.toMatchObject({ code: 'INVALID' });
+      expect(await pinOf(world.a.dir)).toBe(OLD);
+      expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+    } finally {
+      await server?.unregister();
+    }
+  });
+
   gitTest('interrupted after step 2, it is finished by the same command; meanwhile an old-pin init and doctor --fix skip the worktree with the message', async ({ world }) => {
     await installOld(world.a);
     const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
@@ -137,6 +185,39 @@ describe('init --upgrade', () => {
     expect(await changedPaths(world.a)).toEqual([]);
     expect((await listCopies(store)).map((copy) => copy.version)).toEqual([OLD]);
     expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+  });
+
+  gitTest('a merge that conflicts in config.yml: init names the higher pin’s file to take whole; that pin’s init then rebuilds a conflicted manifest from disk', async ({ world }) => {
+    await installOld(world.a);
+    const MID = '1.0.0-test.3';
+    await world.a.git(['checkout', '--quiet', '-b', 'up']);
+    await initAt(world.a.dir, NEW, { flags: { upgrade: true } });
+    await world.a.git(['commit', '--quiet', '-am', `Upgrade grimoire to ${NEW}`]);
+    await world.a.git(['checkout', '--quiet', 'main']);
+    await initAt(world.a.dir, MID, { flags: { upgrade: true } });
+    await world.a.git(['commit', '--quiet', '-am', `Upgrade grimoire to ${MID}`]);
+    const merged = await world.a.gitResult(['merge', '--quiet', 'up']);
+    expect(merged.code).not.toBe(0);
+    // Both sides' manifest lines, as a conflict leaves them.
+    const manifestFile = path.join(world.a.dir, '.grimoire/manifest.yml');
+    const { writeFile } = await import('node:fs/promises');
+    const manifest = await readFile(manifestFile, 'utf8');
+    const [head, ...entries] = manifest.split('\n  - ');
+    await writeFile(manifestFile, `${head}\n<<<<<<< HEAD\n  - ${entries.join('\n  - ')}=======\n  - ${entries.join('\n  - ')}>>>>>>> up\n`);
+
+    // init --upgrade never runs mid-merge; plain init does, to say how to resolve config.yml.
+    await expect(initAt(world.a.dir, NEW, { flags: { upgrade: true } })).rejects.toMatchObject({ code: 'INVALID', details: { operation: 'merge' } });
+    await expect(initAt(world.a.dir, NEW)).rejects.toMatchObject({
+      code: 'INVALID',
+      message: expect.stringContaining(`take the higher pin’s file whole (\`git checkout --theirs -- .grimoire/config.yml\`), then run \`npx @goksening/grimoire@${NEW} init\``),
+      details: { ours: MID, theirs: NEW },
+    });
+    await world.a.git(['checkout', '--theirs', '--', '.grimoire/config.yml']);
+    const { report } = await initAt(world.a.dir, NEW);
+
+    expect(await pinOf(world.a.dir)).toBe(NEW);
+    expect(report.written).toEqual(['.grimoire/manifest.yml']);
+    expect(await readFile(manifestFile, 'utf8')).toBe(manifest);
   });
 
   gitTest('a downgrade runs the same command and keeps the newer launcher; one to a release that can’t run against the markers refuses', async ({ world }) => {
