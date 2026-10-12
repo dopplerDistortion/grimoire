@@ -7,13 +7,13 @@
 // Committed records carry no LLM free text.
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { describe, expect } from 'vitest';
+import { afterEach, describe, expect, vi } from 'vitest';
 import type { CallContext, ChoreBrief, ChoreReadResult, Core } from '../../src/core';
-import { servedLog } from '../../src/knowledge/chores';
-import { MachineLocalStore } from '../../src/machine-local';
+import { readRun, servedLog, writeRun } from '../../src/knowledge/chores';
+import { Locks, MachineLocalStore } from '../../src/machine-local';
 import type { Clone, GitWorld } from '#harness';
 import { openTracker } from '../../src/tracker';
-import { choreAgent, Clock, DEBRIEF, putPage, terminal } from './chore-support';
+import { choreAgent, Clock, commitChoreRun, compileRecord, DEBRIEF, putPage, terminal } from './chore-support';
 import {
   agentContext,
   commitToTracker,
@@ -528,3 +528,130 @@ describe('chore_submit: citations and conflicted pages', () => {
 function createHashOf(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
+
+/** The tracker store's prototype, whose `transact` a test may wrap. */
+async function trackerPrototype(dir: string): Promise<{ transact: (...args: unknown[]) => Promise<unknown> }> {
+  const probe = await openTracker(dir);
+  const proto = Object.getPrototypeOf(probe) as { transact: (...args: unknown[]) => Promise<unknown> };
+  await probe.close();
+  return proto;
+}
+
+describe('chore_submit: runs that stop mid-submit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test('an abandon arriving while a submit is checking waits for it: the compile ends the run and the abandon finds it ended', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const proto = await trackerPrototype(world.a.dir);
+    const transact = proto.transact;
+    const acquire = Locks.prototype.acquire;
+    let abandoning: Promise<unknown> | null = null;
+    let blocked!: () => void;
+    const reached = new Promise<void>((resolve) => (blocked = resolve));
+    vi.spyOn(Locks.prototype, 'acquire').mockImplementation(function (this: Locks, name, options) {
+      // The abandon reached a lock of this run: it waits there.
+      if (abandoning && name.includes(brief.run)) blocked();
+      return acquire.call(this, name, options);
+    });
+    vi.spyOn(proto, 'transact').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      if (!abandoning) {
+        // Between the submit's check that the run is open and its commit, the agent abandons the run.
+        abandoning = d.core.call('chore_abandon', { run: brief.run, reason: 'changed my mind' }, d.chores);
+        await Promise.race([abandoning, reached]);
+      }
+      return transact.apply(this, args);
+    });
+
+    const submitted = await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: allNoPattern(brief) } }, d.chores);
+    const abandoned = await abandoning!;
+    vi.restoreAllMocks();
+
+    expect(ok(submitted)).toMatchObject({ result: 'compiled' });
+    expect(abandoned).toMatchObject({ ok: false, error: { code: 'NOT_FOUND', message: expect.stringContaining('(ended)') } });
+    expect((await readRun(store(world), brief.run))?.state).toBe('ended');
+    // The ended run still replays its answer.
+    expect(ok(await d.core.call('chore_submit', { run: brief.run, result: {} }, d.chores))).toEqual({ ...ok(submitted), replayed: true });
+  });
+
+  test('a compile whose commit landed answers compiled though this machine failed to record its end; a retry replays it, writing nothing', async ({
+    world,
+    grimoire,
+  }) => {
+    const asked: string[] = [];
+    const d = await due(grimoire, { fails: 1, passes: 0 }, { autoSync: ({ tip }) => void asked.push(tip) });
+    const brief = await startAndRead(d);
+    const proto = await trackerPrototype(world.a.dir);
+    const transact = proto.transact;
+    const local = store(world).records;
+    const update = Object.getPrototypeOf(local).update as (...args: unknown[]) => Promise<unknown>;
+    let committed = false;
+    vi.spyOn(proto, 'transact').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      const done = await transact.apply(this, args);
+      committed = true;
+      return done;
+    });
+    // Once the commit landed, every machine-local write fails (as when the process dies there).
+    vi.spyOn(Object.getPrototypeOf(local), 'update').mockImplementation(function (this: unknown, ...args: unknown[]) {
+      if (committed) return Promise.reject(Object.assign(new Error('disk full'), { code: 'ENOSPC' }));
+      return update.apply(this, args);
+    });
+    const submit = { run: brief.run, result: { pages: [create('pin-the-seed')], consumption: allTo(brief, 'pin-the-seed') } };
+    const compiled = await d.core.call('chore_submit', submit, d.chores);
+    vi.restoreAllMocks();
+
+    expect(ok(compiled)).toMatchObject({ result: 'compiled', pages: 1 });
+    const tip = (await trackerTip(world.a))!;
+    expect(await trackerFile(world.a, tip, 'knowledge/wiki/pages/pin-the-seed.md')).toContain('Pin the seed.');
+    // The run is still open on this machine; the retry finds its record and replays.
+    expect((await readRun(store(world), brief.run))?.state).toBe('open');
+    // Rebuilt from the record: the counts and ids, without the created/updated split only the lost answer knew.
+    expect(ok(await d.core.call('chore_submit', submit, d.chores))).toEqual({
+      run: brief.run,
+      kind: 'wiki-maintainer',
+      result: 'compiled',
+      traces: 1,
+      pages: 1,
+      summary: `grimoire chores: compile done, 1 trace, 1 page; run ${brief.run}`,
+      replayed: true,
+    });
+    expect(await trackerTip(world.a)).toBe(tip);
+    expect((await readRun(store(world), brief.run))?.state).toBe('ended');
+    await d.core.close();
+    expect(asked).toContain(tip);
+  });
+
+  test('a failed run whose record landed but whose end was lost replays failed on a retry, without a second record', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const bad = { run: brief.run, result: { pages: [], consumption: [] } };
+    expect(ok(await d.core.call('chore_submit', bad, d.chores))).toMatchObject({ result: 'invalid' });
+    const failed = ok(await d.core.call('chore_submit', bad, d.chores));
+    expect(failed).toMatchObject({ result: 'failed' });
+    const tip = await trackerTip(world.a);
+    // The process died after the commit: this machine still holds the run open, one failure counted.
+    await writeRun(store(world), { ...(await readRun(store(world), brief.run))!, state: 'open', ended_at: null, outcome: undefined, failures: 1 });
+
+    expect(ok(await d.core.call('chore_submit', { ...bad, result: { pages: [], consumption: allNoPattern(brief) } }, d.chores))).toEqual({
+      run: brief.run,
+      kind: 'wiki-maintainer',
+      result: 'failed',
+      reasons: failed.reasons,
+      fix_ups_left: 0,
+      summary: failed.summary,
+      replayed: true,
+    });
+    expect(await trackerTip(world.a)).toBe(tip);
+  });
+
+  test('a chore-run record is written once: a second record of the same run id is refused', async ({ world, grimoire }) => {
+    void grimoire;
+    const record = compileRecord('cr-0000000001', T0.toISOString(), [['at-aaaaaa', 'fail']]);
+    await commitChoreRun(world.a, world.a, record);
+    const tip = await trackerTip(world.a);
+    await expect(commitChoreRun(world.a, world.a, { ...record, at: new Date(T0.getTime() + 1).toISOString() })).rejects.toThrow(/cr-0000000001/);
+    expect(await trackerTip(world.a)).toBe(tip);
+  });
+});

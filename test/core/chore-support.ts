@@ -96,8 +96,8 @@ export async function commitChoreRun(checkout: Checkout, clone: Clone, record: N
   try {
     await tracker.transact(
       { op: 'compile', author: { name: clone.identity.name, email: clone.identity.email }, actor: { kind: 'agent', client: 'test', nonce: 'n' } },
-      (draft) => {
-        draft.choreRuns.add(record);
+      async (draft) => {
+        await draft.choreRuns.add(record);
         return { result: null };
       },
     );

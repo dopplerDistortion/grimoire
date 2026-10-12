@@ -17,10 +17,10 @@ import {
   type OpenRun,
   type Rejection,
 } from '../knowledge/chores';
-import { LockHeldError, type MachineLocalStore } from '../machine-local';
-import type { ChoreKind, NewChoreRun, TrackerDraft, WriteSpec } from '../tracker';
+import type { MachineLocalStore } from '../machine-local';
+import type { ChoreKind, ChoreRunRecord, NewChoreRun, TrackerDraft, WriteSpec } from '../tracker';
 import { recordedActor } from './attempts';
-import { heldRun, KIND_NAMES, storeOf } from './chores';
+import { heldRun, KIND_NAMES, storeOf, withRunLock } from './chores';
 import { define, oneLine, writer, type OpEnv } from './op';
 import { s } from './schema';
 
@@ -51,7 +51,52 @@ class Refused extends Error {
   }
 }
 
+/** The run's record is in the tracker already: its commit landed, but this machine never recorded the run's end. */
+class AlreadyRecorded extends Error {
+  constructor(readonly record: ChoreRunRecord) {
+    super('recorded');
+  }
+}
+
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
+/** Throws AlreadyRecorded when the tracker holds the run's record: a retry then replays, never writing again. */
+async function refuseRecorded(draft: TrackerDraft, run: OpenRun): Promise<void> {
+  const record = (await draft.choreRuns.records()).find((other) => other.id === run.id);
+  if (record) throw new AlreadyRecorded(record);
+}
+
+/** A step after the commit landed: its failure can't undo the commit, so the call still answers (spec §9). */
+async function afterCommit(step: Promise<unknown>): Promise<void> {
+  await step.catch(() => undefined);
+}
+
+/** What a submit whose record landed answered, rebuilt from that record (the run's end was never recorded here). */
+function outcomeOf(record: ChoreRunRecord, run: OpenRun): ChoreSubmitResult {
+  if (record.result === 'compiled') {
+    const traces = record.consumption.length;
+    const pages = Object.keys(record.pages).length;
+    const conflicts = record.resolved.length === 0 ? '' : `, ${plural(record.resolved.length, 'conflict')} resolved`;
+    const summary = `grimoire chores: compile done, ${plural(traces, 'trace')}, ${plural(pages, 'page')}${conflicts}; run ${run.id}`;
+    return { run: run.id, kind: run.kind, result: 'compiled', traces, pages, summary };
+  }
+  const reasons = [...record.reasons];
+  const summary = `grimoire chores: compile failed after its fix-up (${reasons.join(', ')}); nothing written; run ${run.id}`;
+  return { run: run.id, kind: run.kind, result: 'failed', reasons, fix_ups_left: 0, summary };
+}
+
+/**
+ * Finishes a run whose record the tracker holds though this machine still has
+ * it open (the process stopped between the commit and the run's end): ends it
+ * and replays, asking again for the sync the stopped call may not have asked for.
+ */
+async function recover(record: ChoreRunRecord, run: OpenRun, store: MachineLocalStore, { tracker, requestSync }: OpEnv, now: Date): Promise<ChoreSubmitResult> {
+  const outcome = outcomeOf(record, run);
+  await endRun(store, run.id, now, outcome, record.result === 'failed' ? 2 : undefined);
+  const tip = (await tracker.tips()).local;
+  if (tip) requestSync(tip);
+  return { ...outcome, replayed: true };
+}
 
 /**
  * RUN_SUPERSEDED for a late submit whose inputs a compile consumed meanwhile
@@ -65,16 +110,6 @@ async function refuseConsumed(draft: TrackerDraft, run: OpenRun): Promise<void> 
     if (record.consumption.some((pair) => pairs.has(`${pair.trace}@${pair.outcome}`))) {
       throw new GrimoireError('RUN_SUPERSEDED', `the chore run ${run.id} expired, and the compile ${record.id} has consumed its inputs since`);
     }
-  }
-}
-
-/** Runs `fn` holding the run's submit lock: two submits of one run never interleave. */
-async function withRunLock<T>(store: MachineLocalStore, run: string, fn: () => Promise<T>): Promise<T> {
-  try {
-    return await store.locks.withLock(`chore-submit/${run}`, fn);
-  } catch (error) {
-    if (error instanceof LockHeldError) throw new GrimoireError('BUSY', `another submit of the chore run ${run} is in progress; try again`, {});
-    throw error;
   }
 }
 
@@ -99,7 +134,8 @@ export const choreSubmit = define({
     const { ctx, tracker } = env;
     const author = writer(ctx);
     const store = storeOf(tracker, ctx);
-    return withRunLock(store, input.run.trim(), async () => {
+    // Under the run's lock no page, submit or abandon of it interleaves: the run checked open below stays open until this submit ends it.
+    return withRunLock(store, input.run, async () => {
       const now = tracker.now();
       const run = await heldRun(store, ctx, input.run, now);
       const key = input.idempotency_key ?? null;
@@ -147,6 +183,7 @@ async function submitCompile(
   let noPattern: Readonly<Record<string, string>> = {};
   try {
     const write = await tracker.transact<ChoreSubmitResult>({ op: 'compile', author, actor, ...idempotency }, async (draft) => {
+      await refuseRecorded(draft, run);
       if (late) await refuseConsumed(draft, run);
       const quarantine = await activeQuarantine(draft);
       const check = await checkCompile(result, {
@@ -160,7 +197,7 @@ async function submitCompile(
       if (!check.ok) throw new Refused(check.rejection);
       const { plan } = check;
       const { versions, resolved } = await writeCompile(draft, plan);
-      draft.choreRuns.add({
+      await draft.choreRuns.add({
         ...recorded,
         result: 'compiled',
         unverified: plan.unverified,
@@ -180,12 +217,14 @@ async function submitCompile(
       const summary = `grimoire chores: compile done, ${plural(plan.consumption.length, 'trace')}, ${plural(pages, 'page')} (${created} created, ${pages - created} updated)${conflicts}; run ${run.id}`;
       return { result: { run: run.id, kind: run.kind, result: 'compiled', traces: plan.consumption.length, pages, summary } };
     });
-    await logNoPattern(store, run.id, noPattern);
-    await endRun(store, run.id, now, write.result);
+    // The commit landed: what follows is this machine's bookkeeping. Should it fail, a retry finds the record and replays.
+    await afterCommit(logNoPattern(store, run.id, noPattern));
+    await afterCommit(endRun(store, run.id, now, write.result));
     // An accepted chore submit triggers the automatic sync (spec §4).
     if (write.commit) requestSync(write.commit);
     return write.replayed ? { ...write.result, replayed: true } : write.result;
   } catch (error) {
+    if (error instanceof AlreadyRecorded) return recover(error.record, run, store, env, now);
     if (!(error instanceof Refused)) throw error;
     return refuse(error.rejection, result, key, run, store, recorded, author, env, idempotency, now);
   }
@@ -234,8 +273,8 @@ async function refuse(
     return outcome;
   }
   const served = new Set(recorded.served.map((ref) => ref.item));
-  const write = await tracker.transact<ChoreSubmitResult>({ op: 'compile', author, actor, ...idempotency }, (draft) => {
-    draft.choreRuns.add({
+  const write = await tracker.transact<ChoreSubmitResult>({ op: 'compile', author, actor, ...idempotency }, async (draft) => {
+    await draft.choreRuns.add({
       ...recorded,
       result: 'failed',
       // A refused result's self-reports may hold anything: none is committed.
@@ -259,7 +298,7 @@ async function refuse(
       },
     };
   });
-  await endRun(store, run.id, now, write.result, failures);
+  await afterCommit(endRun(store, run.id, now, write.result, failures));
   if (write.commit) requestSync(write.commit);
   return write.replayed ? { ...write.result, replayed: true } : write.result;
 }

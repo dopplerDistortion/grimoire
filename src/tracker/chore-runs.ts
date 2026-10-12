@@ -246,8 +246,8 @@ export class ChoreRunReader implements ChoreRunView {
 
 /** Chore runs as a write round changes them. */
 export interface ChoreRunDraft extends ChoreRunView {
-  /** Adds the record of a run that ended. One id is written once. */
-  add(record: NewChoreRun): ChoreRunRecord;
+  /** Adds the record of a run that ended. One id is written once: a second record of it is refused. */
+  add(record: NewChoreRun): Promise<ChoreRunRecord>;
 }
 
 export class ChoreRunDraftState implements ChoreRunDraft {
@@ -259,8 +259,12 @@ export class ChoreRunDraftState implements ChoreRunDraft {
     return [...(await this.base.records()), ...[...this.added.values()].map((a) => a.record)].sort(byAt);
   }
 
-  add(record: NewChoreRun): ChoreRunRecord {
+  async add(record: NewChoreRun): Promise<ChoreRunRecord> {
     if (!RUN_PATTERN.test(record.id)) throw new Error(`a chore run id is cr- and 10 Crockford characters, not ${JSON.stringify(record.id)}`);
+    // Append-only: a record, once written, is never replaced.
+    if (this.added.has(record.id) || (await this.base.records()).some((base) => base.id === record.id)) {
+      throw new Error(`the chore run ${record.id} already has its record`);
+    }
     const bytes = serializeChoreRun(record);
     const added = parseChoreRun(record.id, bytes);
     this.added.set(record.id, { bytes, record: added });
