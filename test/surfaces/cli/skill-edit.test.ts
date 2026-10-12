@@ -330,13 +330,20 @@ describe('grimoire skill edit', () => {
 
   test('BUSY at the commit offers to try again, and the retry commits once the tracker is free', async ({ world, grimoire }) => {
     const { ctx } = grimoire;
-    const core = grimoire.makeCore({ writeBudgetMs: 300 });
+    // While the lock is held, a short write budget, so the BUSY comes quickly. Once it is free, the
+    // default budget: a whole write (gits started and answering on Windows, or on any loaded machine)
+    // can take longer than the short one, and the retry would be BUSY again for no fault of the flow.
+    const whileHeld = grimoire.makeCore({ writeBudgetMs: 300 });
+    const onceFree = grimoire.makeCore();
+    let free = false;
+    const core: Core = { ...onceFree, call: (name, input, c) => (free ? onceFree : whileHeld).call(name, input, c) };
     const held = await new MachineLocalStore(path.join(world.a.dir, '.git')).locks.acquire('tracker-write');
     if (held.status !== 'acquired') throw new Error('could not take the fairness lock');
     const run = await scripted(world, [{ write: notes('One.') }], [
       'release-notes',
       async () => {
         await held.lock.release();
+        free = true;
         return 'r';
       },
     ]);
