@@ -6,8 +6,9 @@
 //   outside the release's K refuses (a downgrade below what the data needs);
 //   one below its J needs a compat raise, which `--yes` never makes.
 // - Step 2: the machine-local upgrade-in-progress record, written before the
-//   (store, worktree) lease is taken and removed once config.yml pins the new
-//   version. While it exists, upkeep, `init` and `doctor --fix` at any other
+//   (store, worktree) lease is taken (a compare-and-set against the record the
+//   run read, carrying the run's token) and removed once config.yml pins the
+//   new version; a run only ever undoes or clears its own record. While it exists, upkeep, `init` and `doctor --fix` at any other
 //   pin leave the worktree alone, and pruning keeps both copies.
 // - Step 7: exactly the paths to commit: those the upgrade changes against
 //   HEAD (so a resumed upgrade reports what the interrupted run wrote too),
