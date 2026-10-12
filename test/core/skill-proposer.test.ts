@@ -9,7 +9,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { CallContext, ChoreBrief, ChoreReadResult, Core } from '../../src/core';
 import { parseSessionRecord, serializeSessionRecord } from '../../src/capture/session-record';
-import { INVALID_RESULTS } from '../../src/knowledge/chores';
+import { INVALID_RESULTS, readRun, writeRun } from '../../src/knowledge/chores';
 import { MachineLocalStore } from '../../src/machine-local';
 import { inspectTrees, openTracker, parseProposal, serializeProposal } from '../../src/tracker';
 import type { Checkout, Clone } from '#harness';
@@ -264,6 +264,19 @@ describe('chore_submit: repeats, the pending slot and moved bases', () => {
     // Different advice passes.
     const other = ok(await submit(again, patchResult(again, { ops: [{ op: 'append', text: '\n## Ports\n\nLet the OS pick: listen on port 0, then pass the bound port to the client.\n' }] })));
     expect(other).toMatchObject({ result: 'proposed' });
+  });
+
+  test('a proposal whose commit landed but whose run end was lost replays proposed on a retry, without PENDING_LIMIT or a second commit', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const submitted = ok(await submit(p, patchResult(p)));
+    const tip = await trackerTip(world.a);
+    // The process died after the commit: this machine still holds the run open.
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'), world.a.dir);
+    await writeRun(store, { ...(await readRun(store, p.brief.run))!, state: 'open', ended_at: null, outcome: undefined });
+
+    expect(ok(await submit(p, patchResult(p)))).toEqual({ ...submitted, replayed: true });
+    expect(await trackerTip(world.a)).toBe(tip);
+    expect((await readRun(store, p.brief.run))?.state).toBe('ended');
   });
 
   test('a second submit while one is pending gives PENDING_LIMIT, judged on the merged view; a base moved since serving gives BASE_MOVED; nothing changes', async ({

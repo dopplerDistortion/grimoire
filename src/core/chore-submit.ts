@@ -435,6 +435,9 @@ async function submitProposal(
 
   // A first look on the view as it stands: token origins ask git about the checkout, which no write round should wait on.
   const view = await tracker.read();
+  // A retry whose earlier commit landed replays from the record before any check: its own proposal holds the slot.
+  const landed = (await view.choreRuns.records()).find((record) => record.id === run.id);
+  if (landed) return recover(landed, run, store, env, now);
   if (proposes(result)) await refusePending(view, scanner);
   const first = await checkProposal(result, await contextOf(view));
   let tokens: { version: string; origins: TokenOrigin[] } | null = null;
