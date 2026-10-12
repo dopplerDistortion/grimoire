@@ -337,16 +337,22 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     let push = false;
     let purge = false;
     const unpushed = pre.unpushed?.commits ?? 0;
-    if (unpushed > 0 && pre.view && autoSyncOn(pre.view)) {
+    // Releasing and cutting commit too: what they write is unpushed as well.
+    const writes = release || cut;
+    const more = writes ? (unpushed > 0 ? ', plus what releasing and cutting write' : 'what releasing and cutting write') : '';
+    const what = `${unpushed > 0 ? plural(unpushed, 'unpushed tracker commit') : ''}${more}`;
+    if ((unpushed > 0 || writes) && pre.view && autoSyncOn(pre.view)) {
       push = true;
-      say(`Auto-sync is on: leave pushes the ${plural(unpushed, 'unpushed tracker commit')} first.`);
-    } else if (unpushed > 0) {
-      push = yes(await prompter.ask(`Push the ${plural(unpushed, 'unpushed tracker commit')} before leaving? [y/N] `));
-      if (!push) say(`The local tracker ref keeps ${unpushed === 1 ? 'it' : 'them'}: leave keeps the ref and prints the command that deletes it.`);
+      say(`Auto-sync is on: leave pushes ${what} first.`);
+    } else if (unpushed > 0 || writes) {
+      push = yes(await prompter.ask(`Push ${what} before leaving? [y/N] `));
+      if (!push) say('The local tracker ref keeps what isn’t pushed: leave keeps the ref and prints the command that deletes it.');
     }
     const withText = pre.unpushed?.withText ?? 0;
-    if (push && withText > 0) {
-      purge = yes(await prompter.ask(`${plural(withText, 'unpushed commit')} ${withText === 1 ? 'carries' : 'carry'} excerpt text. Purge it before the push? [y/N] `));
+    const cutText = writes && pre.view !== null && storeExcerptMode(pre.view) === 'excerpts';
+    if (push && (withText > 0 || cutText)) {
+      const now = withText > 0 ? `${plural(withText, 'unpushed commit')} ${withText === 1 ? 'carries' : 'carry'} excerpt text${cutText ? ', and the cut may add more' : ''}` : 'The cut may attach excerpt text';
+      purge = yes(await prompter.ask(`${now}. Purge the unpushed excerpt text before the push? [y/N] `));
     }
     if (pre.localTip !== null && !push) say('Pushed excerpts stay in the remote’s history.');
 

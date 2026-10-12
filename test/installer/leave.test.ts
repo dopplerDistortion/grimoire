@@ -17,6 +17,9 @@ import { VERSION } from '../../src/version';
 import { coreTest as test, fetchTracker, pushTracker, trackerTip } from '../core/support';
 import { editSkill, existsIn, generatedFolders, gitStatus, NOTES, pinAndCommit, terminal } from '../generated/support';
 import { joinClone, reportingPackage } from './support';
+import { attemptDir, claimed, created, parseRecord, test as captureTest, type StoredRecord } from '../core/capture-support';
+import { stripExcerptText } from '../../src/capture/session-record';
+import { listStrayEdits } from '../../src/generated';
 
 /** A person's answers, in order; each question asked is recorded. */
 function answering(...answers: string[]): { ask(question: string): Promise<string | null>; asked: string[] } {
@@ -175,7 +178,7 @@ describe('the local tracker ref', () => {
 
     const { report, asked } = await leave(world.a.dir, grimoire.ctx, ['n', 'leave']);
 
-    expect(asked[0]).toMatch(/Push the 2 unpushed tracker commits before leaving\?/);
+    expect(asked[0]).toMatch(/Push 2 unpushed tracker commits before leaving\?/);
     expect(report.left).toBe(true);
     expect(report.removed.tracker_ref).toBeNull();
     expect(report.kept.tracker_ref).toMatchObject({ tip, command: 'git update-ref -d refs/grimoire/tracker' });
@@ -211,5 +214,76 @@ describe('the gate', () => {
     expect(existsSync(store.dir)).toBe(true);
     for (const folder of generatedFolders('release-notes')) expect(await existsIn(world.a, folder), folder).toBe(true);
     expect(await trackerTip(world.a)).toBe(tip);
+  });
+});
+
+/** The session records of `attempt` on the remote's tracker branch (the local ref may be gone). */
+async function remoteSessionRecords(checkout: Checkout, id: string, attempt: string): Promise<(StoredRecord & { raw: string })[]> {
+  const tip = (await checkout.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]!;
+  const dir = `${attemptDir(id, attempt)}/sessions`;
+  const listed = await checkout.gitResult(['ls-tree', '--name-only', `${tip}:${dir}`]);
+  if (listed.code !== 0) return [];
+  const names = listed.stdout.split('\n').filter(Boolean);
+  return Promise.all(
+    names.map(async (name) => {
+      const raw = (await checkout.gitResult(['cat-file', 'blob', `${tip}:${dir}/${name}`])).stdout;
+      return { ...parseRecord(name, raw), raw };
+    }),
+  );
+}
+
+describe('the offers', () => {
+  captureTest('releasing the open attempts held from this machine ends them as abandoned, and the final sync pushes the release', async ({ world, grimoire, capture }) => {
+    const id = await created(capture.core, grimoire.ctx, 'Held here');
+    const attempt = await claimed(capture.core, grimoire.ctx, id);
+
+    const { report, asked } = await leave(world.a.dir, grimoire.ctx, ['y', 'n', 'leave'], { capture: capture.options });
+
+    expect(asked[0]).toMatch(/Release them as abandoned before leaving\?/);
+    // Releasing ends every held attempt: there is nothing left to cut.
+    expect(asked.some((question) => /Cut the/.test(question))).toBe(false);
+    expect(report.released).toEqual([{ id, attempt }]);
+    const tip = (await world.a.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]!;
+    const end = await world.a.git(['cat-file', 'blob', `${tip}:${attemptDir(id, attempt)}/end.md`]);
+    expect(end).toMatch(/abandoned/);
+    expect(report.removed.tracker_ref).toBe(tip);
+  });
+
+  captureTest('cutting the uncut contexts attaches their session records to the open attempt; the purge strips their excerpt text before the push', async ({ world, grimoire, capture }) => {
+    const id = await created(capture.core, grimoire.ctx, 'Still open');
+    const attempt = await claimed(capture.core, grimoire.ctx, id);
+
+    const { report, asked } = await leave(world.a.dir, grimoire.ctx, ['n', '', 'y', 'leave'], { capture: capture.options });
+
+    expect(asked[1]).toMatch(/Cut the 1 bound context still uncut and attach their session records \(excerpt mode excerpts\)\?/);
+    expect(asked[2]).toMatch(/Purge the unpushed excerpt text before the push\?/);
+    expect(report.released).toEqual([]);
+    expect(report.cut).toMatchObject({ contexts: 1, attached: 1 });
+    expect(report.purged).toBeGreaterThan(0);
+    const records = await remoteSessionRecords(world.a, id, attempt);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.fields).toMatchObject({ context: 'main', facts: 'scanned' });
+    // No excerpt text is left to strip.
+    expect(stripExcerptText(Buffer.from(records[0]!.raw))).toBeNull();
+    expect(report.sync).toMatchObject({ pushed: true });
+  });
+
+  test('stray edits are listed, saved ones and copies edited since; stopping to record them saves each and removes nothing', async ({ world, grimoire }) => {
+    await pinAndCommit(world.a);
+    const feature = await world.a.addWorktree('feature');
+    const store = await joined(world.a);
+    await serveSkill(grimoire.makeCore(), grimoire.ctx);
+    const edited = `${NOTES}\nAlso bump the version in \`package.json\`.\n`;
+    await writeFile(path.join(feature.dir, '.grimoire', 'skills', 'release-notes', 'SKILL.md'), edited);
+
+    const { report, said } = await leave(world.a.dir, grimoire.ctx, ['y']);
+
+    expect(report).toMatchObject({ left: false, stopped: 'stray-edits' });
+    expect(report.stray_edits).toEqual([{ id: null, skill: 'release-notes', worktree: feature.dir, path: '.grimoire/skills/release-notes/SKILL.md' }]);
+    const saved = await listStrayEdits(store);
+    expect(saved).toMatchObject([{ skill: 'release-notes', worktree: feature.dir, text: edited }]);
+    expect(said).toContain(`  grimoire skill record ${saved[0]!.id}`);
+    expect(existsSync(store.dir)).toBe(true);
+    for (const folder of generatedFolders('release-notes')) expect(await existsIn(world.a, folder), folder).toBe(true);
   });
 });
