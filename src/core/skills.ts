@@ -23,6 +23,8 @@ import { checkHygiene, type SecretScanner } from '../scanner';
 import type { DeliveryState, OfferedSkill, TrackerView } from '../tracker';
 import { ledgerFile } from '../tracker/layout';
 import { offeredSkills } from '../generated/offered';
+import { deriveScorecards, type AttentionFlag, type Scorecard, type TraceFacts } from '../knowledge/scorecards';
+import { traceCapture } from './capture';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
 import { define, oneLine, writer, type OpEnv } from './op';
 import { s } from './schema';
@@ -206,6 +208,10 @@ export interface ShownSkill {
   /** An accept against a reject of one proposal; `withheld` when a reject was `suspicious`. */
   contested: { proposal: string; accepted: string[]; rejected: string[]; withheld: boolean }[];
   provenance: SkillProvenance | null;
+  /** Watch-only scorecards (spec §18): one per version the ledger records, newest first, each with the version before it. */
+  scorecards: Scorecard[];
+  /** The attention flags of the version the ledger makes current. */
+  attention: AttentionFlag[];
   /** With `name`: the current version's text. */
   text?: string | null;
   /** With `name`: every record of the skill, each after the ones it follows. */
@@ -283,6 +289,7 @@ export const skillShow = define({
       states.map((state) => state.current?.id).filter((id): id is string => id !== undefined),
     );
     const skills: ShownSkill[] = [];
+    const traces = states.length === 0 ? [] : await traceFacts(view);
     for (const state of states) {
       const descriptionOf = async (version: string | null) => {
         const text = version === null ? null : await book.text(version);
@@ -310,7 +317,10 @@ export const skillShow = define({
         provenance: state.current
           ? { ...shownChange(state.current), origin: origin(state.current), actor: { ...state.current.actor }, commit: commits.get(state.current.id) ?? null }
           : null,
+        scorecards: deriveScorecards(state.name, state.records, traces),
+        attention: [],
       };
+      shown.attention = [...(shown.scorecards.find((card) => card.version === state.version)?.attention ?? [])];
       if (input.name !== undefined) {
         shown.text = state.version === null ? null : await book.text(state.version);
         shown.history = state.records.map((record) => ({
@@ -466,3 +476,30 @@ export const skillEdit = define({
     return write.result;
   },
 });
+
+/** What scorecards need of every sealed trace in `view` (spec §18): its start and end facts, outcome, and captured reads. */
+async function traceFacts(view: TrackerView): Promise<TraceFacts[]> {
+  const traces: TraceFacts[] = [];
+  for (const attempt of view.allAttempts()) {
+    if (attempt.end === null) continue;
+    const capture = await traceCapture(view, attempt.id);
+    const reads = capture.contexts.flatMap((context) =>
+      context.skills_read.flatMap((read) => {
+        const { name, version } = (read ?? {}) as { name?: unknown; version?: unknown };
+        return typeof name === 'string' ? [{ name, version: typeof version === 'string' ? version : null }] : [];
+      }),
+    );
+    traces.push({
+      attempt: attempt.id,
+      workerKind: attempt.end.worker_kind,
+      delivery: attempt.start.delivery ?? null,
+      wikiExposed: attempt.end.wiki_exposed,
+      offered: attempt.start.skills_offered ?? null,
+      reads,
+      factsComplete: capture.facts_complete,
+      outcome: attempt.outcome ? { verdict: attempt.outcome.verdict, reason: attempt.outcome.reason } : null,
+      endedAt: attempt.end.at,
+    });
+  }
+  return traces;
+}

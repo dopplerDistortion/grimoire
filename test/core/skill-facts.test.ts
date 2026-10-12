@@ -8,7 +8,9 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { Checkout } from '#harness';
 import type { CallContext, Core } from '../../src/core';
-import { coreTest as test, trackerFile, trackerTip } from './support';
+import { parseSessionRecord, serializeSessionRecord } from '../../src/capture/session-record';
+import { openTracker } from '../../src/tracker';
+import { coreTest as test, T0, trackerFile, trackerTip } from './support';
 
 /** A human at an interactive terminal: the CLI with no agent marker and a TTY. */
 function terminal(ctx: CallContext): CallContext {
@@ -104,5 +106,139 @@ describe('offered skills at the claim', () => {
     const start = await startOf(world.a, id, attempt);
     expect(start).toMatch(/^delivery: "off"$/m);
     expect(start).toMatch(/^skills_offered: \[\]$/m);
+  });
+});
+
+/** One sealed trace as capture leaves it: its start, its bound contexts' session records, its end and outcome. */
+interface TraceSpec {
+  worker?: 'agent' | 'human';
+  delivery?: 'on' | 'off';
+  wikiExposed?: boolean;
+  offered?: { name: string; version: string }[];
+  /** Each bound context's facts status and the reads it found. */
+  contexts: { facts: string; reads: { name: string; version: string | null }[] }[];
+  verdict: 'pass' | 'fail' | 'none';
+  reason?: string;
+}
+
+/** Writes sealed traces straight into the tracker in `checkout`, one issue each, as capture and the ending ops would. */
+async function writeTraces(checkout: Checkout, core: Core, ctx: CallContext, traces: TraceSpec[]): Promise<void> {
+  const ids: string[] = [];
+  for (const _trace of traces) {
+    const created = await core.call('create', { title: 'Traced' }, ctx);
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    ids.push(created.result.id);
+  }
+  const tracker = await openTracker(checkout.dir);
+  try {
+    await tracker.transact(
+      { op: 'close', author: { name: 'Alice', email: 'alice@example.com' }, actor: { kind: 'agent', client: 'claude-code', nonce: 'n' } },
+      (draft) => {
+        traces.forEach((trace, index) => {
+          const worker = trace.worker ?? 'agent';
+          const actor = worker === 'agent' ? { person: 'alice@example.com', kind: 'agent', client: 'claude-code', session: `s-${index}`, nonce: 'n' } : { person: 'alice@example.com', kind: 'human', client: 'cli', nonce: 'n' };
+          const opened = draft.openAttempt(ids[index]!, {
+            assignee: 'alice@example.com',
+            actor,
+            opened: 'claim',
+            wiki_exposed: false,
+            delivery: trace.delivery ?? 'on',
+            skills_offered: trace.offered ?? [],
+          });
+          trace.contexts.forEach((context, n) => {
+            const record = parseSessionRecord(Buffer.from(''));
+            const reads = context.reads.map((read) => ({ ...read, via: 'file', at: T0.toISOString(), session: `s-${index}`, context: 'main' }));
+            draft.putSessionRecord(opened.id, `${'0'.repeat(30)}${index}${n}`.slice(-32), serializeSessionRecord({ ...record, client: 'claude-code', facts: context.facts as never, skills_read: reads }));
+          });
+          draft.sealAttempt(opened.id, {
+            ended: trace.verdict === 'pass' ? 'done' : trace.verdict === 'fail' ? 'release' : 'canceled',
+            ended_by: actor,
+            debrief: null,
+            worker_kind: worker,
+            wiki_exposed: trace.wikiExposed ?? false,
+            field_changes: [],
+          });
+          draft.putOutcome(opened.id, { verdict: trace.verdict, reason: trace.reason ?? 'ended', set_by: 'grimoire' });
+        });
+        return { result: null };
+      },
+    );
+  } finally {
+    await tracker.close();
+  }
+}
+
+describe('watch-only scorecards', () => {
+  test('skill show scores each version from its agent traces: offered against read, outcomes and reopens of the readers, read unknown where facts are incomplete, wiki-exposed and delivery-off apart, and the attention flag', async ({
+    world,
+    grimoire,
+  }) => {
+    const { core, ctx } = grimoire;
+    const v1 = await edit(core, ctx, 'deploy-steps', DEPLOY_V1, null);
+    const v2 = await edit(core, ctx, 'deploy-steps', DEPLOY_V2, v1);
+    const offeredV2 = [{ name: 'deploy-steps', version: v2 }];
+    const readV2 = [{ facts: 'scanned', reads: [{ name: 'deploy-steps', version: v2 }] }];
+    await writeTraces(world.a, core, ctx, [
+      // Four agents read v2: three fails (one of them a reopened close), one pass.
+      { offered: offeredV2, contexts: readV2, verdict: 'fail' },
+      { offered: offeredV2, contexts: readV2, verdict: 'fail' },
+      { offered: offeredV2, contexts: [...readV2, { facts: 'scanned', reads: [] }], verdict: 'pass' },
+      { offered: offeredV2, contexts: readV2, verdict: 'fail', reason: 'reopened' },
+      // A person read it: never scored.
+      { worker: 'human', offered: offeredV2, contexts: readV2, verdict: 'pass' },
+      // Offered, and a context whose facts are incomplete: read unknown, never "not read".
+      { offered: offeredV2, contexts: [{ facts: 'scanned', reads: [] }, { facts: 'not_found', reads: [] }], verdict: 'pass' },
+      // Offered, every context scanned, never read.
+      { offered: offeredV2, contexts: [{ facts: 'scanned', reads: [] }], verdict: 'pass' },
+      // Wiki-exposed and delivery-off attempts are shown apart.
+      { offered: offeredV2, wikiExposed: true, contexts: readV2, verdict: 'pass' },
+      { offered: offeredV2, delivery: 'off', contexts: [{ facts: 'scanned', reads: [] }], verdict: 'fail' },
+      // One agent read v1.
+      { offered: [{ name: 'deploy-steps', version: v1 }], contexts: [{ facts: 'scanned', reads: [{ name: 'deploy-steps', version: v1 }] }], verdict: 'pass' },
+    ]);
+
+    const shown = await core.call('skill_show', { name: 'deploy-steps' }, terminal(ctx));
+
+    if (!shown.ok) throw new Error(JSON.stringify(shown.error));
+    const [skillShown] = shown.result.skills;
+    const none = { offered: 0, read: 0, read_unknown: 0, pass: 0, fail: 0, none: 0, reopens: 0 };
+    expect(skillShown!.scorecards).toEqual([
+      {
+        version: v2,
+        previous: v1,
+        offered: 6,
+        read: 4,
+        read_unknown: 1,
+        pass: 1,
+        fail: 3,
+        none: 0,
+        reopens: 1,
+        n: 4,
+        small_sample: true,
+        recurrence: null,
+        wiki_exposed: { ...none, offered: 1, read: 1, pass: 1 },
+        // Outcomes are the readers' in every group: the delivery-off attempt was offered v2 by a stale stub, never read it.
+        delivery_off: { ...none, offered: 1 },
+        attention: ['read_fails'],
+      },
+      {
+        version: v1,
+        previous: null,
+        offered: 1,
+        read: 1,
+        read_unknown: 0,
+        pass: 1,
+        fail: 0,
+        none: 0,
+        reopens: 0,
+        n: 1,
+        small_sample: true,
+        recurrence: null,
+        wiki_exposed: none,
+        delivery_off: none,
+        attention: [],
+      },
+    ]);
+    expect(skillShown!.attention).toEqual(['read_fails']);
   });
 });
