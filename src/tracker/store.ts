@@ -2,19 +2,20 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { GrimoireError } from '../errors';
 import { VERSION } from '../version';
-import { zeroOid } from '../git/objects';
+import { TREE_MODE, zeroOid, type TreeEntry } from '../git/objects';
 import { locateRepo, type RepoLocation } from '../git/repo';
 import { packedRefsStamp, RefUpdater, type RefUpdate } from '../git/refs';
 import { GIT_STALL_MS, GitStalledError, runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
-import { FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, SETTINGS_FILE, TRACKER_REF } from './layout';
+import { ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, SESSIONS_DIR, SETTINGS_FILE, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
-import { foldCommits } from './fold';
+import { countLateDrops } from './capture-stats';
+import { foldCommits, type FoldReport } from './fold';
 import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
 import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
 import { serializeSettings, settingLine } from './settings';
-import { syncTracker, type SyncOutcome, type SyncSpec, type TrackerRefs } from './sync';
+import { syncTracker, type SyncOutcome, type SyncSpec, type TextPolicy, type TrackerRefs } from './sync';
 import { Draft, SnapshotLoader, type Snapshot, type TrackerDraft, type TrackerView } from './view';
 
 export interface Person {
@@ -241,6 +242,8 @@ class GitTrackerStore implements TrackerStore {
   private readonly objects: TrackerObjects;
   private readonly loader: SnapshotLoader;
   private readonly snapshots = new BoundedMap<string, Snapshot>(16);
+  /** What each fold snapshot's fold noticed: counted once a write commits that fold. */
+  private readonly foldReports = new WeakMap<Snapshot, FoldReport>();
   private readonly bases = new BoundedMap<string, readonly string[]>(256);
   private readonly turnstile = new Turnstile();
   private readonly fairness: FairnessLock;
@@ -380,9 +383,110 @@ class GitTrackerStore implements TrackerStore {
         trackerRefs: () => this.trackerRefs(),
         isShallow: async () => this.isShallow(await this.resolveTips()),
         fold: (foldSpec) => this.fold(foldSpec),
+        stripUnpushed: (pushed, policy) => this.stripUnpushed(pushed, policy),
       },
       spec,
     );
+  }
+
+  /**
+   * Rewrites the unpushed segment (spec §4 Before every push, §3 Unpushed
+   * content): every local commit `pushed` lacks is written again, oldest
+   * first, with the same author, committer and message, its session records
+   * stripped of text wherever the remote's tip doesn't hold that very record,
+   * and its parents rewritten. Runs like a write (one at a time in this
+   * process, under the fairness lock) and moves the ref with a compare-and-set;
+   * the rewritten commits' reflog entries are expired. Null when the local
+   * tip's mode allows text or nothing carried any.
+   */
+  private async stripUnpushed(pushed: string | null, policy: TextPolicy): Promise<string | null> {
+    const deadline = Date.now() + this.budgetMs;
+    const turn = await this.turnstile.run(deadline, async () => {
+      const lock = await this.fairness.acquire(deadline);
+      if (!lock) throw busy('another grimoire write held the tracker for the whole write budget');
+      try {
+        for (;;) {
+          const local = (await this.trackerRefs()).local;
+          if (local === null || local === pushed) return null;
+          if (!policy.forbidsText(await this.snapshotAt(local))) return null;
+          const rewritten = await this.rewriteSegment(local, pushed, policy);
+          if (rewritten === local) return null;
+          const move = await this.moveRef(local, rewritten);
+          if (move.moved) {
+            await this.git(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', TRACKER_REF]).catch(() => {});
+            return rewritten;
+          }
+          if (move.staleLock) throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
+          if (Date.now() >= deadline) throw busy('the tracker kept moving while sync rewrote its unpushed commits');
+        }
+      } finally {
+        await lock.release();
+      }
+    });
+    if (!turn) throw busy('other writes in this process held the tracker for the whole write budget');
+    return turn.value;
+  }
+
+  /** The segment `local` holds beyond `pushed`, written again with its records' text stripped: the new tip (`local` when nothing changed). */
+  private async rewriteSegment(local: string, pushed: string | null, policy: TextPolicy): Promise<string> {
+    const listed = await this.git(['rev-list', '--reverse', '--topo-order', '--parents', local, ...(pushed ? [`^${pushed}`] : [])]);
+    if (listed.code !== 0) throw new Error(`git rev-list failed: ${listed.stderr.toString().trim()}`);
+    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
+    const trees = new Map<string, string>();
+    const mapped = new Map<string, string>();
+    for (const line of listed.stdout.toString('utf8').split(/\r?\n/)) {
+      if (line === '') continue;
+      const [commit, ...parents] = line.split(' ') as [string, ...string[]];
+      const { tree } = await this.objects.commit(commit);
+      let stripped = trees.get(tree);
+      if (stripped === undefined) {
+        stripped = await this.stripTree(tree, pushedTree, policy);
+        trees.set(tree, stripped);
+      }
+      const newParents = parents.map((parent) => mapped.get(parent) ?? parent);
+      if (stripped === tree && newParents.every((parent, i) => parent === parents[i])) {
+        mapped.set(commit, commit);
+        continue;
+      }
+      const raw = (await this.objects.commitBytes(commit)).toString('utf8');
+      const split = raw.indexOf('\n\n');
+      // Same author, committer and message; a signature (and its continuation lines) no longer holds, so it goes.
+      let signature = false;
+      const header = (split < 0 ? raw : raw.slice(0, split)).split('\n').filter((l) => {
+        if (l.startsWith(' ')) return !signature;
+        signature = l.startsWith('gpgsig');
+        return !signature && !l.startsWith('tree ') && !l.startsWith('parent ');
+      });
+      const rest = split < 0 ? '' : raw.slice(split);
+      const bytes = [`tree ${stripped}`, ...newParents.map((parent) => `parent ${parent}`), ...header].join('\n') + rest;
+      mapped.set(commit, await this.objects.write('commit', Buffer.from(bytes, 'utf8')));
+    }
+    return mapped.get(local) ?? local;
+  }
+
+  /** `tree` with the text stripped from each session record that `pushedTree` doesn't hold at the same path. */
+  private async stripTree(tree: string, pushedTree: string | null, policy: TextPolicy): Promise<string> {
+    const edits = new Map<string, Buffer>();
+    const entriesOf = async (oid: string | null) => new Map((oid ? await this.objects.tree(oid) : []).map((e): [string, TreeEntry] => [e.name, e]));
+    const walk = async (oid: string, pushedOid: string | null, at: readonly string[]): Promise<void> => {
+      if (oid === pushedOid) return;
+      const [ours, theirs] = await Promise.all([entriesOf(oid), entriesOf(pushedOid)]);
+      for (const [name, entry] of ours) {
+        if (at.length === 0 && name !== ATTEMPTS_DIR) continue;
+        const held = theirs.get(name);
+        if (held && held.oid === entry.oid && held.mode === entry.mode) continue;
+        const path = [...at, name];
+        if (entry.mode === TREE_MODE) {
+          if (path.length < 7) await walk(entry.oid, held?.mode === TREE_MODE ? held.oid : null, path);
+        } else if (path.length === 7 && path[5] === SESSIONS_DIR && name.endsWith('.md')) {
+          const without = policy.stripText(await this.objects.blob(entry.oid));
+          if (without) edits.set(path.join('/'), without);
+        }
+      }
+    };
+    await walk(tree, pushedTree, []);
+    if (edits.size === 0) return tree;
+    return (await this.objects.editTree(tree, edits)) ?? tree;
   }
 
   private async rounds<R>(
@@ -451,6 +555,9 @@ class GitTrackerStore implements TrackerStore {
     const move = await this.moveRef(tips.local, commit);
     if (move.moved) {
       this.commentMs = Math.max(this.commentMs, draft.roundCommentMs ?? 0);
+      // The fold this write committed dropped late session records: counted in this machine's doctor stats.
+      const drops = snapshot.virtual ? this.foldReports.get(snapshot)?.lateDrops : undefined;
+      if (drops && drops.length > 0) await countLateDrops(this.location.commonDir, drops, now).catch(() => {});
       return {
         result: outcome.result,
         commit,
@@ -683,8 +790,10 @@ class GitTrackerStore implements TrackerStore {
       const marker = await this.objects.fileAt(tree, FORMAT_FILE);
       checkTrackerMarker(marker ? parseMarker(marker.toString('utf8')) : null);
       const virtual = new VirtualObjects(this.objects);
-      const merged = await foldCommits(virtual, (commits) => this.mergeBases(commits), local, remote);
+      const report: FoldReport = { lateDrops: [] };
+      const merged = await foldCommits(virtual, (commits) => this.mergeBases(commits), local, remote, report);
       snapshot = await this.loader.folded(local, remote, merged, virtual);
+      this.foldReports.set(snapshot, report);
       this.snapshots.set(key, snapshot);
     }
     return snapshot;

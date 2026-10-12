@@ -1114,7 +1114,8 @@ function label(step: Step): string {
  * window's steps). Update them with `vitest -u`, then review the diff.
  */
 async function expectGolden(name: string, result: Cut): Promise<void> {
-  const { excerpt, ...rest } = result;
+  // The stamp names this machine's temp copy and its times: no golden holds it.
+  const { excerpt, stamp, ...rest } = result;
   await expect(excerpt).toMatchFileSnapshot(`./golden/codex/${name}.excerpt.txt`);
   await expect(`${JSON.stringify(rest, null, 2)}\n`).toMatchFileSnapshot(`./golden/codex/${name}.cut.json`);
 }

@@ -15,7 +15,7 @@ export {
   TRACKER_ROOT_KEY,
   namedTrackerRoot,
 } from './store';
-export type { SyncOutcome, SyncSpec, SyncFailure } from './sync';
+export type { SyncOutcome, SyncSpec, SyncFailure, TextPolicy } from './sync';
 export { stripUserinfo, type SyncFailureClass } from './remote';
 export type { TrackerView, TrackerDraft, NewComment, NewAttempt, NewEnd, NewOutcome } from './view';
 export type { IssueComment, CommentEntry } from './comment';
@@ -38,6 +38,7 @@ export { bareId, collisionSides, parseWriteRef, ID_PATTERN } from './ids';
 export type { StoreSetting } from './settings';
 export type { Tombstone } from './retired';
 export { TRACKER_REF } from './layout';
+export { CAPTURE_STATS, LATE_CUT_DROPS, type LateCutDrops } from './capture-stats';
 export { TRACKER_FORMAT_RANGE, V1_MARKER } from './marker';
 export {
   pageVersion,

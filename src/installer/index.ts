@@ -53,5 +53,6 @@ export { ENTRY_KINDS, MANIFEST_PATH, readManifest, type ClientName, type EntryKi
 export { CODEX_ENV_VARS, codexHookHash, desiredEntries, isContentEntry, type DesiredEntry, type PointerOptions } from './pointers';
 export { applyFiles, planFiles, type EntryAction, type FilePlan, type PlannedEntry } from './writer';
 export { existingAdapterPlacement, planContentRefresh, refreshContentPointers, type ContentPlan, type ContentRefresh, type ContentSkip } from './refresh';
-export { disclosureLines, runInit, type InitFlags, type InitOptions, type InitReport, type Prompter } from './init';
+export { disclosureLines } from '../core/settings';
+export { runInit, type InitFlags, type InitOptions, type InitReport, type Prompter } from './init';
 export { runningPackage } from './source';

@@ -11,7 +11,7 @@ import { parseIssue, serializeIssue, type IssueLink, type IssueRecord } from './
 import { parseSetting, serializeSettings, settingLines } from './settings';
 
 /** Orders two ISO times; unparsable ones compare as text. */
-function compareTimes(x: string, y: string): number {
+export function compareTimes(x: string, y: string): number {
   const tx = Date.parse(x);
   const ty = Date.parse(y);
   if (!Number.isNaN(tx) && !Number.isNaN(ty) && tx !== ty) return tx - ty;
@@ -186,6 +186,18 @@ export function sessionReach(bytes: Buffer): Reach | null {
       const ref = typeof value.ref === 'number' ? String(value.ref) : typeof value.ref === 'string' ? value.ref : '';
       return { at: value.at, ref };
     }
+  }
+  return null;
+}
+
+/** When a session record was cut (its `cut_at`), or null when it doesn't say. */
+export function sessionCutAt(bytes: Buffer): string | null {
+  const text = bytes.toString('utf8');
+  const close = text.startsWith('---\n') ? text.indexOf('\n---\n', 3) : -1;
+  for (const { key, raw } of close < 0 ? [] : parseLines(text.slice(4, close))) {
+    if (key !== 'cut_at') continue;
+    const value = lineValue(raw);
+    return typeof value === 'string' && value !== '' ? value : null;
   }
   return null;
 }

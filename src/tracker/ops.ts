@@ -43,7 +43,8 @@ const OP_EFFECTS: ReadonlyMap<string, OpEffect> = new Map<string, OpEffect>([
     ] as const
   ).map((op) => [op, 'knowledge'] as const),
   ['settings-set', 'settings'],
-  ...(['fold', 'init', 'purge'] as const).map((op) => [op, 'reload'] as const),
+  // A sweep's capture attaches session records to open attempts of any issue, naming none.
+  ...(['fold', 'init', 'purge', 'capture'] as const).map((op) => [op, 'reload'] as const),
 ]);
 
 /** What a commit with `Grimoire-Op: <op>` changed; `reload` for an op this release doesn't list. */

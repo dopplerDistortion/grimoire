@@ -1,7 +1,7 @@
 import { createScanner, bundledRules, type SecretScanner } from '../scanner';
 import { buildExcerpt } from './excerpt';
 import { pathRewriter, type PathSpellings } from './paths';
-import { isCall, isResult, type ResultStep, type Step, type StepOrigin, type ToolCallStep, type Transcript } from './steps';
+import { isCall, isResult, type ResultStep, type Step, type StepOrigin, type ToolCallStep, type Transcript, type TranscriptStamp } from './steps';
 
 // Cutting one bound context's transcript (spec §14 Window, Readers' format
 // check, The excerpt): client-neutral, over the steps a client's reader made.
@@ -102,6 +102,8 @@ export interface Cut {
   readonly callIds: readonly string[];
   /** The excerpt text. `null` unless the status is `cut`. */
   readonly excerpt: string | null;
+  /** The transcript file read, as it stood just before the read, when one was read. */
+  readonly stamp?: TranscriptStamp;
 }
 
 const bundled = createScanner(bundledRules);
@@ -117,6 +119,7 @@ export function cutTranscript(transcript: Transcript, options: CutOptions): Cut 
     context: transcript.context,
     agentType: transcript.agentType,
     lines: transcript.lines,
+    ...(transcript.stamp ? { stamp: transcript.stamp } : {}),
   };
 
   // The format check: every binding call must be found. One missing inside the

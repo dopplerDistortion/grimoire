@@ -1013,7 +1013,8 @@ function isCallStep(step: Step): step is Step & { kind: 'tool_call' | 'subagent_
  * window's steps). Update them with `vitest -u`, then review the diff.
  */
 async function expectGolden(name: string, result: Cut): Promise<void> {
-  const { excerpt, ...rest } = result;
+  // The stamp names this machine's temp copy and its times: no golden holds it.
+  const { excerpt, stamp, ...rest } = result;
   await expect(excerpt).toMatchFileSnapshot(`./golden/claude-code/${name}.excerpt.txt`);
   await expect(`${JSON.stringify(rest, null, 2)}\n`).toMatchFileSnapshot(`./golden/claude-code/${name}.cut.json`);
 }
