@@ -247,3 +247,72 @@ describe('concurrent clones', () => {
     }
   });
 });
+
+// A sync that holds the lease while another process writes, and detached sync children: real
+// processes and real waits, so they run here rather than beside the main suite.
+describe('two processes in one clone', () => {
+  test('a write that lands while another process’s sync is finishing is still pushed, though its own sync finds that sync holding the lease', async ({
+    world,
+    grimoire,
+  }) => {
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    // Something else holds the sync status open, so the first sync, done with git, waits to record it, holding the lease.
+    const recording = machine.records.update('sync-status', 'tracker', async (current) => {
+      await gate;
+      return current;
+    });
+    const first = syncingCore(grimoire);
+    const second = syncingCore(grimoire);
+
+    await closeOne(first, grimoire.ctx, 'First');
+    await until(async () => (await remoteTracker(world.a)) === (await trackerTip(world.a)), 'the first push');
+    await sleep(500);
+    await closeOne(second, grimoire.ctx, 'Second');
+    await second.close();
+    expect(await remoteTracker(world.a)).not.toBe(await trackerTip(world.a));
+
+    open();
+    await recording;
+    await first.close();
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+    expect((await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).pending_since).toBeNull();
+  });
+});
+
+describe('the detached sync child', () => {
+  test('a CLI-style write sets the marker, then a detached child registers a process record, pushes and clears it', async ({
+    world,
+    grimoire,
+    onTestFinished,
+  }) => {
+    const child = await bundleCallProcess('sync-child.ts');
+    onTestFinished(() => child.cleanup());
+    // The remote takes a while, so the child is caught alive.
+    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nsleep 3\n', { mode: 0o755 });
+    const core = grimoire.makeCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [child.script, world.a.dir] }) });
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await closeOne(core, grimoire.ctx);
+    await core.close();
+
+    await until(async () => (await machine.processes.live({ role: 'sync' })).length === 1, 'the child’s process record');
+    const running = await ok(grimoire.core.call('sync_status', {}, grimoire.ctx));
+    expect(running.pending_since).not.toBeNull();
+    expect((await machine.processes.live({ role: 'sync' }))[0]).toMatchObject({ client: 'codex', worktree: world.a.dir });
+    await until(async () => (await remoteTracker(world.a)) === (await trackerTip(world.a)), 'the push');
+    await until(async () => (await machine.processes.live({ role: 'sync' })).length === 0, 'the child to finish');
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ pending_since: null, last_result: 'pushed' });
+  });
+
+  test('a child that dies before it syncs leaves the sync-pending marker for upkeep', async ({ world, grimoire }) => {
+    const core = grimoire.makeCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: ['-e', 'process.exit(0)'] }) });
+    await closeOne(core, grimoire.ctx);
+    await core.close();
+    await sleep(500);
+
+    const status = await ok(grimoire.core.call('sync_status', {}, grimoire.ctx));
+    expect(status.pending_since).not.toBeNull();
+    expect(await remoteTracker(world.a)).toBeNull();
+  });
+});

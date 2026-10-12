@@ -14,6 +14,7 @@ import {
   remoteLines,
   runNetworkGit,
   stripUserinfo,
+  type NetworkGitOptions,
   type NetworkGitRun,
   type SyncFailureClass,
 } from './remote';
@@ -31,6 +32,9 @@ export interface TextPolicy {
   stripText(bytes: Buffer): Buffer | null;
 }
 
+/** Runs one network git step in a checkout: runNetworkGit, unless a test stands in for the remote. */
+export type NetworkGit = (cwd: string, args: readonly string[], options: NetworkGitOptions) => Promise<NetworkGitRun>;
+
 /** What one sync needs to know about its caller. */
 export interface SyncSpec {
   /** Author and committer of a fold commit; null when the person has no git identity (a fold then gives NO_GIT_IDENTITY). */
@@ -45,6 +49,10 @@ export interface SyncSpec {
   readonly deadline?: number;
   /** The excerpt mode's rule for what a push may carry (default: none, nothing is rewritten). */
   readonly text?: TextPolicy;
+  /** Runs each network step (default: runNetworkGit). A test seam: a stand-in answers a push with lost races. */
+  readonly network?: NetworkGit;
+  /** Waits out the pause before a retry after a lost race (default: a timer). A test seam, like `network`. */
+  readonly pause?: (ms: number) => Promise<void>;
 }
 
 export interface SyncFailure {
@@ -235,7 +243,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
   const net = async (args: readonly string[], input?: string): Promise<NetworkGitRun & { limitMs: number }> => {
     const limitMs = Math.min(spec.timeoutMs, spec.deadline === undefined ? Infinity : spec.deadline - Date.now());
     if (limitMs <= 0) return { code: null, stdout: Buffer.alloc(0), stderr: '', timedOut: true, limitMs: 0 };
-    const run = await runNetworkGit(root, args, {
+    const run = await (spec.network ?? runNetworkGit)(root, args, {
       timeoutMs: limitMs,
       sshChosen: config.sshChosen,
       ...(input !== undefined ? { input } : {}),
@@ -356,7 +364,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     if (raced && round < PUSH_ROUNDS) {
       const pauseMs = Math.random() * RACE_PAUSE_MS * round;
       if (spec.deadline === undefined || Date.now() + pauseMs < spec.deadline) {
-        await sleep(pauseMs);
+        await (spec.pause ?? sleep)(pauseMs);
         continue;
       }
     }

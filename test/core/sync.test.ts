@@ -9,10 +9,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect } from 'vitest';
-import { autoSync, createCore, spawnedAutoSync, syncNow, syncRequestOf, type CallContext, type Core } from '../../src/core';
+import { autoSync, createCore, syncNow, syncRequestOf, type CallContext, type Core } from '../../src/core';
 import { actorOf } from '../../src/core/context';
-import { openTracker, type SyncOutcome, type TrackerStore } from '../../src/tracker';
-import { MachineLocalStore } from '../../src/machine-local';
+import { openTracker, type NetworkGit, type SyncOutcome, type TrackerStore } from '../../src/tracker';
+import { runNetworkGit, type NetworkGitRun } from '../../src/tracker/remote';
 import {
   agentContext,
   bundleCallProcess,
@@ -498,72 +498,9 @@ describe('two processes in one clone', () => {
     expect(remote).not.toBe(await trackerTip(world.a));
     expect(await world.a.git(['rev-parse', 'refs/remotes/origin/grimoire/tracker'])).toBe(remote);
   });
-
-  test('a write that lands while another process’s sync is finishing is still pushed, though its own sync finds that sync holding the lease', async ({
-    world,
-    grimoire,
-  }) => {
-    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
-    let open: () => void = () => {};
-    const gate = new Promise<void>((resolve) => (open = resolve));
-    // Something else holds the sync status open, so the first sync, done with git, waits to record it, holding the lease.
-    const recording = machine.records.update('sync-status', 'tracker', async (current) => {
-      await gate;
-      return current;
-    });
-    const first = syncingCore(grimoire);
-    const second = syncingCore(grimoire);
-
-    await closeOne(first, grimoire.ctx, 'First');
-    await until(async () => (await remoteTracker(world.a)) === (await trackerTip(world.a)), 'the first push');
-    await sleep(500);
-    await closeOne(second, grimoire.ctx, 'Second');
-    await second.close();
-    expect(await remoteTracker(world.a)).not.toBe(await trackerTip(world.a));
-
-    open();
-    await recording;
-    await first.close();
-    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
-    expect((await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).pending_since).toBeNull();
-  });
 });
 
 describe('the detached sync child', () => {
-  test('a CLI-style write sets the marker, then a detached child registers a process record, pushes and clears it', async ({
-    world,
-    grimoire,
-    onTestFinished,
-  }) => {
-    const child = await bundleCallProcess('sync-child.ts');
-    onTestFinished(() => child.cleanup());
-    // The remote takes a while, so the child is caught alive.
-    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nsleep 3\n', { mode: 0o755 });
-    const core = grimoire.makeCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [child.script, world.a.dir] }) });
-    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
-    await closeOne(core, grimoire.ctx);
-    await core.close();
-
-    await until(async () => (await machine.processes.live({ role: 'sync' })).length === 1, 'the child’s process record');
-    const running = await ok(grimoire.core.call('sync_status', {}, grimoire.ctx));
-    expect(running.pending_since).not.toBeNull();
-    expect((await machine.processes.live({ role: 'sync' }))[0]).toMatchObject({ client: 'codex', worktree: world.a.dir });
-    await until(async () => (await remoteTracker(world.a)) === (await trackerTip(world.a)), 'the push');
-    await until(async () => (await machine.processes.live({ role: 'sync' })).length === 0, 'the child to finish');
-    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ pending_since: null, last_result: 'pushed' });
-  });
-
-  test('a child that dies before it syncs leaves the sync-pending marker for upkeep', async ({ world, grimoire }) => {
-    const core = grimoire.makeCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: ['-e', 'process.exit(0)'] }) });
-    await closeOne(core, grimoire.ctx);
-    await core.close();
-    await sleep(500);
-
-    const status = await ok(grimoire.core.call('sync_status', {}, grimoire.ctx));
-    expect(status.pending_since).not.toBeNull();
-    expect(await remoteTracker(world.a)).toBeNull();
-  });
-
   test('a process that exits the moment its close answers has already set the sync-pending marker', async ({
     world,
     grimoire,
@@ -578,6 +515,43 @@ describe('the detached sync child', () => {
     expect(status.pending_since).not.toBeNull();
   });
 });
+
+/** How git answers a push that lost a race, by kind: the porcelain summary and what the remote said. */
+const LOST_RACES: readonly (readonly [string, string])[] = [
+  // The remote moved since the fetch.
+  ['[rejected] (fetch first)', ''],
+  // Another push moved it while this one ran: the remote's compare-and-set failed.
+  ['[remote rejected] (failed to update ref)', "remote: error: cannot lock ref 'refs/heads/grimoire/tracker': is at 1111111111111111111111111111111111111111 but expected 2222222222222222222222222222222222222222\n"],
+  // Another push held the ref's lock.
+  ['[remote rejected] (failed to update ref)', "remote: error: cannot lock ref 'refs/heads/grimoire/tracker': Unable to create '/srv/remote.git/refs/heads/grimoire/tracker.lock': File exists.\n"],
+  ['[rejected] (non-fast-forward)', ''],
+];
+
+/**
+ * A remote busy with other clones' pushes, standing in for sync's network git:
+ * each of the first `lost` pushes loses a race, answered the way git answers
+ * each kind in turn; the pushes after those reach the real remote. The other
+ * clones' pushes never land here, so the remote's refs stay as first listed
+ * until a push of Alice's does: each round's `ls-remote` is answered from that
+ * listing rather than spawning git again. The pauses before retries are
+ * recorded, not waited out.
+ */
+function busyRemote(lost: number): { network: NetworkGit; pause: (ms: number) => Promise<void>; pushes: () => number; pauses: number[] } {
+  let pushes = 0;
+  let listing: NetworkGitRun | null = null;
+  const pauses: number[] = [];
+  const network: NetworkGit = async (cwd, args, options) => {
+    if (args[0] === 'ls-remote' && pushes < lost) {
+      listing ??= await runNetworkGit(cwd, args, options);
+      return listing;
+    }
+    if (args[0] !== 'push' || ++pushes > lost) return runNetworkGit(cwd, args, options);
+    const [summary, said] = LOST_RACES[(pushes - 1) % LOST_RACES.length]!;
+    const stdout = `To ${args.at(-2)}\n!\t${args.at(-1)}\t${summary}\nDone\n`;
+    return { code: 1, stdout: Buffer.from(stdout), stderr: `${said}error: failed to push some refs to '${args.at(-2)}'\n`, timedOut: false };
+  };
+  return { network, pause: async (ms) => void pauses.push(ms), pushes: () => pushes, pauses };
+}
 
 describe('concurrent clones', () => {
   /**
@@ -665,30 +639,44 @@ describe('concurrent clones', () => {
     expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
   });
 
-  test('a push that loses the race round after round to a busy clone keeps fetching, folding and pushing until it lands', async ({
+  test('a push that loses the race round after round to busy clones pushes again each round until it lands, with no failure or backoff', async ({
     world,
     grimoire,
   }) => {
     await pushTracker(world.a);
     await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
-    // Another clone pushes during each of Alice's first four pushes: four lost races in a row.
-    const counter = path.join(world.root, 'raced').replaceAll('\\', '/');
-    const hook = [
-      '#!/bin/sh',
-      'unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES',
-      'export GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=bob@example.com GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=bob@example.com',
-      `n=$(cat "${counter}" 2>/dev/null || echo 0)`,
-      `[ "$n" -ge 4 ] && exit 0`,
-      `echo $((n + 1)) > "${counter}"`,
-      'tip=$(git rev-parse refs/heads/grimoire/tracker)',
-      'git update-ref refs/heads/grimoire/tracker "$(git commit-tree "$tip^{tree}" -p "$tip" -m busy)"',
-      '',
-    ].join('\n');
-    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), hook, { mode: 0o755 });
+    const remote = busyRemote(4);
 
-    const synced = await ok(grimoire.core.call('sync', {}, grimoire.ctx));
+    const synced = await withTracker(world.a, (tracker) =>
+      syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), network: remote.network, pause: remote.pause }),
+    );
     expect(synced).toMatchObject({ state: 'pushed' });
+    expect(remote.pushes()).toBe(5);
+    // A pause before every retry, none of them waited out in real time here.
+    expect(remote.pauses).toHaveLength(4);
     expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
     expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
+  });
+
+  test('a push that loses every round records the lost race with no backoff: the next automatic sync tries at once', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    const remote = busyRemote(Infinity);
+    const request = syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx));
+
+    const lost = await withTracker(world.a, (tracker) => syncNow(tracker, { ...request, network: remote.network, pause: remote.pause }));
+    expect(lost).toMatchObject({ state: 'pending', reason: 'failed', failure: { class: 'rejected', lostRace: true } });
+    expect(remote.pushes()).toBeGreaterThan(2);
+    expect(remote.pauses).toHaveLength(remote.pushes() - 1);
+    const status = await ok(grimoire.core.call('sync_status', {}, grimoire.ctx));
+    expect(status).toMatchObject({ retry_at: null, failure: { class: 'rejected' } });
+    expect(status.pending_since).not.toBeNull();
+
+    // The remote is busy, not refusing: no backoff holds the next automatic sync back.
+    expect(await withTracker(world.a, (tracker) => autoSync(tracker, request))).toMatchObject({ state: 'pushed' });
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
   });
 });

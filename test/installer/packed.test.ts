@@ -3,6 +3,7 @@
 // tarball into a clone's version copies with the launcher and a join record,
 // then reached only through the frozen bootstrap (and the shell shim), started
 // in a subdirectory: never through the working tree or node_modules.
+import type { ChildProcess } from 'node:child_process';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
@@ -49,6 +50,20 @@ async function joined(root: string): Promise<MachineLocalStore> {
   return store;
 }
 
+/**
+ * Ends the server's stdin and resolves when it exits on its own, however long that takes under load.
+ * The SDK's close() does the same but kills a server still running 2 s later (TerminateProcess on
+ * Windows), and a killed server can't remove its own record. Reaches the transport's child process,
+ * which the SDK keeps private.
+ */
+async function serverExit(transport: StdioClientTransport): Promise<void> {
+  const child = (transport as unknown as { _process?: ChildProcess })._process;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  child.stdin?.end();
+  await exited;
+}
+
 describe('a clone joined from the packed tarball', () => {
   gitTest('the bootstrap, spawned in a subdirectory, runs `grimoire mcp` from the pinned copy in both MCP eras', async ({ world }) => {
     await initializeTracker(world.a, world.a);
@@ -93,14 +108,15 @@ describe('a clone joined from the packed tarball', () => {
     expect(server).toEqual(expect.any(Number));
     let duringServe: Awaited<ReturnType<typeof pruneCopies>>;
     try {
-      await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => [r.pin, r.worktree]), { timeout: 10_000 }).toEqual([[PIN, world.a.dir]]);
+      await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => [r.pin, r.worktree]), { timeout: 45_000 }).toEqual([[PIN, world.a.dir]]);
       // The first request names the client (`clientInfo`), and the record then carries it.
       await client.listTools();
-      await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => r.client), { timeout: 10_000 }).toEqual(['claude-code']);
+      await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => r.client), { timeout: 45_000 }).toEqual(['claude-code']);
       await writeConfig(world.a.dir, '1.0.0');
       duringServe = await pruneCopies(store);
     } finally {
-      // Ends stdin and resolves once the server process is gone; one still running after 2 s is killed, and a killed server leaves its record.
+      // The server exits on its own once its stdin ends; the client's close then has no process left to kill.
+      await serverExit(transport);
       await client.close();
     }
     // So the server removed its own record on its way out, with no waiting. The SDK's version-negotiation
