@@ -45,6 +45,8 @@ export function sessionStartOutput(client: HookClient | null, message: SessionSt
 export interface SessionStartContext {
   /** Where the client started the hook: `--from`, else the hook's cwd. */
   readonly startDir: string;
+  /** How long into the hook the fast path may start work (default FAST_PATH_BUDGET_MS); a test seam. */
+  readonly fastPathBudgetMs?: number;
 }
 
 /** The hook's line is at most this long (spec §12). */
@@ -100,7 +102,7 @@ async function compose(_payload: unknown, ctx: SessionStartContext): Promise<Ses
   const root = await findHostRoot(ctx.startDir).catch(() => null);
   const store = root === null ? null : await locateMachineLocalStore(root);
   if (!store || root === null) return {};
-  const fast = await sessionStartFastPath(store, root, { deadline: started + FAST_PATH_BUDGET_MS }).catch((error: unknown) => {
+  const fast = await sessionStartFastPath(store, root, { deadline: started + (ctx.fastPathBudgetMs ?? FAST_PATH_BUDGET_MS) }).catch((error: unknown) => {
     hookFailed(error);
     return null;
   });
