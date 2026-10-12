@@ -204,6 +204,8 @@ export interface WikiListRow {
   conflicted: boolean;
   /** Kept out of chores and evidence by a human. */
   quarantined: boolean;
+  /** Its sources whose trace a human purged: the page keeps its text, and a person may edit it (spec §17). */
+  purged_sources: string[];
   /** Quarantined traces a compile that wrote this page consumed: shown, never filtered (spec §17). */
   flagged_by: string[];
 }
@@ -231,6 +233,7 @@ export const wikiList = define({
         kind: page.kind,
         summary: page.summary,
         sources: [...page.sources],
+        purged_sources: page.sources.filter((source) => view.tracePurge(source) !== undefined),
         generated: page.generated,
         verified: page.verified,
         updated_at: page.updated_at,
@@ -287,6 +290,7 @@ export const wikiShow = define({
       kind: page.kind,
       summary: page.summary,
       sources: [...page.sources],
+      purged_sources: page.sources.filter((source) => view.tracePurge(source) !== undefined),
       generated: page.generated,
       verified: page.verified,
       updated_at: page.updated_at,

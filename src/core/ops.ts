@@ -13,6 +13,7 @@ import type { SettingsResult, SettingsSetResult } from './settings';
 import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult } from './skills';
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
+import type { PurgeSessionResult, PurgeTraceResult } from './purge';
 import type { SyncResult, SyncStatusResult } from './sync';
 import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
 
@@ -134,6 +135,8 @@ export interface OpResults {
   wiki_edit: WikiEditResult;
   quarantine: QuarantineResult;
   unquarantine: QuarantineResult;
+  purge_trace: PurgeTraceResult;
+  purge_session: PurgeSessionResult;
   chore_start: ChoreBrief;
   chore_read: ChoreReadResult;
   chore_abandon: ChoreAbandonResult;

@@ -237,15 +237,16 @@ export interface TrackerDraft extends TrackerView {
    * Purges a trace (spec §3): removes the attempt's directory and its outcome
    * file, and writes `purges/<handle>.md`. For a trace purged already, it
    * removes only what the tree still holds of it, keeping the tombstone. The
-   * attempt is gone from this draft from here on.
+   * attempt is gone from this draft from here on. Returns the paths it
+   * removes: what the unpushed segment drops too.
    */
-  purgeTrace(handle: string, tombstone: NewPurge): void;
+  purgeTrace(handle: string, tombstone: NewPurge): readonly string[];
   /**
    * Purges one session record of an open attempt (spec §14): removes
    * `sessions/<key>.md` and writes `purges/<handle>/<key>.md`, holding the
-   * kept facts when `facts` is `kept`.
+   * kept facts when `facts` is `kept`. Returns the paths it removes.
    */
-  purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): void;
+  purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): readonly string[];
   /** The wiki as this round changes it; page writes regenerate the derived index and log. */
   readonly wiki: WikiDraft;
   /** Quarantine as this round changes it. */
@@ -733,24 +734,26 @@ export class Draft implements TrackerDraft {
     return this.base.purgeLeftovers(handle).filter((file) => !removed(file));
   }
 
-  purgeTrace(handle: string, tombstone: NewPurge): void {
+  purgeTrace(handle: string, tombstone: NewPurge): readonly string[] {
     const record = this.attempt(handle);
     const stored = this.tracePurge(handle);
     if (!record && !stored) throw notFound('attempt', handle);
     // A trace purged already keeps its tombstone; what the tree still holds of it goes.
     const kept: PurgeTombstone = stored ?? { by: tombstone.by, at: this.now.toISOString(), reason: tombstone.reason, kept: null, extra: {} };
-    for (const file of this.base.purgeLeftovers(handle)) this.purgeEdits.set(file, null);
+    const removed = new Set(this.base.purgeLeftovers(handle));
     if (record) {
-      this.purgeEdits.set(attemptDir(record.issue, handle), null);
-      this.purgeEdits.set(outcomeFile(record.issue, handle), null);
+      removed.add(attemptDir(record.issue, handle));
+      removed.add(outcomeFile(record.issue, handle));
     }
+    for (const file of removed) this.purgeEdits.set(file, null);
     if (!stored) this.purgeEdits.set(tracePurgeFile(handle), serializePurge(kept));
     this.tracePurgesHere.set(handle, kept);
     // Nothing this round wrote under the attempt survives it.
     for (const pending of [this.sealed, this.outcomes, this.activity, this.sessionsHere]) pending.delete(handle);
+    return [...removed];
   }
 
-  purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): void {
+  purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): readonly string[] {
     const record = this.attempt(handle);
     if (!record) throw notFound('attempt', handle);
     if (!SESSION_KEY_PATTERN.test(key)) throw new Error(`a session key is a hex hash, not ${JSON.stringify(key)}`);
@@ -764,13 +767,13 @@ export class Draft implements TrackerDraft {
       extra: {},
     };
     const file = sessionFile(record.issue, handle, key);
-    for (const left of this.base.purgeLeftovers(handle)) if (left === file) this.purgeEdits.set(left, null);
     this.purgeEdits.set(file, null);
     if (!stored) this.purgeEdits.set(sessionPurgeFile(handle, key), serializePurge(written));
     let keys = this.sessionPurgesHere.get(handle);
     if (!keys) this.sessionPurgesHere.set(handle, (keys = new Map()));
     keys.set(key, written);
     this.sessionsHere.get(handle)?.delete(key);
+    return [file];
   }
 
   putSessionRecord(handle: string, key: string, bytes: Buffer): void {

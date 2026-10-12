@@ -19,6 +19,7 @@ import { settingsGet, settingsSet } from './settings';
 import { skillEdit, skillList, skillRead, skillShow } from './skills';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
+import { purgeSession, purgeTrace } from './purge';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext } from './chores';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
@@ -56,6 +57,7 @@ export type { SettingsResult, SettingsSetResult, ShownSetting, SettingScope } fr
 export type { SkillListResult, SkillReadResult, SkillEditResult, SkillShowResult, ShownSkill, ShownChange, SkillProvenance, SkillOrigin } from './skills';
 export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, ShownSide } from './wiki';
 export type { QuarantineResult } from './quarantine';
+export type { PurgeHistory, PurgeSessionResult, PurgeTraceResult, CitingPage } from './purge';
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
 export { choreThresholds, dueChores } from './chores';
 export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
@@ -172,6 +174,8 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   wikiEdit,
   quarantine,
   unquarantine,
+  purgeTrace,
+  purgeSession,
   choreStart,
   choreRead,
   choreAbandon,
