@@ -8,7 +8,7 @@ import { packedRefsStamp, RefUpdater, type RefUpdate } from '../git/refs';
 import { GIT_STALL_MS, GitStalledError, runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
-import { ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, SESSIONS_DIR, SETTINGS_FILE, TRACKER_REF } from './layout';
+import { attemptDir, ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, outcomeFile, OUTCOMES_DIR, remoteTrackerRef, SESSIONS_DIR, SETTINGS_FILE, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
 import { countLateDrops } from './capture-stats';
 import { foldCommits, type FoldReport } from './fold';
@@ -56,6 +56,8 @@ export interface WriteResult<R> {
   readonly issue?: string;
   /** The commit's `Grimoire-Attempt` (the handle it binds), when it made one that names a handle. */
   readonly attempt?: string;
+  /** A purge's: what dropping its content from the unpushed segment did, in the same compare-and-set as its commit. */
+  readonly history?: UnpushedDrop;
 }
 
 export interface TrackerOptions {
@@ -64,6 +66,8 @@ export interface TrackerOptions {
   readonly clock?: () => Date;
   /** Draws an id suffix of the given length (default: crypto-random Crockford). */
   readonly randomIdSuffix?: (length: number) => string;
+  /** Draws an attempt handle (default: crypto-random); tests pin it. */
+  readonly randomAttemptHandle?: () => string;
   /** How long one write may keep retrying before BUSY (default ~10 s). */
   readonly budgetMs?: number;
   /** How long a local git may say nothing before it is killed as stuck (default GIT_STALL_MS). */
@@ -136,6 +140,23 @@ export interface TrackerStore {
   sync(spec: SyncSpec): Promise<SyncOutcome>;
   /** Stops the store's git process. */
   close(): Promise<void>;
+}
+
+/**
+ * What a purge's write did to history (spec §3 Unpushed content). In the
+ * same round, under the same locks, every local commit no remote-tracking
+ * tracker holds was written again without the purged paths, oldest first,
+ * with the same author, committer and message; the purge commit went on top,
+ * and the ref moved once, by compare-and-set. Pushed history is never
+ * rewritten, and grimoire never runs gc.
+ */
+export interface UnpushedDrop {
+  /** How many unpushed commits were written again. */
+  readonly rewritten: number;
+  /** Whether the tracker reflog's entries for the rewritten commits were expired (true when nothing was rewritten). */
+  readonly reflogExpired: boolean;
+  /** Whether pushed history (what a remote-tracking tracker holds) has any of the paths: it keeps them. */
+  readonly pushed: boolean;
 }
 
 export interface InitializeOptions {
@@ -419,24 +440,117 @@ class GitTrackerStore implements TrackerStore {
    * tip's mode allows text or nothing carried any.
    */
   private async stripUnpushed(pushed: string | null, policy: TextPolicy): Promise<string | null> {
+    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
+    return this.rewriteUnpushed(async (local) => {
+      if (local === pushed) return null;
+      if (!policy.forbidsText(await this.snapshotAt(local))) return null;
+      return { excluded: pushed ? [pushed] : [], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
+    }).then((done) => (done && done.rewritten > 0 ? done.tip : null));
+  }
+
+  /**
+   * A purge's unpushed segment, written again without the paths it drops
+   * (`traces`: handles purged before, whose paths come from history), ready
+   * for the purge commit to go on top: the new local tip, how many commits
+   * changed, and what pushed history is checked against. Runs inside the
+   * write's round, so the purge commit and the rewrite move the ref once.
+   * Null for a write that purges nothing.
+   */
+  private async dropUnpushed(
+    local: string | null,
+    drops: { readonly paths: readonly string[]; readonly traces: readonly string[] },
+  ): Promise<{ tip: string | null; rewritten: number; remotes: string[]; paths: string[] } | null> {
+    if (drops.paths.length === 0 && drops.traces.length === 0) return null;
+    const remotes = [...new Set((await this.trackerRefs()).remotes.values())];
+    const found = await this.tracePathsInHistory(drops.traces, [...(local ? [local] : []), ...remotes]);
+    const paths = [...new Set([...drops.paths, ...found])];
+    if (local === null || paths.length === 0) return { tip: local, rewritten: 0, remotes, paths };
+    const { tip, rewritten } = await this.rewriteSegment(local, remotes, (tree) => this.dropPaths(tree, paths));
+    return { tip, rewritten, remotes, paths };
+  }
+
+  /** After the purge commit's ref move: the rewritten commits' reflog entries expired, and whether pushed history keeps the content. */
+  private async droppedHistory(drop: { rewritten: number; remotes: string[]; paths: string[] }): Promise<UnpushedDrop> {
+    const reflogExpired = drop.rewritten === 0 || (await this.expireReflog());
+    return { rewritten: drop.rewritten, reflogExpired, pushed: await this.pushedHolds(drop.remotes, drop.paths) };
+  }
+
+  /**
+   * The paths of traces purged before (the attempt gone from the tree, and
+   * with it the issue that names its paths): every attempt directory and
+   * outcome file of those handles that the history of `tips` ever held.
+   */
+  private async tracePathsInHistory(handles: readonly string[], tips: readonly string[]): Promise<string[]> {
+    if (handles.length === 0 || tips.length === 0) return [];
+    const specs = handles.flatMap((handle) => [`:(glob)${ATTEMPTS_DIR}/*/*/*/${handle}/**`, `:(glob)${OUTCOMES_DIR}/*/*/*/${handle}.md`]);
+    const run = await this.git(['log', '--format=', '--name-only', '-m', ...tips, '--', ...specs]);
+    if (run.code !== 0) throw new Error(`git log failed: ${run.stderr.toString().trim()}`);
+    const paths = new Set<string>();
+    for (const line of run.stdout.toString('utf8').split(/\r?\n/)) {
+      const [top, , , issue, name] = line.split('/');
+      if (issue === undefined || name === undefined) continue;
+      if (top === ATTEMPTS_DIR) paths.add(attemptDir(issue, name));
+      else if (top === OUTCOMES_DIR && name.endsWith('.md')) {
+        paths.add(attemptDir(issue, name.slice(0, -3)));
+        paths.add(outcomeFile(issue, name.slice(0, -3)));
+      }
+    }
+    return [...paths];
+  }
+
+  /** Expires the tracker reflog's entries for commits no longer reachable (rewritten ones); grimoire never runs gc. Whether git did. */
+  private async expireReflog(): Promise<boolean> {
+    const run = await this.git(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', TRACKER_REF]).catch(() => null);
+    return run !== null && run.code === 0;
+  }
+
+  /** Whether the history of any of `tips` (pushed history) ever held one of `paths`. */
+  private async pushedHolds(tips: readonly string[], paths: readonly string[]): Promise<boolean> {
+    if (tips.length === 0 || paths.length === 0) return false;
+    const run = await this.git(['rev-list', '-1', ...tips, '--', ...paths]);
+    // Unsure (git failed): say pushed history may keep it, never that it doesn't.
+    return run.code !== 0 || run.stdout.toString('utf8').trim() !== '';
+  }
+
+  /** `tree` without `paths` (the same tree when it holds none of them). */
+  private async dropPaths(tree: string, paths: readonly string[]): Promise<string> {
+    const held = await Promise.all(paths.map((path) => this.objects.entryAt(tree, path)));
+    if (held.every((entry) => entry === null)) return tree;
+    const edits = new Map<string, null>(paths.map((path) => [path, null]));
+    return (await this.objects.editTree(tree, edits)) ?? (await this.objects.emptyTree());
+  }
+
+  /**
+   * Rewrites the unpushed segment as `plan` says for the local tip: which
+   * commits count as pushed (excluded with their history) and how each tree
+   * changes. Runs like a write (one at a time in this process, under the
+   * fairness lock) and moves the ref with a compare-and-set, then expires the
+   * reflog entries of the commits it rewrote. Null when there is no local
+   * tracker or `plan` says there is nothing to do.
+   */
+  private async rewriteUnpushed(
+    plan: (local: string, refs: TrackerRefs) => Promise<{ excluded: readonly string[]; transform: (tree: string) => Promise<string> } | null>,
+  ): Promise<{ tip: string; rewritten: number } | null> {
     const deadline = Date.now() + this.budgetMs;
     const turn = await this.turnstile.run(deadline, async () => {
       const lock = await this.fairness.acquire(deadline);
       if (!lock) throw busy('another grimoire write held the tracker for the whole write budget');
       try {
         for (;;) {
-          const local = (await this.trackerRefs()).local;
-          if (local === null || local === pushed) return null;
-          if (!policy.forbidsText(await this.snapshotAt(local))) return null;
-          const rewritten = await this.rewriteSegment(local, pushed, policy);
-          if (rewritten === local) return null;
-          const move = await this.moveRef(local, rewritten);
+          const refs = await this.trackerRefs();
+          const local = refs.local;
+          if (local === null) return null;
+          const planned = await plan(local, refs);
+          if (!planned) return null;
+          const { tip, rewritten } = await this.rewriteSegment(local, planned.excluded, planned.transform);
+          if (tip === local) return { tip, rewritten: 0 };
+          const move = await this.moveRef(local, tip);
           if (move.moved) {
-            await this.git(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', TRACKER_REF]).catch(() => {});
-            return rewritten;
+            await this.expireReflog();
+            return { tip, rewritten };
           }
           if (move.staleLock) throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
-          if (Date.now() >= deadline) throw busy('the tracker kept moving while sync rewrote its unpushed commits');
+          if (Date.now() >= deadline) throw busy('the tracker kept moving while its unpushed commits were rewritten');
         }
       } finally {
         await lock.release();
@@ -446,20 +560,28 @@ class GitTrackerStore implements TrackerStore {
     return turn.value;
   }
 
-  /** The segment `local` holds beyond `pushed`, written again with its records' text stripped: the new tip (`local` when nothing changed). */
-  private async rewriteSegment(local: string, pushed: string | null, policy: TextPolicy): Promise<string> {
-    const listed = await this.git(['rev-list', '--reverse', '--topo-order', '--parents', local, ...(pushed ? [`^${pushed}`] : [])]);
+  /**
+   * The segment `local` holds beyond the `excluded` commits, each tree changed
+   * by `transform` and each commit written again over its rewritten parents:
+   * the new tip (`local` when nothing changed) and how many commits changed.
+   */
+  private async rewriteSegment(
+    local: string,
+    excluded: readonly string[],
+    transform: (tree: string) => Promise<string>,
+  ): Promise<{ tip: string; rewritten: number }> {
+    const listed = await this.git(['rev-list', '--reverse', '--topo-order', '--parents', local, ...excluded.map((commit) => `^${commit}`)]);
     if (listed.code !== 0) throw new Error(`git rev-list failed: ${listed.stderr.toString().trim()}`);
-    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
     const trees = new Map<string, string>();
     const mapped = new Map<string, string>();
+    let rewritten = 0;
     for (const line of listed.stdout.toString('utf8').split(/\r?\n/)) {
       if (line === '') continue;
       const [commit, ...parents] = line.split(' ') as [string, ...string[]];
       const { tree } = await this.objects.commit(commit);
       let stripped = trees.get(tree);
       if (stripped === undefined) {
-        stripped = await this.stripTree(tree, pushedTree, policy);
+        stripped = await transform(tree);
         trees.set(tree, stripped);
       }
       const newParents = parents.map((parent) => mapped.get(parent) ?? parent);
@@ -479,8 +601,9 @@ class GitTrackerStore implements TrackerStore {
       const rest = split < 0 ? '' : raw.slice(split);
       const bytes = [`tree ${stripped}`, ...newParents.map((parent) => `parent ${parent}`), ...header].join('\n') + rest;
       mapped.set(commit, await this.objects.write('commit', Buffer.from(bytes, 'utf8')));
+      rewritten++;
     }
-    return mapped.get(local) ?? local;
+    return { tip: mapped.get(local) ?? local, rewritten };
   }
 
   /** `tree` with the text stripped from each session record that `pushedTree` doesn't hold at the same path. */
@@ -550,7 +673,7 @@ class GitTrackerStore implements TrackerStore {
       if (replay) return { result: replay.result as R, commit: null, replayed: true, sealed: false };
     }
     checkTrackerMarker(snapshot.marker);
-    const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs);
+    const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs, this.options.randomAttemptHandle);
     const outcome = await body(draft);
     const edits = draft.edits();
     if (spec.idempotency) {
@@ -558,7 +681,20 @@ class GitTrackerStore implements TrackerStore {
       for (const [file, content] of recorded) edits.set(file, content);
     }
     const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
-    if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false, sealed: false };
+    // A purge drops its content from the unpushed segment under its commit, in this same compare-and-set (spec §3).
+    const drop = await this.dropUnpushed(tips.local, draft.historyDrops());
+    if (edits.size === 0 && !commitsFold) {
+      if (!drop) return { result: outcome.result, commit: null, replayed: false, sealed: false };
+      // A purge done already whose content history still held: the rewrite alone moves the ref.
+      if (drop.tip !== tips.local) {
+        const moved = await this.moveRef(tips.local, drop.tip!);
+        if (!moved.moved) {
+          if (moved.staleLock) throw busy(`a stale lock blocks the tracker ref: ${moved.staleLock.path}`, { stale_lock: moved.staleLock });
+          return null;
+        }
+      }
+      return { result: outcome.result, commit: null, replayed: false, sealed: false, history: await this.droppedHistory(drop) };
+    }
 
     // The fold's merged tree becomes real only now, in the write that commits it.
     if (snapshot.virtual) await snapshot.virtual.persist(snapshot.rootTree);
@@ -566,7 +702,7 @@ class GitTrackerStore implements TrackerStore {
     const message = this.message(spec, outcome.issue, outcome.attempt);
     const commit = await this.objects.writeCommit({
       tree,
-      parents: snapshot.parents,
+      parents: drop ? snapshot.parents.map((parent) => (parent === tips.local ? drop.tip! : parent)) : snapshot.parents,
       author: { ...spec.author, when: now },
       committer: { ...spec.author, when: now },
       message,
@@ -577,6 +713,7 @@ class GitTrackerStore implements TrackerStore {
       // The fold this write committed dropped late session records: counted in this machine's doctor stats.
       const drops = snapshot.virtual ? this.foldReports.get(snapshot)?.lateDrops : undefined;
       if (drops && drops.length > 0) await countLateDrops(this.location.commonDir, drops, now).catch(() => {});
+      const history = drop ? await this.droppedHistory(drop) : undefined;
       return {
         result: outcome.result,
         commit,
@@ -584,6 +721,7 @@ class GitTrackerStore implements TrackerStore {
         sealed: [...edits.keys()].some(isAttemptEnd),
         ...(outcome.issue ? { issue: outcome.issue } : {}),
         ...(outcome.attempt ? { attempt: outcome.attempt } : {}),
+        ...(history ? { history } : {}),
       };
     }
     if (move.staleLock) {

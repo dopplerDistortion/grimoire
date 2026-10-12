@@ -30,6 +30,7 @@ import { lineValue, parseLines } from './lines';
 import { isQuarantineKind, QUARANTINE_KEYS } from './quarantine';
 import { parseIssue, serializeIssue } from './record';
 import { parseForward, parseTombstone, serializeForward, serializeTombstone } from './retired';
+import { parsePurge, serializePurge } from './purge';
 import { STALE_REF_LOCK_MS } from './store';
 import { parsePage, serializePage, WIKI_CONFLICT_KEYS, WIKI_DIR, WIKI_EDIT_KEYS } from './wiki';
 
@@ -272,6 +273,8 @@ function checkRecord(file: string, bytes: Buffer, formats: RecordFormats): Recor
   if (parts[0] === 'outcomes' && parts.length === 5 && parts[4]!.endsWith('.md')) return roundTrip(bytes, (b) => serializeOutcome(parseOutcome(b)));
   if (parts[0] === 'deleted' && parts.length === 2 && parts[1]!.endsWith('.md')) return roundTrip(bytes, (b) => serializeTombstone(parseTombstone(b)));
   if (parts[0] === 'forwards' && parts.length === 2 && parts[1]!.endsWith('.md')) return roundTrip(bytes, (b) => serializeForward(parseForward(b)));
+  // Purge tombstones (spec §3): {by, at, reason}, a session record's with `facts` and the kept facts as its body.
+  if (parts[0] === 'purges' && (parts.length === 2 || parts.length === 3) && parts[parts.length - 1]!.endsWith('.md')) return roundTrip(bytes, (b) => serializePurge(parsePurge(b)));
   if (parts[0] === 'keys' && parts.length === 4 && parts[3]!.endsWith('.json')) {
     const text = utf8(bytes);
     if (text === null) return unparsable('it is not UTF-8 text');

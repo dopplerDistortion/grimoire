@@ -307,6 +307,8 @@ describe('the human-only gate', () => {
       ['resolve', id],
       ['outcome', 'set', 'at-aaaaaaaa', 'pass', 'because'],
       ['settings', 'set', 'auto-sync', 'false'],
+      ['purge', 'trace', 'at-aaaaaa', 'secret'],
+      ['purge', 'session', 'at-aaaaaa', '0123456789abcdef0123456789abcdef', 'secret'],
     ];
     for (const args of calls) {
       const run = await expectRefUnmoved(a, () => cli(bin, args, { cwd: a.dir }));
@@ -375,6 +377,31 @@ describe('the human-only gate', () => {
     expect(await coreResult(grimoire.core, 'settings_get', { key: 'auto-sync' }, personAtShell(a))).toMatchObject({
       store: { 'auto-sync': { value: false } },
     });
+  });
+
+  cliTest('purge trace needs the terminal, the typed attempt handle and a reason', async ({ grimoire, a }) => {
+    const alice = personAtShell(a);
+    const agent = agentContext(a);
+    const { id } = (await coreResult(grimoire.core, 'create', { title: 'Leaky' }, alice)) as { id: string };
+    const { attempt } = (await coreResult(grimoire.core, 'claim', { id }, agent)) as { attempt: string };
+    await coreResult(grimoire.core, 'close', { id, reason: 'done', attempt, debrief: { asked: 'a', tried: 't', failed: 'none', worked: 'w', next: 'none' } }, agent);
+    expect((await cli(bin, ['purge', 'trace', '--help'], { cwd: a.dir })).json).toMatchObject({
+      positionals: ['attempt', 'reason'],
+      confirmation: expect.stringMatching(/types the attempt handle to confirm/),
+    });
+
+    const reasonless = await expectRefUnmoved(a, () => cliAtTerminal(bin, ['purge', 'trace', attempt], { cwd: a.dir, answers: [{ when: /to confirm/, type: attempt }] }));
+    const typo = await expectRefUnmoved(a, () =>
+      cliAtTerminal(bin, ['purge', 'trace', attempt, 'a token'], { cwd: a.dir, answers: [{ when: /to confirm/, type: 'at-wrong' }] }),
+    );
+    const run = await cliAtTerminal(bin, ['purge', 'trace', attempt, 'a token'], { cwd: a.dir, answers: [{ when: new RegExp(`Type ${attempt} to confirm`), type: attempt }] });
+
+    expect(reasonless.code, reasonless.screen).not.toBe(0);
+    expect(typo.code, typo.screen).toBe(1);
+    expect(lastJsonOnScreen(typo.screen)).toMatchObject({ error: { code: 'INVALID', details: { fields: { confirmation: `must be ${attempt}` } } } });
+    expect(run.code, run.screen).toBe(0);
+    expect(lastJsonOnScreen(run.screen)).toMatchObject({ attempt, issue: id, purged: true, reason: 'a token', history: { pushed: false } });
+    expect(await coreResult(grimoire.core, 'show', { ref: id }, alice)).toMatchObject({ past_attempts: [] });
   });
 
   cliTest('resolve takes its per-field picks as a JSON flag, so it runs at a terminal', async ({ world, grimoire, a }) => {

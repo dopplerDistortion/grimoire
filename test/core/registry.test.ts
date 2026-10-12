@@ -21,6 +21,8 @@ describe('the op registry', () => {
         'labels',
         'list',
         'outcome_set',
+        'purge_session',
+        'purge_trace',
         'quarantine',
         'reassign',
         'release',

@@ -186,7 +186,8 @@ async function recordStatus(machine: MachineLocalStore, outcome: SyncOutcome, re
   await machine.records.update<SyncStatusRecord>(STATUS, STATUS_KEY, (current) => {
     const at = Date.now();
     const settled = outcome.state !== 'pending';
-    const remoteEnd = outcome.reason === 'failed' || outcome.reason === 'no-default-branch';
+    // A push that lost every race to other pushes met a busy remote, not a refusing one: the next sync tries at once.
+    const remoteEnd = (outcome.reason === 'failed' && !outcome.failure?.lostRace) || outcome.reason === 'no-default-branch';
     const failures = settled ? 0 : remoteEnd ? (current?.failures ?? 0) + 1 : (current?.failures ?? 0);
     return {
       remote: outcome.remote,
