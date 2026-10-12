@@ -534,15 +534,17 @@ describe('the detached sync child', () => {
   });
 
   cliTest('a sync child that dies leaves the sync-pending marker for upkeep', async ({ world, a }) => {
-    // The push waits at the remote until the test opens the gate, then fails:
-    // the child is caught mid-push, and only a live child could have pushed.
+    // The push waits at the remote until the test opens the gate (two minutes at
+    // most, so a failed test leaves no hook looping), then fails: the child is
+    // caught mid-push, and only a live child could have pushed.
     const signal = (name: string) => path.join(world.root, name);
     const sh = (file: string) => file.split(path.sep).join('/');
     const [alive, gate, done] = [signal('hook-alive'), signal('hook-gate'), signal('hook-done')];
     await writeFile(
       path.join(world.remote, 'hooks', 'pre-receive'),
       `#!/bin/sh
-while [ ! -f '${sh(gate)}' ]; do touch '${sh(alive)}'; sleep 0.1; done
+i=0
+while [ ! -f '${sh(gate)}' ] && [ $i -lt 1200 ]; do touch '${sh(alive)}'; sleep 0.1; i=$((i+1)); done
 touch '${sh(done)}'
 exit 1
 `,
