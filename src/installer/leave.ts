@@ -40,6 +40,7 @@ import {
   existingFolders,
   GENERATED_GITIGNORE,
   listStrayEdits,
+  MOVED_ASIDE,
   readPathList,
   servedSetOf,
   setAsideStrayEdit,
@@ -95,7 +96,7 @@ export interface LiveProcess {
 export interface LeaveReport {
   /** False when the person stopped to record stray edits first: nothing was removed. */
   readonly left: boolean;
-  readonly stopped?: 'stray-edits';
+  readonly stopped?: 'stray-edits' | 'moved-aside';
   /** Open attempts released as abandoned. */
   readonly released: { id: string; attempt: string }[];
   /** Contexts cut, and the session records attached. */
@@ -193,6 +194,8 @@ interface Preflight {
   readonly unpushed: { commits: number; withText: number } | null;
   readonly worktrees: string[];
   readonly installed: string[];
+  /** Folders upkeep moved into the store earlier (someone's `grimoire-*` folders): they go with it. */
+  readonly movedAside: string[];
   readonly warnings: string[];
 }
 
@@ -201,12 +204,15 @@ async function localTipOf(root: string): Promise<string | null> {
   return run.code === 0 ? run.stdout.toString('utf8').trim() : null;
 }
 
-/** Copies in `worktree` holding text the ledger never had for their skill. */
+/** Copies in `worktree` holding text the ledger never had for their skill (a copy git tracks loses nothing). */
 async function unsavedStrays(worktree: string, served: ServedSet): Promise<UnsavedStray[]> {
   const found: UnsavedStray[] = [];
+  const listed = await runGit(worktree, ['ls-files', '-z', '--', COPY_ROOT]);
+  const tracked = new Set(listed.code === 0 ? listed.stdout.toString('utf8').split(' ').filter((file) => file !== '') : []);
   for (const { folder, skill, kind } of await existingFolders(worktree)) {
     if (kind.kind !== 'copy') continue;
     const file = `${folder}/${SKILL_FILE}`;
+    if (tracked.has(file)) continue;
     if ((await linkedComponent(worktree, file)) !== null) continue;
     const text = await readCheckoutText(path.join(worktree, ...file.split('/'))).catch(() => null);
     if (text?.state !== 'text') continue;
@@ -263,7 +269,9 @@ async function preflight(root: string, commonDir: string, store: MachineLocalSto
   for (const worktree of worktrees) {
     if (await readCheckoutConfig(worktree).then((config) => config !== null, () => true)) installed.push(worktree);
   }
-  return { tracker, view, localTip, held, uncut, saved, unsaved, served, unpushed, worktrees, installed, warnings };
+  const asideDir = path.join(store.dir, MOVED_ASIDE);
+  const movedAside = (await readdir(asideDir).catch(() => [] as string[])).sort().map((name) => path.join(asideDir, name));
+  return { tracker, view, localTip, held, uncut, saved, unsaved, served, unpushed, worktrees, installed, movedAside, warnings };
 }
 
 function plural(n: number, one: string, many = `${one}s`): string {
@@ -332,6 +340,14 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
         say('Nothing was removed. Record each stray edit you want to keep, then run leave again:');
         for (const id of ids) say(`  grimoire skill record ${id}`);
         return { ...report, stopped: 'stray-edits' };
+      }
+    }
+    if (pre.movedAside.length > 0) {
+      say(`Folders grimoire moved aside earlier (they held no grimoire output) are kept in the store, and go with it:`);
+      for (const dir of pre.movedAside) say(`  ${dir}`);
+      if (yes(await prompter.ask('Stop now so you can copy them out first? [y/N] '))) {
+        say('Nothing was removed. Copy out what you want to keep, then run leave again.');
+        return { ...report, stopped: 'moved-aside' };
       }
     }
     let push = false;

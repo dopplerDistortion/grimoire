@@ -287,3 +287,56 @@ describe('the offers', () => {
     for (const folder of generatedFolders('release-notes')) expect(await existsIn(world.a, folder), folder).toBe(true);
   });
 });
+
+describe('folders upkeep moved aside', () => {
+  test('are listed before they go with the store: stopping to copy them out removes nothing; going on removes them', async ({ world, grimoire }) => {
+    await pushTracker(world.a);
+    await fetchTracker(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const aside = path.join(store.dir, 'moved-aside', '20261012T000000-0a0b0c0d');
+    await mkdir(path.join(aside, '.claude', 'skills', 'grimoire-mine'), { recursive: true });
+    await writeFile(path.join(aside, '.claude', 'skills', 'grimoire-mine', 'SKILL.md'), 'my own skill\n');
+
+    const stopped = await leave(world.a.dir, grimoire.ctx, ['y']);
+
+    expect(stopped.report).toMatchObject({ left: false, stopped: 'moved-aside' });
+    expect(stopped.said).toContain(`  ${aside}`);
+    expect(existsSync(path.join(aside, '.claude', 'skills', 'grimoire-mine', 'SKILL.md'))).toBe(true);
+
+    const gone = await leave(world.a.dir, grimoire.ctx, ['n', 'leave']);
+
+    expect(gone.report.left).toBe(true);
+    expect(existsSync(store.dir)).toBe(false);
+  });
+});
+
+describe('what leave never removes', () => {
+  test('a grimoire-* folder without grimoire’s .gitignore, a generated folder holding someone’s file, and a generated path git tracks', async ({ world, grimoire }) => {
+    await pinAndCommit(world.a);
+    await serveSkill(grimoire.makeCore(), grimoire.ctx);
+    await pushTracker(world.a);
+    await fetchTracker(world.a);
+    await mkdir(path.join(world.a.dir, '.claude', 'skills', 'grimoire-mine'), { recursive: true });
+    await writeFile(path.join(world.a.dir, '.claude', 'skills', 'grimoire-mine', 'SKILL.md'), 'my own skill\n');
+    await writeFile(path.join(world.a.dir, '.agents', 'skills', 'grimoire-release-notes', 'notes.txt'), 'mine\n');
+    await mkdir(path.join(world.a.dir, '.grimoire', 'skills', 'tracked'), { recursive: true });
+    await writeFile(path.join(world.a.dir, '.grimoire', 'skills', 'tracked', '.gitignore'), '*\n');
+    await writeFile(path.join(world.a.dir, '.grimoire', 'skills', 'tracked', 'SKILL.md'), 'committed\n');
+    await world.a.git(['add', '-f', '.grimoire/skills/tracked/SKILL.md']);
+    await world.a.git(['commit', '--quiet', '-m', 'force-add a copy']);
+
+    const { report } = await leave(world.a.dir, grimoire.ctx, ['leave']);
+
+    expect(await existsIn(world.a, '.claude/skills/grimoire-mine/SKILL.md')).toBe(true);
+    expect(await existsIn(world.a, '.agents/skills/grimoire-release-notes/notes.txt')).toBe(true);
+    expect(await existsIn(world.a, '.grimoire/skills/tracked/SKILL.md')).toBe(true);
+    expect(await existsIn(world.a, '.claude/skills/grimoire-release-notes')).toBe(false);
+    expect(report.kept.generated).toEqual(
+      expect.arrayContaining([
+        { worktree: world.a.dir, path: '.claude/skills/grimoire-mine', why: expect.stringMatching(/\.gitignore/) },
+        { worktree: world.a.dir, path: '.agents/skills/grimoire-release-notes', why: expect.stringMatching(/notes\.txt/) },
+        { worktree: world.a.dir, path: '.grimoire/skills/tracked', why: expect.stringMatching(/git tracks/) },
+      ]),
+    );
+  });
+});
