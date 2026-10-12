@@ -22,3 +22,4 @@ export { UPKEEP_EVERY_MS, startUpkeep, type UpkeepLoop, type UpkeepLoopOptions }
 export { operationInProgress, upgradeInProgress, upgradeSkipNotice, worktreeKey, type GitOperation } from './checkout';
 export { UPKEEP_PARTS, pendingSync, pointerRefresh, pruneCopiesPart } from './parts';
 export { POINTER_REFRESH_RECORDS, refreshNotice, refreshedPointerFiles, type PointerRefreshRecord } from './refreshed';
+export { WORKTREE_WATCH_MS, watchNewWorktrees, type WorktreeWatcher } from './watch';

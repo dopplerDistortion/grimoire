@@ -31,7 +31,7 @@ import { readMachineSetting } from '../../core/settings';
 import { GrimoireError, type ErrorBody } from '../../errors';
 import { cloneId as cloneIdOf, defaultDashboardPort, findGitDirs, MachineLocalStore, runningStart, START_LOCK, startStaleness, type RunningStart } from '../../machine-local';
 import { openTracker } from '../../tracker';
-import { startUpkeep } from '../../upkeep';
+import { startUpkeep, watchNewWorktrees } from '../../upkeep';
 import { VERSION } from '../../version';
 import { UsageError } from '../cli/args';
 import type { CliIo } from '../cli/run';
@@ -401,6 +401,8 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
     ...(io.env.GRIMOIRE_DEBUG ? { debug: (line: string) => say(`grimoire ${line}`) } : {}),
     onReport: (report) => report.notices.forEach(say),
   });
+  // A worktree registered while start runs gets its upkeep (the generated output's reconcile) at once (spec §15).
+  const worktrees = watchNewWorktrees({ commonDir: clone.commonDir, loop: upkeep });
   let syncing: Promise<void> | null = null;
   const syncTimer = setInterval(() => {
     if (syncing) return;
@@ -432,6 +434,7 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
   for (const signal of signals) process.off(signal, onSignal);
   say('grimoire start: stopping');
   clearInterval(syncTimer);
+  worktrees.stop();
   await closeServer();
   await control.close();
   await Promise.all([upkeep.stop(2_000), syncing]);
