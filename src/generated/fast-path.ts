@@ -13,6 +13,9 @@
 //   under it: a delivery-off or delete whose refresh ran meanwhile is never
 //   undone. A lease held elsewhere means that process is on it: the hook
 //   writes nothing.
+// - `changed` says the output went from differing to matching during the
+//   hook, whoever wrote it: Claude Code lists skills written during a session
+//   start only when told to reload (spike C), the lease holder's writes too.
 // - A changed copy is saved as a stray edit before the served text goes back.
 //   Nothing is moved aside or removed in a hook, and nothing at all mid-merge
 //   (or rebase, …), in a worktree on another pin, or past the hook's budget.
@@ -44,13 +47,19 @@ export interface FastPathOptions {
 export interface FastPathResult {
   /** Files written (POSIX, relative to the worktree). */
   readonly wrote: readonly string[];
+  /**
+   * Whether the worktree's output differed from the served set when the hook
+   * started and matches it now: this hook wrote, or the lease holder did
+   * while the hook waited. Claude Code reloads its skills on it.
+   */
+  readonly changed: boolean;
   /** Copies saved to the stray-edit store before the served text went back. */
   readonly strayEdits: readonly { skill: string; path: string }[];
   /** Why nothing was tried, when nothing was: `pin`, `upgrade`, a git operation, `unsynced` (no tracker here), `held`, `budget`. */
   readonly skipped?: string;
 }
 
-const NOTHING: FastPathResult = { wrote: [], strayEdits: [] };
+const NOTHING: FastPathResult = { wrote: [], strayEdits: [], changed: false };
 
 /** Whether `worktree`'s generated output differs from what `served` puts there (plain reads; no git). */
 async function differs(worktree: string, served: ServedSet): Promise<boolean> {
@@ -116,7 +125,11 @@ export async function sessionStartFastPath(store: MachineLocalStore, worktree: s
   if (!(await differs(worktree, first))) return NOTHING;
   if (late()) return { ...NOTHING, skipped: 'budget' };
   const lease = await acquire(store, worktree, options.leaseWaitMs ?? FAST_PATH_LEASE_WAIT_MS);
-  if (!lease) return { ...NOTHING, skipped: 'held' };
+  if (!lease) {
+    // The holder is on it, and may be done already.
+    const now = await servedOrUnsynced(store, worktree);
+    return { ...NOTHING, skipped: 'held', changed: now !== null && !(await differs(worktree, now)) };
+  }
   try {
     // Under the lease: the checkout may have moved on, and a decision's refresh may have run.
     const again = await leaveAlone(store, worktree, version);
@@ -125,7 +138,9 @@ export async function sessionStartFastPath(store: MachineLocalStore, worktree: s
     if (!served) return { ...NOTHING, skipped: 'unsynced' };
     if (late()) return { ...NOTHING, skipped: 'budget' };
     const report = await reconcileWorktree(store, worktree, served, 'fast-path');
-    return { wrote: report.wrote, strayEdits: report.strayEdits };
+    // Nothing written yet matching: the holder wrote it while the hook waited.
+    const changed = report.wrote.length > 0 || !(await differs(worktree, served));
+    return { wrote: report.wrote, strayEdits: report.strayEdits, changed };
   } finally {
     await lease.release().catch(() => {});
   }

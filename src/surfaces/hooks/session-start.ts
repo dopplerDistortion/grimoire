@@ -79,7 +79,7 @@ function lastPriorityLine(strays: string | null, refreshed: string | null): stri
 /**
  * What this session start has to say, and does first: the skill fast path
  * makes this worktree's copies and stubs match the served set (src/generated/
- * fast-path.ts), and `reloadSkills` says it wrote any. The line is so far
+ * fast-path.ts), and `reloadSkills` says they changed meanwhile. The line is so far
  * only the last of §12's priorities: the stray edits waiting for a human, and
  * the content pointer files upkeep refreshed, until they are committed. The
  * higher priorities (pin mismatch, due chores, proposals) plug in here. The
@@ -104,13 +104,13 @@ async function compose(_payload: unknown, ctx: SessionStartContext): Promise<Ses
     hookFailed(error);
     return null;
   });
-  const wrote = (fast?.wrote.length ?? 0) > 0;
+  const changed = fast?.changed === true;
   const refreshed = await refreshedPointerFiles(store, root).catch(() => null);
   const own = await worktreeKey(root);
   const strays = await listStrayEdits(store).catch(() => []);
   const edits = await Promise.all(strays.map(async (edit) => ({ skill: edit.skill, where: (await worktreeKey(edit.worktree)) === own ? null : edit.worktree })));
   const line = lastPriorityLine(strayEditsLine(edits), refreshed ? refreshNotice(refreshed.paths.length, null) : null);
-  return { ...(line ? { line } : {}), ...(wrote ? { reloadSkills: true } : {}) };
+  return { ...(line ? { line } : {}), ...(changed ? { reloadSkills: true } : {}) };
 }
 
 /** The verb's body: the payload in, what to print out. */

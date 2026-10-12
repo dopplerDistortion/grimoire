@@ -9,7 +9,7 @@ import { Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { gitTest, readFixture, readFixtureJson, type GitWorld } from '#harness';
 import { createCore, type CallContext } from '../../../src/core';
-import { listStrayEdits, SERVED_SET_CACHE, sessionStartFastPath, tipPairKey } from '../../../src/generated';
+import { cachedServedSet, listStrayEdits, reconcileWorktree, SERVED_SET_CACHE, sessionStartFastPath, tipPairKey } from '../../../src/generated';
 import { skillVersionOf } from '../../../src/knowledge';
 import { MachineLocalStore } from '../../../src/machine-local';
 import { openTracker } from '../../../src/tracker';
@@ -268,5 +268,38 @@ describe('the skill fast path', () => {
 
     expect(await waiting).toMatchObject({ wrote: [] });
     for (const folder of folders) expect(await exists(path.join(root, folder)), folder).toBe(false);
+  });
+  gitTest('when the lease holder writes the copies and stubs while the hook waits for the lease, the skills still changed during this session start: Claude Code is told to reload them, whether the hook gets the lease after or never', async ({
+    world,
+  }) => {
+    const root = await withServedSkill(world);
+    for (const releases of [true, false]) {
+      for (const folder of folders) await rm(path.join(root, folder), { recursive: true, force: true });
+      const store = new MachineLocalStore(path.join(root, '.git'));
+      const held = await store.leases.acquire(await worktreeLeaseName(root), { ttlMs: 60_000 });
+      if (held.status !== 'acquired') throw new Error('the lease was held');
+      // The holder (upkeep, `start`'s watcher, a refresh) writes once the hook first finds the lease taken.
+      const acquire = store.leases.acquire.bind(store.leases);
+      let wrote = false;
+      vi.spyOn(store.leases, 'acquire').mockImplementation(async (name, options) => {
+        const result = await acquire(name, options);
+        if (result.status === 'held' && !wrote) {
+          wrote = true;
+          await reconcileWorktree(store, root, await cachedServedSet(store, root), 'fast-path');
+          if (releases) await held.lease.release();
+        }
+        return result;
+      });
+
+      const fast = await sessionStartFastPath(store, root, { leaseWaitMs: releases ? 60_000 : 300 });
+
+      expect(wrote, `releases: ${releases}`).toBe(true);
+      expect(fast, `releases: ${releases}`).toMatchObject({ wrote: [], changed: true, ...(releases ? {} : { skipped: 'held' }) });
+      expect(await readFile(path.join(root, COPY), 'utf8')).toBe(NOTES);
+      if (!releases) await held.lease.release();
+      vi.restoreAllMocks();
+    }
+    // Nothing changed this time: no reload.
+    expect(await sessionStartFastPath(new MachineLocalStore(path.join(root, '.git')), root)).toMatchObject({ wrote: [], changed: false });
   });
 });
