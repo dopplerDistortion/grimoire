@@ -137,17 +137,24 @@ describe('the git editor', () => {
   test('while the editor runs, Ctrl-C is the editor’s: grimoire ignores SIGINT until it closes, like git', async ({ world }) => {
     const scripts = await makeTempDir('grimoire-editor-');
     try {
-      // The editor waits for a go file, so the test can look while it is open.
+      // The editor says when it is open (a started file) and waits for a go file, so the test can look while it is open.
+      const started = path.join(scripts, 'started');
       const go = path.join(scripts, 'go');
       const script = path.join(scripts, 'editor.mjs');
-      await writeFile(script, `import { existsSync } from 'node:fs';\nconst wait = () => (existsSync(${JSON.stringify(go)}) ? process.exit(0) : setTimeout(wait, 20));\nwait();\n`);
+      await writeFile(
+        script,
+        `import { existsSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(started)}, '');\nconst wait = () => (existsSync(${JSON.stringify(go)}) ? process.exit(0) : setTimeout(wait, 20));\nwait();\n`,
+      );
       const slashed = (p: string) => p.replaceAll('\\', '/');
       vi.stubEnv('GIT_EDITOR', `"${slashed(process.execPath)}" "${slashed(script)}"`);
       const workspace = await editWorkspace(world.a.dir);
       try {
         const before = process.listenerCount('SIGINT');
         const editing = openGitEditor(path.join(workspace.dir, 'page.md'), world.a.dir);
-        await vi.waitFor(() => expect(process.listenerCount('SIGINT')).toBe(before + 1));
+        // Wait for the editor itself, not a fixed time: before it starts, grimoire runs gits (the editor
+        // command, git's sh), which take far longer than an idle machine's few milliseconds under load.
+        await vi.waitFor(() => readFile(started), { timeout: 30_000, interval: 20 });
+        expect(process.listenerCount('SIGINT')).toBe(before + 1);
         process.emit('SIGINT');
         await writeFile(go, '');
         await editing;
