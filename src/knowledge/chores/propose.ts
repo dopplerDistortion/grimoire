@@ -311,9 +311,10 @@ function copied(text: string, addedAt: ReadonlySet<number>, sources: readonly Se
 /**
  * The changes a new proposal may not repeat (spec §18 Repeats), for the skill
  * `name`: each rejected proposal's change, each change a restore undid, and
- * each text a delete removed.
+ * each text a delete removed; and the version of every rejected change, which
+ * still refuses an exact repeat once its proposal (and so its text) is purged.
  */
-async function negativeEvidence(name: string, cx: ProposeContext): Promise<{ changes: string[][]; texts: string[][] }> {
+async function negativeEvidence(name: string, cx: ProposeContext): Promise<{ changes: string[][]; texts: string[][]; versions: Set<string> }> {
   const { book, view } = cx;
   const state = book.skills.get(name);
   const records = state?.records ?? [];
@@ -326,6 +327,13 @@ async function negativeEvidence(name: string, cx: ProposeContext): Promise<{ cha
     changes.push(changeLines(before, proposal.record.text));
     texts.push(normalizedLines(linesOf(proposal.record.text)));
   }
+  // A decision's `saw` ends with the proposal's version. A reject of a proposal no accept contests refused it.
+  const accepted = new Set(records.filter((record) => record.kind === 'accept' && record.proposal !== undefined).map((record) => record.proposal));
+  const versions = new Set<string>();
+  for (const reject of records.filter((record) => record.kind === 'reject' && record.proposal !== undefined && !accepted.has(record.proposal))) {
+    const refused = reject.saw.at(-1);
+    if (refused !== undefined) versions.add(refused);
+  }
   for (const restore of records.filter((record) => record.kind === 'restore' && record.from !== null)) {
     const maker = records.find((record) => record.to === restore.from && record.kind !== 'restore');
     if (!maker) continue;
@@ -336,7 +344,7 @@ async function negativeEvidence(name: string, cx: ProposeContext): Promise<{ cha
   for (const removal of records.filter((record) => (record.kind === 'delete' || record.kind === 'eject') && record.from !== null)) {
     texts.push(normalizedLines(linesOf(await textOf(removal.from))));
   }
-  return { changes, texts };
+  return { changes, texts, versions };
 }
 
 /**
@@ -484,7 +492,9 @@ export async function checkProposal(result: unknown, cx: ProposeContext): Promis
     }
   }
   const negative = await negativeEvidence(name, cx);
-  if (shape.action === 'patch') {
+  if (negative.versions.has(version)) {
+    p.add('repeats_rejected', 'text', 'is the text of a change of this skill that was rejected');
+  } else if (shape.action === 'patch') {
     const change = changeLines(baseText, text);
     if (negative.changes.some((other) => other.length > 0 && similarity(change, other) >= REPEAT_SIMILARITY)) {
       p.add('repeats_rejected', 'ops', 'is near-identical to a change of this skill that was rejected or undone');

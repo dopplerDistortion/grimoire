@@ -216,6 +216,17 @@ describe('reject, dismiss, reconsider', () => {
 });
 
 describe('purge', () => {
+  test('a purged rejected proposal still refuses an exact repeat of its change: the reject record names its version', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const cli = human(grimoire.ctx);
+    const { proposal } = ok(await submit(p, patchResult(p)));
+    ok(await p.core.call('proposal_reject', { id: proposal, reason: 'one-off' }, cli));
+    ok(await p.core.call('proposal_purge', { id: proposal, reason: 'quoted a secret' }, cli));
+
+    const again = await manualRun(p);
+    expect(ok(await submit(again, patchResult(again)))).toMatchObject({ result: 'invalid', reasons: ['repeats_rejected'] });
+  });
+
   test('purging a proposal removes its record and leaves a tombstone that dominates a fold; purge_trace names the proposals citing a trace', async ({ world, grimoire }) => {
     const p = await proposer(grimoire, world);
     const cli = human(grimoire.ctx);

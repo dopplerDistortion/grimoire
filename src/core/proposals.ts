@@ -66,6 +66,17 @@ async function proposalIn(view: TrackerView, id: string): Promise<ProposalRecord
   throw new GrimoireError('NOT_FOUND', `there is no skill proposal ${wanted}`, { field: 'id', ref: wanted });
 }
 
+/**
+ * The versions a decision's person was shown: the proposal's base and the
+ * version current then, and last the proposal's own version. It is always
+ * last, so a reject still names the change it refused after the proposal is
+ * purged (`saw` keeps its order; the repeat check reads it).
+ */
+function decisionSaw(proposal: ProposalRecord, current: string | null): string[] {
+  const shown = [proposal.base, current].filter((v): v is string => v !== null && v !== proposal.version);
+  return [...new Set(shown), proposal.version];
+}
+
 function stateOf(book: SkillBook, proposals: readonly ProposalRecord[], id: string): ProposalState {
   return proposalStates(proposals, book.skills).find((state) => state.record.id === id)!;
 }
@@ -471,7 +482,7 @@ export const proposalAccept = define({
         const lapse = await writeSkillChange(
           draft,
           scanner,
-          { kind: 'lapse', skill: proposal.skill, proposal: proposal.id, reason: checks.reasons.join(','), to: current, saw: [...new Set([proposal.base, current, proposal.version].filter((v): v is string => v !== null))] },
+          { kind: 'lapse', skill: proposal.skill, proposal: proposal.id, reason: checks.reasons.join(','), to: current, saw: decisionSaw(proposal, current) },
           changeAuthor(env, author),
         );
         return { result: { id: proposal.id, skill: proposal.skill, status: 'lapsed', reasons: checks.reasons, problems: checks.problems, record: lapse.record } };
@@ -495,7 +506,7 @@ export const proposalAccept = define({
           text: proposal.text,
           proposal: proposal.id,
           acks: acknowledged,
-          saw: [...new Set([proposal.base, current, proposal.version].filter((v): v is string => v !== null))],
+          saw: decisionSaw(proposal, current),
         },
         changeAuthor(env, author),
       );
@@ -590,7 +601,7 @@ export const proposalReject = define({
           reason: input.reason,
           ...(note !== '' ? { note } : {}),
           to: current,
-          saw: [...new Set([proposal.base, current, proposal.version].filter((v): v is string => v !== null))],
+          saw: decisionSaw(proposal, current),
         },
         changeAuthor(env, author),
       );
@@ -629,7 +640,7 @@ async function simpleDecision(
     const written = await writeSkillChange(
       draft,
       scanner,
-      { kind, skill: proposal.skill, proposal: proposal.id, to: current, saw: [...new Set([proposal.base, current, proposal.version].filter((v): v is string => v !== null))] },
+      { kind, skill: proposal.skill, proposal: proposal.id, to: current, saw: decisionSaw(proposal, current) },
       changeAuthor(env, author),
     );
     const after = stateOf(await readSkills(draft, scanner), await draft.proposals.records(), proposal.id);
@@ -682,7 +693,7 @@ export interface ProposalPurgeResult {
 export const proposalPurge = define({
   name: 'proposal_purge',
   description:
-    'Purge a skill proposal, with a reason: its record goes in one commit, a tombstone {by, at, reason} stays and dominates every fold, and unpushed commits are rewritten without it (pushed history keeps it). Its ledger decisions stay. Human-only.',
+    'Purge a skill proposal, with a reason: its record goes in one commit, a tombstone {by, at, reason} stays and dominates every fold, and unpushed commits are rewritten without it (pushed history keeps it). Its ledger decisions stay: a rejected change stays refused when proposed again with the exact text, but its text is gone, so a near-identical rewording is no longer caught. Human-only.',
   kind: 'write',
   policy: 'human-only',
   replay: 'none',
