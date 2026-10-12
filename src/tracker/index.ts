@@ -31,6 +31,8 @@ export type {
   AttemptOutcome,
   AttemptRecord,
   AttemptStart,
+  DeliveryState,
+  OfferedSkill,
   Verdict,
 } from './attempt';
 export { ATTEMPT_PATTERN } from './attempt';

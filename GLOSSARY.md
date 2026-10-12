@@ -255,3 +255,7 @@ _Avoid_: Rollback, revert
 **Skill ledger**:
 The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, every change to an evolved skill, and every quarantine mark and clear.
 _Avoid_: Skill impact, changelog, audit log, history
+
+**Scorecard**:
+The watch-only tally for one skill version, derived from the traces of agent attempts whose checkout offered it or that read it: how many were offered it, how many read it, the outcomes of those that read it, and the attempts whose facts were incomplete, counted as "read unknown"; never committed, and it changes nothing.
+_Avoid_: Skill impact, metrics, rating
