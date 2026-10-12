@@ -31,6 +31,7 @@ export {
   pruneRuns,
   RUN_KEEP_MS,
   readRun,
+  removeRun,
   servedLog,
   writeRun,
   type ChoreOrigin,
