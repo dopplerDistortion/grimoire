@@ -78,7 +78,7 @@ describe('closing an attempt', () => {
     // end.md stays attempt-level only.
     const end = await trackerFile(world.a, tip, `${attemptDir(id, attempt)}/end.md`);
     const endKeys = end.split('\n').filter((line) => line.includes(': ')).map((line) => line.slice(0, line.indexOf(':')));
-    expect(endKeys).toEqual(['ended', 'ended_by', 'at', 'debrief', 'worker_kind', 'wiki_exposed', 'field_changes']);
+    expect(endKeys).toEqual(['ended', 'ended_by', 'at', 'debrief', 'worker_kind', 'wiki_exposed', 'field_changes', 'commits']);
     // Per-context entries and facts_complete are read from the session records.
     const trace = await captureOf(world.a, attempt);
     expect(trace.contexts.map((c) => [c.context, c.excerpt.status, c.facts])).toEqual(

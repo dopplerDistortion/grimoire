@@ -2,7 +2,8 @@
 // checkout, and with `--fix` the single-answer repairs only: content pointer
 // files and stale locks. Each check is one entry of DOCTOR_CHECKS (the store's
 // in ./store-checks.ts, the install's in ./install-checks.ts), so later slices
-// add their own (capture statistics, knowledge facts, the runner) the same way.
+// add their own (knowledge facts, the runner) the same way; the capture
+// statistics are in ./capture-checks.ts, with `--readers`' opt-in check.
 import { sessionRecordProblem } from '../capture';
 import { GrimoireError } from '../errors';
 import { ledgerRecordProblem } from '../knowledge';
@@ -10,6 +11,7 @@ import { findGitDirs, MachineLocalStore, type GitDirs, type Lease } from '../mac
 import { inspectTrees, openTracker, removeStaleRefLocks, trackerTips, type TrackerStore, type TrackerRefTips, type TrackerView, type TreeInspection } from '../tracker';
 import { holdWorktreeLease, noteRefreshed, operationInProgress, refreshNotice, upgradeInProgress, upgradeSkipNotice } from '../upkeep';
 import { VERSION } from '../version';
+import { CAPTURE_CHECKS, READERS_CHECK } from './capture-checks';
 import { readInstallConfig, type CheckoutInstall } from './config';
 import { INSTALL_CHECKS } from './install-checks';
 import { refreshContentPointers, type ContentRefresh } from './refresh';
@@ -55,6 +57,8 @@ export interface DoctorOptions {
   readonly checks?: readonly DoctorCheck[];
   /** Make the single-answer repairs (content pointer files, stale locks), then report what is left. */
   readonly fix?: boolean;
+  /** Also run the opt-in transcript readers' check (`--readers`): structure statistics of this repo's transcripts. */
+  readonly readers?: boolean;
   /** How long `fix` waits for the (live store, worktree) lease while another process holds it (default 30 s). */
   readonly leaseWaitMs?: number;
 }
@@ -74,7 +78,7 @@ export interface DoctorReport {
 }
 
 /** Every check this release ships, in report order. */
-export const DOCTOR_CHECKS: readonly DoctorCheck[] = [...STORE_CHECKS, ...INSTALL_CHECKS];
+export const DOCTOR_CHECKS: readonly DoctorCheck[] = [...STORE_CHECKS, ...INSTALL_CHECKS, ...CAPTURE_CHECKS];
 
 /** What `--fix` did. */
 export interface FixReport {
@@ -106,7 +110,7 @@ async function runChecks(options: DoctorOptions, dirs: GitDirs, config: Checkout
   const findings: Finding[] = [];
   const checks: CheckRun[] = [];
   try {
-    for (const check of options.checks ?? DOCTOR_CHECKS) {
+    for (const check of [...(options.checks ?? DOCTOR_CHECKS), ...(options.readers ? [READERS_CHECK] : [])]) {
       try {
         const outcome = await check.run(input);
         if ('skipped' in outcome) {
@@ -195,7 +199,7 @@ async function applyFixes(input: DoctorInput, findings: readonly Finding[], leas
   return fix;
 }
 
-const SECTION_TITLES: Readonly<Record<string, string>> = { store: 'Store', install: 'Install' };
+const SECTION_TITLES: Readonly<Record<string, string>> = { store: 'Store', install: 'Install', capture: 'Capture' };
 
 /** The report as a person reads it: each section's findings, worst first, with what to do. */
 export function doctorText(report: DoctorReport): string[] {

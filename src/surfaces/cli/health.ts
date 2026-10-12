@@ -15,13 +15,14 @@ import type { CliIo } from './run';
 interface HealthCommand {
   readonly json: boolean;
   readonly fix: boolean;
+  readonly readers: boolean;
   readonly help: boolean;
   readonly from: string | null;
 }
 
 const FLAGS: Readonly<Record<'status' | 'doctor', readonly string[]>> = {
   status: ['--json', '--help'],
-  doctor: ['--json', '--fix', '--help'],
+  doctor: ['--json', '--fix', '--readers', '--help'],
 };
 
 function parse(verb: 'status' | 'doctor', argv: readonly string[]): HealthCommand {
@@ -34,10 +35,9 @@ function parse(verb: 'status' | 'doctor', argv: readonly string[]): HealthComman
       if (!value) throw new UsageError('--from needs a value', verb);
       from = value;
     } else if (FLAGS[verb].includes(arg)) flags.add(arg);
-    else if (verb === 'doctor' && arg === '--readers') throw new UsageError('doctor --readers (transcript format checks) isn’t in this release yet', verb);
     else throw new UsageError(`${verb} doesn't take ${arg}`, verb);
   }
-  return { json: flags.has('--json'), fix: flags.has('--fix'), help: flags.has('--help'), from };
+  return { json: flags.has('--json'), fix: flags.has('--fix'), readers: flags.has('--readers'), help: flags.has('--help'), from };
 }
 
 const HELP: Readonly<Record<'status' | 'doctor', Record<string, unknown>>> = {
@@ -52,12 +52,13 @@ const HELP: Readonly<Record<'status' | 'doctor', Record<string, unknown>>> = {
   },
   doctor: {
     verb: 'doctor',
-    usage: 'grimoire doctor [--fix] [--json] [--from <dir>]',
+    usage: 'grimoire doctor [--fix] [--readers] [--json] [--from <dir>]',
     description:
-      'A report on the store (records, ids, relations, conflicts, write-once files, purges, ref locks, sync, foreign commits, ref names) and the install (the pinned copy, the launcher, the shim, Node, pointer drift, hooks, .gitattributes, AGENTS.md, client config conflicts, stale locks, running servers, tracker docs, the Codex hook). Reads only, unless --fix.',
+      'A report on the store (records, ids, relations, conflicts, write-once files, purges, ref locks, sync, foreign commits, ref names) and the install (the pinned copy, the launcher, the shim, Node, pointer drift, hooks, .gitattributes, AGENTS.md, client config conflicts, stale locks, running servers, tracker docs, the Codex hook) and capture statistics (late-cut drops, unreadable and unmatched cuts; no transcript is opened). Reads only, unless --fix.',
     gate: 'none',
     flags: {
       '--fix': 'make the single-answer repairs only: content pointer files and stale locks; then report what is left',
+      '--readers': 'also read this machine’s transcripts whose cwd is inside this repo and print the readers’ structure statistics only (lines, steps, versions; no text); skipped in none mode',
       '--json': 'only the JSON object, no human-readable report on stderr',
       '--from': 'the directory the host repo search starts from',
     },
@@ -90,7 +91,7 @@ export async function runHealthVerb(verb: 'status' | 'doctor', argv: readonly st
       if (!command.json) io.stderr.write(`${lines.join('\n')}\n`);
       return 0;
     }
-    const report = await runDoctor({ root, env: io.env, fix: command.fix });
+    const report = await runDoctor({ root, env: io.env, fix: command.fix, readers: command.readers });
     printJson(io, report);
     if (!command.json) io.stderr.write(`${doctorText(report).join('\n')}\n`);
     return 0;

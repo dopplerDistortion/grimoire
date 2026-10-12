@@ -14,6 +14,19 @@ import { CLAUDE_CODE_READER_VERSION, cutClaudeCode, readClaudeCodeTranscript } f
 import { defaultClaudeConfigDir, findClaudeTranscript } from './claude-code/roots';
 import { CODEX_READER_VERSION, cutCodex, readCodexTranscript } from './codex';
 import { defaultCodexHome, findCodexTranscript } from './codex/roots';
+import {
+  boundRuns,
+  callSpans,
+  creationsInSpans,
+  observedCommits,
+  referencedCommits,
+  reflogCreations,
+  transcriptCommitLines,
+  type CallSpan,
+  type CommitFact,
+  type ReferencedCommit,
+  type SeenCommit,
+} from './commit-facts';
 import { CHORES_AGENT, emptyCut, isChoresContext, type BindingCall, type Cut, type CutEvidence } from './cut';
 import type { EvidenceSource } from './evidence';
 import { pathRewriter, type PathSpellings } from './paths';
@@ -209,6 +222,27 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
 }
 
 /**
+ * The attempt's referenced commits (spec §14 Facts: Commits), for its seal:
+ * commits on any branch of the clone whose `Refs:` trailer names the issue,
+ * committed from the attempt's opening to the ending call, snapshotted.
+ * Within the ending's budget; past it, or when git fails, none. An unclaimed
+ * close's instant attempt has no span to commit in.
+ */
+export async function referencedAtEnd(input: {
+  readonly repoRoot: string;
+  readonly issue: string;
+  readonly attempt: AttemptRecord | null;
+  /** The ending call's time (ISO 8601). */
+  readonly at: string;
+  readonly deadline: number;
+}): Promise<ReferencedCommit[]> {
+  if (input.attempt === null) return [];
+  const stallMs = () => Math.max(100, input.deadline - Date.now());
+  const work = referencedCommits(input.repoRoot, input.issue, Date.parse(input.attempt.start.at), Date.parse(input.at), { stallMs });
+  return beforeDeadline(work, input.deadline, []);
+}
+
+/**
  * The Claude Code config folders hooks revealed on this machine (spec §14
  * Roots, §6), other than the one capture looks in: a transcript not found
  * there is searched for in these too. A revealed root is a `projects/<slug>/`
@@ -393,9 +427,10 @@ interface CutFound {
   readonly subagents?: SubagentReader;
 }
 
-/** A context's skill reads (spec §14 Facts: Read), and whether every transcript the scan covers was read. */
+/** A context's skill reads (spec §14 Facts: Read) and observed commits (Facts: Commits), and whether every transcript the scan covers was read. */
 interface SkillFacts {
   readonly reads: SkillRead[];
+  readonly commits: CommitFact[];
   readonly complete: boolean;
   /** The subagents launched in the window, by id: their own `skill_read` events count for the context too. */
   readonly launched: ReadonlySet<string>;
@@ -625,6 +660,8 @@ class ContextCut {
   private async scanFacts(cut: Cut, subagents: SubagentReader | undefined): Promise<SkillFacts> {
     const versions = this.versions ?? new Map();
     const reads = transcriptSkillReads(cut, cut.steps, versions);
+    const seen: SeenCommit[] = transcriptCommitLines(cut, cut.steps);
+    const runs = boundRuns(cut.steps, this.bound);
     const queue = launchedSubagents(cut.steps);
     const launched = new Set<string>();
     let complete = this.versions !== null;
@@ -640,9 +677,28 @@ class ContextCut {
       if (transcript.agentType === CHORES_AGENT) continue;
       const steps = transcript.steps.slice(transcript.copiedSteps);
       reads.push(...transcriptSkillReads(transcript, steps, versions));
+      seen.push(...transcriptCommitLines(transcript, steps));
+      runs.push(...boundRuns(steps, this.bound));
       queue.push(...launchedSubagents(steps));
     }
-    return { reads, complete, launched };
+    return { reads, commits: await this.observed(cut, seen, runs), complete, launched };
+  }
+
+  /**
+   * The context's observed commits (spec §14 Facts: Commits): the creation
+   * lines its window and launched subagents showed, then the creating entries
+   * of its worktree's HEAD reflog timed inside one of its calls, each
+   * snapshotted. A bound subagent's run (`boundSubagentRuns`: launched in the window
+   * or in a subagent it launched) is no call of this context's: commits made
+   * in it are that subagent's record's. Git that can't answer before the deadline leaves them bare,
+   * or out.
+   */
+  private async observed(cut: Cut, seen: readonly SeenCommit[], boundSubagentRuns: readonly CallSpan[]): Promise<CommitFact[]> {
+    const stallMs = () => Math.max(100, this.deadline - Date.now());
+    const reflog = await reflogCreations(this.target.worktree, { stallMs }).catch(() => []);
+    const inside = creationsInSpans(reflog, callSpans(cut.steps, this.bound), boundSubagentRuns);
+    const who = { session: cut.session === '' ? null : cut.session, context: cut.context === '' ? null : cut.context };
+    return observedCommits(this.input.repoRoot, seen, inside, who, { stallMs }).catch(() => seen.map(({ hash, session, context }) => ({ hash, via: 'observed' as const, session, context })));
   }
 
   /**
@@ -700,7 +756,7 @@ class ContextCut {
       excerpt_notes: notes,
       facts,
       skills_read: byTime(reads),
-      commits: [],
+      commits: scanned?.commits ?? [],
       reach: cut.reach,
       cut_at: input.call.at,
       roots: roots.map(this.rewrite),
