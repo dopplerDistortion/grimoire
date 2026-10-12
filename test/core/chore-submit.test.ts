@@ -192,6 +192,69 @@ describe('chore_submit: a Wiki Maintainer result', () => {
   });
 });
 
+/** Maps every pair of the brief to no_pattern. */
+function allNoPattern(brief: ChoreBrief) {
+  return brief.pairs.map((pair) => ({ pair: pair.pair, no_pattern: 'nothing recurring' }));
+}
+
+describe('chore_submit: refusals and the one fix-up', () => {
+  test('an invalid result gets reason codes and one fix-up; a fixed result then compiles', async ({ world, grimoire }) => {
+    const d = await due(grimoire);
+    const brief = await startAndRead(d);
+    const before = await trackerTip(world.a);
+
+    const refused = ok(
+      await d.core.call(
+        'chore_submit',
+        { run: brief.run, result: { pages: [{ op: 'create', slug: 'Not A Slug', title: 'T', kind: 'pattern', summary: 's', body: 'b' }], consumption: allNoPattern(brief).slice(1) } },
+        d.chores,
+      ),
+    );
+
+    expect(refused).toMatchObject({ run: brief.run, result: 'invalid', fix_ups_left: 1, reasons: ['bad_slug', 'missing_pair'] });
+    expect(refused.problems).toMatchObject({ 'pages[0].slug': expect.any(String), consumption: expect.stringContaining(brief.pairs[0]!.pair) });
+    expect(refused.summary).toBe(`grimoire chores: compile result refused (bad_slug, missing_pair); one fix-up left; run ${brief.run}`);
+    expect(await trackerTip(world.a)).toBe(before);
+
+    const fixed = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: allNoPattern(brief) } }, d.chores));
+    expect(fixed).toMatchObject({ result: 'compiled', traces: 3, pages: 0 });
+    expect(fixed.summary).toBe(`grimoire chores: compile done, 3 traces, 0 pages (0 created, 0 updated); run ${brief.run}`);
+    // A compile writing no page is still in the log.
+    const log = await trackerFile(world.a, (await trackerTip(world.a))!, 'knowledge/wiki/log.md');
+    expect(log).toContain(`Wiki Maintainer run ${brief.run} compiled 3 traces, writing no pages`);
+  });
+
+  test('a second failure ends the run failed, committing reason codes and served pairs; after a second failed run the pairs are set aside', async ({
+    world,
+    grimoire,
+  }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const bad = { pages: [], consumption: [] };
+    for (let round = 1; round <= 2; round++) {
+      const brief = await startAndRead(d);
+      // One strike leaves the pair offered.
+      expect(brief.pairs.map((pair) => pair.trace), `round ${round}`).toEqual([d.fails[0]]);
+      const before = (await trackerTip(world.a))!;
+      expect(ok(await d.core.call('chore_submit', { run: brief.run, result: bad }, d.chores))).toMatchObject({ result: 'invalid' });
+      const failed = ok(await d.core.call('chore_submit', { run: brief.run, result: { ...bad, extra: true } }, d.chores));
+
+      expect(failed).toMatchObject({ result: 'failed', fix_ups_left: 0, reasons: ['shape'] });
+      expect(failed.summary).toBe(`grimoire chores: compile failed after its fix-up (shape); nothing written; run ${brief.run}`);
+      const tip = (await trackerTip(world.a))!;
+      expect(await world.a.git(['rev-parse', `${tip}^`])).toBe(before);
+      const record = await trackerFile(world.a, tip, `knowledge/chore-runs/${brief.run[3]}/${brief.run[4]}/${brief.run}.md`);
+      expect(record).toContain('result: "failed"');
+      expect(record).toContain('reasons: ["shape"]');
+      expect(record).toContain(`pairs: ["${d.fails[0]}@fail"]`);
+      expect(record).toContain('unverified: {"client":null,"model":null}');
+      // The run ended: it takes no more submits or reads.
+      expect(await d.core.call('chore_read', { run: brief.run }, d.chores)).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+    }
+    // Two strikes: set aside, and nothing else makes the chore due.
+    expect(await d.core.call('chore_start', { kind: 'wiki-maintainer' }, d.chores)).toMatchObject({ ok: false, error: { code: 'NOT_DUE' } });
+  });
+});
+
 function createHashOf(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
