@@ -4,8 +4,8 @@ import { rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 import path from 'node:path';
-import { expect } from 'vitest';
-import { gitTest, makeTempDir, removeDir, type Checkout, type Clone } from '#harness';
+import { expect, test } from 'vitest';
+import { createGitWorld, makeTempDir, removeDir, type Checkout, type Clone, type WorldTemplate } from '#harness';
 import { createCore, type CallContext, type Core, type CoreOptions } from '../../src/core';
 import { openTracker } from '../../src/tracker';
 
@@ -136,13 +136,20 @@ export interface Grimoire {
   makeCore(options?: CoreOptions): Core;
 }
 
+/** A git world whose clone a holds an initialized tracker: built once per test file, then copied (see createGitWorld). */
+const WITH_TRACKER: WorldTemplate = { name: 'tracker', prepare: (world) => initializeTracker(world.a, world.a).then(() => undefined) };
+
 /**
- * `gitTest` plus a `grimoire` fixture: clone a has an initialized tracker, and
- * `grimoire.core` is a core with a fixed clock. Tests that need other core
- * options build their own with `grimoire.makeCore(…)`.
+ * `gitTest`'s `world`, but its clone a holds an initialized tracker (every
+ * world of a test file starts from the same tracker root), plus a `grimoire`
+ * fixture: `grimoire.core` is a core with a fixed clock. Tests that need other
+ * core options build their own with `grimoire.makeCore(…)`.
  */
-export const coreTest = gitTest.extend('grimoire', async ({ world }, { onCleanup }) => {
-  await initializeTracker(world.a, world.a);
+export const coreTest = test.extend('world', async ({}, { onCleanup }) => {
+  const world = await createGitWorld(WITH_TRACKER);
+  onCleanup(() => world.cleanup());
+  return world;
+}).extend('grimoire', async ({ world }, { onCleanup }) => {
   const cores: Core[] = [];
   onCleanup(async () => {
     for (const core of cores) await core.close();

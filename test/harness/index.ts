@@ -12,6 +12,7 @@ export {
 } from './git';
 export {
   createGitWorld,
+  type WorldTemplate,
   ALICE,
   BOB,
   type GitWorld,
