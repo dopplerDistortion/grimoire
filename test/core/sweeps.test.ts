@@ -6,9 +6,11 @@
 // Seam 1: the part runs through the upkeep scheduler against real git; real
 // Claude Code transcripts from the seam-2 fixtures stand in for the clients'.
 import path from 'node:path';
-import { describe, expect } from 'vitest';
+import { utimes } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
 import { recordRevealedRoot } from '../../src/capture/transcript-roots';
-import { seenHereRows } from '../../src/capture/seen-here';
+import { seenHereRows, type SeenHereRow } from '../../src/capture/seen-here';
+import { sweepOrder } from '../../src/core/sweep';
 import { putMachineSetting } from '../../src/core/settings';
 import { MachineLocalStore } from '../../src/machine-local';
 import { runUpkeep, type PartRun } from '../../src/upkeep';
@@ -79,6 +81,45 @@ describe('a sweep', () => {
 
     expect(again.result).toMatchObject({ attached: 0 });
     expect(await trackerTip(world.a)).toBe(tip);
+  });
+
+  test('doesn’t read again a transcript unchanged since its last cut; once it changes, the context is cut again', async ({ world, grimoire, capture }) => {
+    const { core } = capture;
+    const id = await created(core, grimoire.ctx, 'Unchanged since');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    const first = await sweepNow(world.a.dir, { capture: capture.options, clock: () => IDLE });
+    expect(first.result).toMatchObject({ attached: 1, cut: 1 });
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const transcript = path.join(capture.configDir, 'projects', 'C--Users-user-proj', `${CLAUDE_SESSION}.jsonl`);
+    const [row] = await seenHereRows(machine, { handle: attempt });
+    expect(row!.swept).toMatchObject({ at: IDLE.toISOString(), stamp: { file: transcript } });
+
+    const again = await sweepNow(world.a.dir, { capture: capture.options, clock: () => new Date(IDLE.getTime() + 60_000) });
+    expect(again.result).toMatchObject({ attached: 0, cut: 0, unchanged: 1 });
+
+    const later = new Date(IDLE.getTime() + 120_000);
+    await utimes(transcript, later, later);
+    const changed = await sweepNow(world.a.dir, { capture: capture.options, clock: () => later });
+    expect(changed.result).toMatchObject({ attached: 0, cut: 1, unchanged: 1 });
+  });
+
+  test('notes when it cut each row, a failed cut too, but not one the budget overtook: the next sweep cuts the longest uncut first', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const { core } = capture;
+    const id = await created(core, grimoire.ctx, 'Nowhere to be found');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    const machine = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const elsewhere = { ...capture.options, claudeConfigDir: path.join(capture.configDir, 'nothing-here') };
+
+    await sweepNow(world.a.dir, { capture: elsewhere, clock: () => IDLE, budgetMs: 0 });
+    expect((await seenHereRows(machine, { handle: attempt }))[0]).toMatchObject({ swept: null });
+    const missed = await sweepNow(world.a.dir, { capture: elsewhere, clock: () => IDLE });
+
+    expect(missed.result).toMatchObject({ attached: 0, cut: 1 });
+    expect((await seenHereRows(machine, { handle: attempt }))[0]).toMatchObject({ reach: null, swept: { at: IDLE.toISOString(), stamp: null } });
   });
 
   test('leaves a context that was active in the last 30 min for a later sweep', async ({ world, grimoire, capture }) => {
@@ -195,5 +236,37 @@ describe('a sweep', () => {
     expect(report.runs.find((r) => r.part === 'excerpt-sweep')).toMatchObject({ status: 'ran', result: { cancelled: true, attached: 0 } });
     expect(await trackerTip(world.a)).toBe(tip);
     expect(await sessionRecords(world.a, id, attempt)).toEqual([]);
+  });
+});
+
+describe('the sweep order', () => {
+  const row = (handle: string, at: string, swept: string | null): SeenHereRow => ({
+    handle,
+    issue: 'gr-1',
+    client: 'claude-code',
+    session: handle,
+    context: 'main',
+    call: null,
+    spawn_env: null,
+    nonce: 'n',
+    source: null,
+    pending_hint: null,
+    worktree: '/w',
+    at,
+    last_at: at,
+    path: null,
+    reach: null,
+    swept: swept === null ? null : { at: swept, stamp: null },
+  });
+
+  it('cuts the rows never swept first, by their first binding, then the rest by when a sweep last cut them', () => {
+    const rows = [
+      row('a', '2026-10-11T01:00:00.000Z', '2026-10-11T03:00:00.000Z'),
+      row('b', '2026-10-11T02:00:00.000Z', null),
+      row('c', '2026-10-11T00:00:00.000Z', '2026-10-11T02:30:00.000Z'),
+      row('d', '2026-10-11T01:30:00.000Z', null),
+    ];
+
+    expect(sweepOrder(rows).map((r) => r.handle)).toEqual(['d', 'b', 'c', 'a']);
   });
 });

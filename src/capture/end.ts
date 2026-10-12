@@ -28,7 +28,7 @@ import {
   type SessionRecord,
   withoutText,
 } from './session-record';
-import { isCall } from './steps';
+import { isCall, type TranscriptStamp } from './steps';
 import { revealedRoot, revealedRoots } from './transcript-roots';
 
 /** The excerpt mode (spec §14 The setting): `excerpts`, `facts` or `none`. */
@@ -121,6 +121,8 @@ export interface ContextCapture {
   readonly cut: boolean;
   /** The row the reach is noted on after the commit, when there is one. */
   readonly row: boolean;
+  /** The transcript the record was cut from, as it stood before the read: a sweep doesn't read it again until it moves. */
+  readonly stamp?: TranscriptStamp;
 }
 
 /** One bound context as the cut sees it: identity, binding calls and what this machine knows of it. */
@@ -168,7 +170,10 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
     }
   }
   const rank = (t: Target) => (t.calling ? 0 : pending.has(t.key) ? 2 : 1);
-  const ordered = [...targets].sort((a, b) => rank(a) - rank(b));
+  // A sweep names its contexts longest uncut first: within a rank, that order holds.
+  const picked = sweep ? [...sweep.only] : [];
+  const position = (t: Target) => picked.indexOf(t.key);
+  const ordered = [...targets].sort((a, b) => rank(a) - rank(b) || position(a) - position(b));
 
   const captures: ContextCapture[] = [];
   const claimed: string[] = [];
@@ -189,7 +194,8 @@ export async function captureAtEnd(input: EndCaptureInput): Promise<ContextCaptu
     // A cut the deadline overtook keeps the last record it finished: the calling context's earlier cut.
     const captured = record ?? cut.latest ?? budgetRecord(target, cutAt);
     if (cut.callIds) claimed.push(...cut.callIds);
-    captures.push({ key: target.key, record: captured, cut: true, row: target.row });
+    const stamp = captured === cut.latest ? cut.stamp : null;
+    captures.push({ key: target.key, record: captured, cut: true, row: target.row, ...(stamp ? { stamp } : {}) });
   }
   return captures;
 }
@@ -374,6 +380,8 @@ class ContextCut {
   callIds: readonly string[] | null = null;
   /** The record of its last finished cut, for when the deadline overtakes the next one. */
   latest: SessionRecord | null = null;
+  /** The transcript `latest` was cut from, as it stood before the read. */
+  stamp: TranscriptStamp | null = null;
   /** Whether its transcript names it a `grimoire-chores` context, which is never captured. */
   chores = false;
   private readonly rewrite: (text: string) => string;
@@ -414,13 +422,14 @@ class ContextCut {
   }
 
   async once(): Promise<SessionRecord> {
-    const { record, callIds } = await this.cutOnce();
+    const { record, callIds, stamp } = await this.cutOnce();
     this.latest = record;
     this.callIds = callIds;
+    this.stamp = stamp ?? null;
     return record;
   }
 
-  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null }> {
+  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null; stamp?: TranscriptStamp }> {
     const { input, target } = this;
     const family = clientFamily(target.client);
     if (input.mode === 'none') return { record: this.factsOnly('off'), callIds: null };
@@ -428,7 +437,7 @@ class ContextCut {
     try {
       const { cut, roots, source } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
       if (isChoresContext(cut)) this.chores = true;
-      return { record: this.fromCut(cut, source, roots), callIds: cut.callIds };
+      return { record: this.fromCut(cut, source, roots), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}) };
     } catch {
       // A reader that throws is one grimoire can't trust on this transcript.
       const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };

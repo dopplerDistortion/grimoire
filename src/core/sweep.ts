@@ -1,13 +1,16 @@
 // Sweeps in the core (spec §14 Sweeps, Pending session records; §13 Upkeep):
 // capture never waits for a session to end. A sweep cuts the bound contexts of
 // open attempts that went idle (30 min) or whose transcript was archived or
-// compressed, oldest uncut first, within a budget, and attaches the pending
+// compressed, longest uncut first, within a budget, and attaches the pending
 // records in one commit that binds nothing. A record is replaced only by a
 // successful cut reaching strictly further, checked inside the compare-and-set
-// round while the attempt is still open. Each attachment triggers a sync.
+// round while the attempt is still open. A transcript unchanged since a cut
+// that reached as far as the record does isn't read again. Each attachment
+// triggers a sync.
 // Upkeep runs it under the part's lease: one sweep at a time per live store.
 import { captureAtEnd, CUT_BUDGET_MS, type CaptureOptions, type SkillReadEvent } from '../capture/end';
-import { noteCutReach, SEEN_HERE, sessionKey, type SeenHereRow } from '../capture/seen-here';
+import { noteSwept, SEEN_HERE, sessionKey, type SeenHereRow } from '../capture/seen-here';
+import { unchangedSince, type TranscriptStamp } from '../capture/steps';
 import { cutSucceeded, parseSessionRecord, replaces, serializeSessionRecord, withoutText, type SessionRecord } from '../capture/session-record';
 import { registerSweep } from '../capture/sweeps';
 import { compareReach } from '../tracker/fold-records';
@@ -58,6 +61,14 @@ export interface SweepReport {
   commit: string | null;
 }
 
+/** A row a sweep cut: the transcript its cut read, and whether the record already reaches as far. */
+interface Cut {
+  readonly handle: string;
+  readonly key: string;
+  readonly stamp: TranscriptStamp | null;
+  readonly asFar: boolean;
+}
+
 interface Fresh {
   readonly handle: string;
   readonly key: string;
@@ -72,6 +83,17 @@ function rowKey(row: SeenHereRow): string {
     ...(row.session !== null ? { session: row.session } : {}),
     ...(row.context !== null ? { context: row.context } : {}),
   });
+}
+
+/**
+ * The order a sweep cuts in (spec §14: oldest uncut first): rows no sweep cut
+ * yet, by their first binding, then the rest by when a sweep last cut them,
+ * so a context cut again and again goes behind those waiting. A row the
+ * budget overtook keeps its place.
+ */
+export function sweepOrder<T extends Pick<SeenHereRow, 'at' | 'swept'>>(rows: readonly T[]): T[] {
+  const key = (row: T) => (row.swept ? Date.parse(row.swept.at) : Date.parse(row.at) - 1e15);
+  return [...rows].sort((x, y) => key(x) - key(y) || Date.parse(x.at) - Date.parse(y.at));
 }
 
 /** A transcript the client archived or compressed: its session is over, idle or not. */
@@ -113,14 +135,15 @@ export async function sweepContexts(
   }
   if (open.size === 0) return report;
 
-  // Oldest uncut first: never-cut rows, by their first binding, then the rest by their last cut.
-  const age = (row: SeenHereRow) => (row.reach === null ? Date.parse(row.at) - 1e15 : Date.parse(row.reach.at));
-  const groups = [...open.values()].map((group) => ({ ...group, rows: group.rows.sort((x, y) => age(x) - age(y)) }));
-  groups.sort((x, y) => age(x.rows[0]!) - age(y.rows[0]!));
+  const groups = [...open.values()].map((group) => ({ ...group, rows: sweepOrder(group.rows) }));
+  const firsts = sweepOrder(groups.map((group) => group.rows[0]!));
+  groups.sort((x, y) => firsts.indexOf(x.rows[0]!) - firsts.indexOf(y.rows[0]!));
 
   const abort = new AbortController();
   const unregister = registerSweep(() => abort.abort());
   const fresh: Fresh[] = [];
+  /** The rows this sweep cut, by `<handle>/<session key>`: a mark is left on each. */
+  const cuts = new Map<string, Cut>();
   let mode: Awaited<ReturnType<typeof captureMode>>['mode'];
   try {
     const { commonDir, root } = tracker.location;
@@ -135,7 +158,13 @@ export async function sweepContexts(
     const ctx = await context();
     for (const { attempt, rows: picked } of groups) {
       if (abort.signal.aborted) break;
-      const byKey = new Map(picked.map((row) => [rowKey(row), row]));
+      const byKey = new Map<string, SeenHereRow>();
+      for (const row of picked) {
+        // Unchanged since a cut that reached as far as the record: nothing new to read.
+        if (row.swept?.stamp && (await unchangedSince(row.swept.stamp))) report.unchanged++;
+        else byKey.set(rowKey(row), row);
+      }
+      if (byKey.size === 0) continue;
       const captures = await captureAtEnd({
         repoRoot: root,
         worktree: ctx.repo.root,
@@ -152,22 +181,31 @@ export async function sweepContexts(
         deadline,
         sweep: { only: new Set(byKey.keys()), signal: abort.signal, ...(options.afterCut ? { afterCut: options.afterCut } : {}) },
       });
-      for (const { key, record } of captures) {
+      const budgeted = new Set<string>();
+      for (const { key, record, stamp } of captures) {
         const row = byKey.get(key)!;
         report.cut++;
         if (record.excerpt === 'budget' || record.facts === 'budget') {
           report.budget++;
+          budgeted.add(key);
           continue;
         }
+        cuts.set(`${attempt.id}/${key}`, { handle: attempt.id, key, stamp: stamp ?? null, asFar: false });
         // Only a good cut that scanned a window is attached; the seal settles the rest.
         if (!cutSucceeded(record) || record.facts === 'partial') continue;
         if (row.reach !== null && compareReach(record.reach, row.reach) <= 0 && record.reach!.ref === row.reach.ref) {
           report.unchanged++;
+          cuts.set(`${attempt.id}/${key}`, { handle: attempt.id, key, stamp: stamp ?? null, asFar: true });
           continue;
         }
         // Still active in the last 30 min (its last step), unless the client archived it: a later sweep.
         if (!archived(row) && now.getTime() - Date.parse(record.reach!.at) < IDLE_MS) continue;
         fresh.push({ handle: attempt.id, key, record });
+      }
+      // A picked context with no capture (purged, a chores context, no binding of its own): behind the rest next time.
+      for (const key of byKey.keys()) {
+        const at = `${attempt.id}/${key}`;
+        if (!budgeted.has(key) && !cuts.has(at)) cuts.set(at, { handle: attempt.id, key, stamp: null, asFar: false });
       }
     }
   } finally {
@@ -177,7 +215,10 @@ export async function sweepContexts(
     report.cancelled = true;
     return report;
   }
-  if (fresh.length === 0) return report;
+  if (fresh.length === 0) {
+    await noteCuts(store, cuts, [], now);
+    return report;
+  }
 
   const ctx = await context();
   const actor = actorOf(ctx);
@@ -198,8 +239,22 @@ export async function sweepContexts(
   });
   report.attached = write.result.length;
   report.commit = write.commit;
-  for (const { handle, key, record } of write.result) await noteCutReach(store, handle, key, record.reach!).catch(() => false);
+  await noteCuts(store, cuts, write.result, now);
   // Each attachment triggers a sync (spec §14).
   if (write.commit !== null && options.sync !== false) await autoSync(tracker, syncRequestOf(ctx, actor));
   return report;
+}
+
+/**
+ * Leaves the sweep's mark on each row it cut: when, and the transcript the cut
+ * read once the record reaches as far (its reach too, when it was attached).
+ * Best-effort: rows are hints, and a lost mark only costs a read next time.
+ */
+async function noteCuts(store: MachineLocalStore, cuts: ReadonlyMap<string, Cut>, attached: readonly Fresh[], now: Date): Promise<void> {
+  const reached = new Map(attached.map((item) => [`${item.handle}/${item.key}`, item.record.reach!]));
+  for (const [at, { handle, key, stamp, asFar }] of cuts) {
+    const reach = reached.get(at);
+    const swept = { at: now.toISOString(), stamp: asFar || reach ? stamp : null };
+    await noteSwept(store, handle, key, swept, reach).catch(() => false);
+  }
 }
