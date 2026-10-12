@@ -21,6 +21,7 @@ import { skillDiscard, skillRecord, skillStrays } from './stray-edits';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
 import { purgeSession, purgeTrace } from './purge';
+import { proposalAccept, proposalDismiss, proposalList, proposalPurge, proposalReconsider, proposalReject, proposalShow } from './proposals';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
 import { choreSubmit } from './chore-submit';
 import { checkSurface } from './op';
@@ -61,6 +62,19 @@ export type { ShownStrayEdit, SkillStraysResult, SkillRecordResult, SkillDiscard
 export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, ShownSide } from './wiki';
 export type { QuarantineResult } from './quarantine';
 export type { PurgeHistory, PurgeSessionResult, PurgeTraceResult, CitingPage } from './purge';
+export type {
+  AcceptChecks,
+  ListedProposal,
+  ProposalAcceptResult,
+  ProposalDecisionResult,
+  ProposalListResult,
+  ProposalPurgeResult,
+  ProposalRejectResult,
+  ProposalShowResult,
+  ShownLedgerRecord,
+  ShownPage,
+  ShownTrace,
+} from './proposals';
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
 export type { ChoreSubmitResult } from './chore-submit';
 export { choreThresholds, dueChores } from './chores';
@@ -185,6 +199,13 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   unquarantine,
   purgeTrace,
   purgeSession,
+  proposalList,
+  proposalShow,
+  proposalAccept,
+  proposalReject,
+  proposalDismiss,
+  proposalReconsider,
+  proposalPurge,
   choreStart,
   choreRead,
   choreSubmit,

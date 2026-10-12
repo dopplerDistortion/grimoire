@@ -32,6 +32,7 @@ import {
   SETTINGS_FILE,
 } from './layout';
 import { ChoreRunReader, type ChoreRunRecord } from './chore-runs';
+import { PROPOSAL_PATTERN, proposalFile } from './proposals';
 import { bareId } from './ids';
 import type { FileEdit, VirtualObjects } from './objects';
 import { collisionHash, parseIssue } from './record';
@@ -314,6 +315,12 @@ class Fold {
       const outcomes = (name: string) => name.replace(/\.md$/, '');
       for (const [attempt, file] of await this.findAttempts(root, OUTCOMES_DIR, attempts, outcomes)) {
         if (this.newTombstones.has(attempt)) edits.set(file, null);
+      }
+      // A purged skill proposal (`purges/<proposal-id>.md`): its record goes wherever the other side still held it.
+      for (const key of this.newTombstones) {
+        if (!PROPOSAL_PATTERN.test(key)) continue;
+        const file = proposalFile(key);
+        if (await this.objects.entryAt(root, file)) edits.set(file, null);
       }
     }
     return edits.size === 0 ? root : this.objects.editTree(root, edits);

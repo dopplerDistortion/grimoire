@@ -127,6 +127,7 @@ export interface SkillChange {
   readonly to?: string | null;
   readonly proposal?: string;
   readonly reason?: string;
+  readonly note?: string;
   readonly acks?: readonly string[];
   /** The versions the actor was shown (default: the version current when the change was made). */
   readonly saw?: readonly string[];
@@ -173,6 +174,7 @@ export async function writeSkillChange(
     skill: change.skill,
     ...(change.proposal !== undefined ? { proposal: change.proposal } : {}),
     ...(change.reason !== undefined ? { reason: change.reason } : {}),
+    ...(change.note !== undefined ? { note: change.note } : {}),
     ...(change.acks !== undefined ? { acks: change.acks } : {}),
     from,
     to,

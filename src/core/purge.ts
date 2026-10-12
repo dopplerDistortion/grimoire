@@ -12,6 +12,7 @@ import { parseSessionRecord, serializeSessionRecord } from '../capture/session-r
 import { type PurgedFacts, type PurgeTombstone, type TrackerView, type UnpushedDrop } from '../tracker';
 import { parseHandle } from './attempts';
 import { define, oneLine, writer } from './op';
+import { citingProposals } from './proposals';
 import { s } from './schema';
 
 /** What a purge did to history: the unpushed segment rewritten, pushed history kept. */
@@ -118,8 +119,7 @@ export const purgeTrace = define({
     });
     const history = historyOf(write.history);
     const view = await tracker.read();
-    // Skill proposals come with the gate-decisions slice: none cite a trace before it.
-    return { ...write.result, cited_by: { pages: await citingPages(view, handle), proposals: [] }, history };
+    return { ...write.result, cited_by: { pages: await citingPages(view, handle), proposals: await citingProposals(view, handle) }, history };
   },
 });
 

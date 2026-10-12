@@ -16,8 +16,10 @@ import { formatLine, lineValue, parseLines } from '../tracker/lines';
  * Record kinds this release derives from (spec §18): decisions on a proposal
  * (`accept` with per-flag acknowledgements, `reject`, `dismiss`,
  * `reconsider`), skill changes (`edit` by a human, `record` of a stray edit,
- * `restore`, `delete`, `eject`, `acknowledge`) and `unblock`, the lift of a
- * name block. A kind this release doesn't know plays no part in a derivation.
+ * `restore`, `delete`, `eject`, `acknowledge`), `unblock`, the lift of a
+ * name block, and `lapse`: an accept whose accept-time checks failed, so the
+ * proposal lapsed (its reason codes in `reason`, comma-separated). A kind this
+ * release doesn't know plays no part in a derivation.
  */
 export type LedgerKind =
   | 'accept'
@@ -30,7 +32,8 @@ export type LedgerKind =
   | 'delete'
   | 'eject'
   | 'acknowledge'
-  | 'unblock';
+  | 'unblock'
+  | 'lapse';
 
 export interface LedgerRecord {
   readonly kind: string;
@@ -40,6 +43,8 @@ export interface LedgerRecord {
   readonly proposal?: string;
   /** A reject's reason code (`suspicious`, `incorrect`, …). */
   readonly reason?: string;
+  /** A reject's own words, with the reason `other` (secret-scanned before it is written). */
+  readonly note?: string;
   /** An accept's acknowledged red flags. */
   readonly acks?: readonly string[];
   /** The version current before the change, as the actor saw it (null: none). */
@@ -78,6 +83,7 @@ const KNOWN_KEYS = [
   'skill',
   'proposal',
   'reason',
+  'note',
   'acks',
   'from',
   'to',
@@ -99,6 +105,7 @@ export function serializeLedgerRecord(record: LedgerRecord): Buffer {
     skill: record.skill,
     proposal: record.proposal,
     reason: record.reason,
+    note: record.note,
     acks: record.acks === undefined ? undefined : sortedUnique(record.acks),
     from: record.from,
     to: record.to,
@@ -147,6 +154,7 @@ export function parseLedgerRecord(id: string, bytes: Buffer): LedgerEntry | null
     skill,
     ...(values.has('proposal') ? { proposal: text(values.get('proposal')) } : {}),
     ...(values.has('reason') ? { reason: text(values.get('reason')) } : {}),
+    ...(values.has('note') ? { note: text(values.get('note')) } : {}),
     ...(values.has('acks') ? { acks: texts(values.get('acks')) } : {}),
     from: version(values.get('from')),
     to: version(values.get('to')),

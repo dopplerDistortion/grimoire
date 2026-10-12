@@ -1,7 +1,7 @@
 // Purge tombstones (spec §3 Delete and purge, §14 Purging one session record):
-// `purges/<attempt-id>.md` for a purged trace, and
+// `purges/<attempt-id>.md` for a purged trace,
 // `purges/<attempt-id>/<session-key>.md` for one purged session record of an
-// open attempt. The frontmatter says who purged it, when and why; a session
+// open attempt, and `purges/<proposal-id>.md` for a purged skill proposal. The frontmatter says who purged it, when and why; a session
 // record's also says whether its facts went with the excerpt. When the facts
 // were kept, the tombstone's body holds them: the record as it stood, without
 // its excerpt text (excerpt status `purged`). The record itself is gone from
@@ -60,10 +60,11 @@ export function parsePurge(bytes: Buffer): PurgeTombstone {
   };
 }
 
-/** Every purge tombstone a tree holds: traces by attempt handle, session records by handle, then session key. */
+/** Every purge tombstone a tree holds: traces by attempt handle, session records by handle, then session key, proposals by id. */
 export interface PurgeIndex {
   readonly traces: ReadonlyMap<string, PurgeTombstone>;
   readonly sessions: ReadonlyMap<string, ReadonlyMap<string, PurgeTombstone>>;
+  readonly proposals: ReadonlyMap<string, PurgeTombstone>;
 }
 
-export const NO_PURGES: PurgeIndex = { traces: new Map(), sessions: new Map() };
+export const NO_PURGES: PurgeIndex = { traces: new Map(), sessions: new Map(), proposals: new Map() };

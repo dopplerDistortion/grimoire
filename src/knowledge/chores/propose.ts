@@ -74,6 +74,14 @@ export interface ProposeContext {
   readonly servableTrace: (trace: string) => Promise<boolean>;
   /** Whether a page may still be served (not quarantined). */
   readonly servablePage: (slug: string) => boolean;
+  /**
+   * The checks at accept (spec §18 Mechanical checks): the proposal as it was
+   * drafted. Duplicates of other pending proposals are tolerated then (after a
+   * merge, accepting one stales the rest), and the claims are judged against
+   * the traces as they stood at drafting; the evidence minimum is the
+   * caller's live red flag, never a lapse.
+   */
+  readonly drafted?: { readonly traces: readonly CitedTrace[] };
 }
 
 /** An accepted proposal, ready to write. */
@@ -466,11 +474,11 @@ export async function checkProposal(result: unknown, cx: ProposeContext): Promis
     if (!traces.has(failure.trace) && !citations.some((item) => traceOfItem(item) === failure.trace)) p.add('bad_claims', `claims.failures[${i}].trace`, 'is not a cited trace');
   }
   const lined = new Set(claims.failures.map((f) => f.trace));
-  const unlined = fails.filter((t) => !lined.has(t.trace));
+  const unlined = (cx.drafted ? cx.drafted.traces.filter((t) => t.outcome === 'fail') : fails).filter((t) => !lined.has(t.trace));
   if (unlined.length > 0) p.add('bad_claims', 'claims.failures', `give one line for each cited failing trace; missing: ${unlined.map((t) => t.trace).join(', ')}`);
 
   // Repeats.
-  for (const pending of proposalStates(await view.proposals.records(), book.skills)) {
+  for (const pending of cx.drafted ? [] : proposalStates(await view.proposals.records(), book.skills)) {
     if (pending.status === 'pending' && pending.record.skill === name && pending.record.version === version) {
       p.add('duplicate_pending', 'text', `is the text of the pending proposal ${pending.record.id}`);
     }
