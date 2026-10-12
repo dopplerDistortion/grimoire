@@ -13,7 +13,6 @@
 import { GrimoireError, invalid } from '../errors';
 import {
   decisionHistory,
-  EVIDENCE_FLAG,
   liveEvidence,
   redFlags,
   type DecisionHistory,
@@ -22,7 +21,7 @@ import {
   type LiveTrace,
   type RedFlag,
 } from '../knowledge/gate';
-import { parseSkillText, proposalStates, readSkills, writeSkillChange, type LedgerEntry, type ProposalState, type ProposalStatus, type SkillBook } from '../knowledge';
+import { parseSkillText, proposalStates, readSkills, targetedPatterns, writeSkillChange, type LedgerEntry, type ProposalState, type ProposalStatus, type SkillBook } from '../knowledge';
 import { activeQuarantine, checkProposal, Serving, type ActiveQuarantine, type OpenRun } from '../knowledge/chores';
 import { itemHash, type ServedLog } from '../knowledge/chores/runs';
 import { shownDiff } from '../knowledge/line-diff';
@@ -37,7 +36,6 @@ import { handwrittenTexts, stubCollides } from './proposal-sources';
 import { s } from './schema';
 import { storeSetting } from './settings';
 import { patternOf, scanned, traceFacts } from './skills';
-import { targetedPatterns } from '../knowledge';
 
 /** Every decision in v1 is a person's (spec §18). */
 const BASIS = 'human review';
@@ -713,4 +711,3 @@ export async function citingProposals(view: TrackerView, handle: string): Promis
   return (await view.proposals.records()).filter(citing).map((proposal) => proposal.id);
 }
 
-export { EVIDENCE_FLAG };
