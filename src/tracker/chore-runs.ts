@@ -89,6 +89,8 @@ export interface ChoreRunRecord {
   readonly reasons: readonly string[];
   /** Failed compiles: the pair ids it was served (`<trace>@<outcome>`), which the 2-strike rule counts. */
   readonly pairs: readonly string[];
+  /** Compiled: the set-aside sides of conflicted pages its reconciling writes resolved, as `<slug>/<side id>`. */
+  readonly resolved: readonly string[];
   /** Keys this release doesn't know, as their raw value text. */
   readonly extra: Readonly<Record<string, string>>;
 }
@@ -111,6 +113,7 @@ const KEYS = [
   'proposal',
   'reasons',
   'pairs',
+  'resolved',
 ] as const;
 const KNOWN: ReadonlySet<string> = new Set(KEYS);
 
@@ -141,6 +144,7 @@ export function serializeChoreRun(record: NewChoreRun | ChoreRunRecord): Buffer 
     proposal: record.proposal,
     reasons: [...record.reasons],
     pairs: sortedUnique(record.pairs),
+    resolved: sortedUnique(record.resolved),
   };
   const lines = KEYS.map((key) => formatLine(key, values[key]));
   const extra = 'extra' in record ? record.extra : {};
@@ -188,6 +192,7 @@ export function parseChoreRun(id: string, bytes: Buffer): ChoreRunRecord {
     proposal: strOrNull(values.get('proposal')),
     reasons: strings(values.get('reasons')),
     pairs: sortedUnique(strings(values.get('pairs'))),
+    resolved: sortedUnique(strings(values.get('resolved'))),
     extra,
   };
 }
@@ -241,8 +246,8 @@ export class ChoreRunReader implements ChoreRunView {
 
 /** Chore runs as a write round changes them. */
 export interface ChoreRunDraft extends ChoreRunView {
-  /** Adds the record of a run that ended. One id is written once. */
-  add(record: NewChoreRun): ChoreRunRecord;
+  /** Adds the record of a run that ended. One id is written once: a second record of it is refused. */
+  add(record: NewChoreRun): Promise<ChoreRunRecord>;
 }
 
 export class ChoreRunDraftState implements ChoreRunDraft {
@@ -254,8 +259,12 @@ export class ChoreRunDraftState implements ChoreRunDraft {
     return [...(await this.base.records()), ...[...this.added.values()].map((a) => a.record)].sort(byAt);
   }
 
-  add(record: NewChoreRun): ChoreRunRecord {
+  async add(record: NewChoreRun): Promise<ChoreRunRecord> {
     if (!RUN_PATTERN.test(record.id)) throw new Error(`a chore run id is cr- and 10 Crockford characters, not ${JSON.stringify(record.id)}`);
+    // Append-only: a record, once written, is never replaced.
+    if (this.added.has(record.id) || (await this.base.records()).some((base) => base.id === record.id)) {
+      throw new Error(`the chore run ${record.id} already has its record`);
+    }
     const bytes = serializeChoreRun(record);
     const added = parseChoreRun(record.id, bytes);
     this.added.set(record.id, { bytes, record: added });

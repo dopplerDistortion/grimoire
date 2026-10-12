@@ -324,6 +324,7 @@ describe('gating', () => {
         'close',
         'chore_start',
         'chore_read',
+        'chore_submit',
         'chore_abandon',
       ]);
       expect(humanOnly.structuredContent).toMatchObject({ error: { code: 'HUMAN_ONLY', retryable: false } });

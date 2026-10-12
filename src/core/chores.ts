@@ -69,7 +69,7 @@ export function choreThresholds(view: Pick<TrackerView, 'settings'>): ChoreThres
   };
 }
 
-const storeOf = (tracker: TrackerStore, ctx: CallContext) => new MachineLocalStore(tracker.location.commonDir, ctx.repo.root);
+export const storeOf = (tracker: TrackerStore, ctx: CallContext) => new MachineLocalStore(tracker.location.commonDir, ctx.repo.root);
 
 /** The chore kinds with a live run on this machine. */
 async function kindsInProgress(store: MachineLocalStore, now: Date): Promise<Set<ChoreKind>> {
@@ -112,7 +112,7 @@ export async function exposedActor(store: MachineLocalStore, ctx: CallContext, a
   return { ...rest, chore_exposure: basis };
 }
 
-const KIND_NAMES: Readonly<Record<ChoreKind, string>> = { 'wiki-maintainer': 'Wiki Maintainer', 'skill-proposer': 'Skill Proposer' };
+export const KIND_NAMES: Readonly<Record<ChoreKind, string>> = { 'wiki-maintainer': 'Wiki Maintainer', 'skill-proposer': 'Skill Proposer' };
 
 function notDue(why: string, kinds?: Record<string, string>): GrimoireError {
   return new GrimoireError('NOT_DUE', `no chore to run: ${why}`, { why, ...(kinds ? { kinds } : {}) });
@@ -301,8 +301,22 @@ async function withStartLock<T>(store: MachineLocalStore, fn: () => Promise<T>):
   }
 }
 
+/**
+ * Runs `fn` holding the run's lock: its pages, submits and abandon never
+ * interleave, so a submit's check that the run is open holds until its commit
+ * and its end are recorded. BUSY when another call of the run holds it past the wait.
+ */
+export async function withRunLock<T>(store: MachineLocalStore, run: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await store.locks.withLock(`chore-run/${run.trim()}`, fn);
+  } catch (error) {
+    if (error instanceof LockHeldError) throw new GrimoireError('BUSY', `another call of the chore run ${run.trim()} is in progress; try again`, {});
+    throw error;
+  }
+}
+
 /** The run `id` on this machine, held by the calling context; RUN_SUPERSEDED for an expired one a newer run replaced. */
-async function heldRun(store: MachineLocalStore, ctx: CallContext, id: string, now: Date): Promise<OpenRun> {
+export async function heldRun(store: MachineLocalStore, ctx: CallContext, id: string, now: Date): Promise<OpenRun> {
   const run = await readRun(store, id.trim());
   if (!run) throw new GrimoireError('NOT_FOUND', `there is no chore run ${id} on this machine`, { run: id });
   if (choreContextKey(ctx) !== run.context) {
@@ -344,22 +358,24 @@ export const choreRead = define({
   }),
   async run(input, { ctx, tracker, scanner }): Promise<ChoreReadResult> {
     const store = storeOf(tracker, ctx);
-    const now = tracker.now();
-    const run = await heldRun(store, ctx, input.run, now);
-    if (run.state !== 'open') throw ended(run.id, run.state);
-    const view = await tracker.read();
-    const serving = await servingOf(view, run, ctx, scanner, now);
-    const item = input.item?.trim() ?? null;
-    if (item !== null && (await serving.item(item)) === null) {
-      throw new GrimoireError('NOT_FOUND', `${item} isn't an item this chore run is served`, { item });
-    }
-    const ids = item === null ? run.manifest : await serving.itemIds(item);
-    const page = await pageOf(serving, ids, pageStart(input.cursor, item), pageEnvelope(run.id));
-    await logServed(store, run.id, page.served, now);
-    // Renews the lease, unless the run ended meanwhile: a terminal state is never reopened.
-    const renewed = await updateRun(store, run.id, (open) => ({ ...open, last_call_at: now.toISOString() }));
-    if (renewed?.state !== 'open') throw ended(run.id, renewed?.state ?? 'abandoned');
-    return { run: run.id, items: page.items, ...(page.next !== null ? { truncated: true as const, cursor: page.next } : {}) };
+    return withRunLock(store, input.run, async () => {
+      const now = tracker.now();
+      const run = await heldRun(store, ctx, input.run, now);
+      if (run.state !== 'open') throw ended(run.id, run.state);
+      const view = await tracker.read();
+      const serving = await servingOf(view, run, ctx, scanner, now);
+      const item = input.item?.trim() ?? null;
+      if (item !== null && (await serving.item(item)) === null) {
+        throw new GrimoireError('NOT_FOUND', `${item} isn't an item this chore run is served`, { item });
+      }
+      const ids = item === null ? run.manifest : await serving.itemIds(item);
+      const page = await pageOf(serving, ids, pageStart(input.cursor, item), pageEnvelope(run.id));
+      await logServed(store, run.id, page.served, now);
+      // Renews the lease, unless the run ended meanwhile: a terminal state is never reopened.
+      const renewed = await updateRun(store, run.id, (open) => ({ ...open, last_call_at: now.toISOString() }));
+      if (renewed?.state !== 'open') throw ended(run.id, renewed?.state ?? 'abandoned');
+      return { run: run.id, items: page.items, ...(page.next !== null ? { truncated: true as const, cursor: page.next } : {}) };
+    });
   },
 });
 
@@ -385,17 +401,19 @@ export const choreAbandon = define({
   }),
   async run(input, { ctx, tracker }): Promise<ChoreAbandonResult> {
     const store = storeOf(tracker, ctx);
-    const now = tracker.now();
-    const run = await heldRun(store, ctx, input.run, now);
-    const summary = `grimoire chores: ${KIND_NAMES[run.kind]} run ${run.id} abandoned; nothing consumed`;
-    const at = now.toISOString();
-    let changed = false;
-    const after = await updateRun(store, run.id, (open) => {
-      changed = true;
-      return { ...open, state: 'abandoned', ended_at: at, last_call_at: at, reason: input.reason.trim().slice(0, 2_000) };
+    return withRunLock(store, input.run, async () => {
+      const now = tracker.now();
+      const run = await heldRun(store, ctx, input.run, now);
+      const summary = `grimoire chores: ${KIND_NAMES[run.kind]} run ${run.id} abandoned; nothing consumed`;
+      const at = now.toISOString();
+      let changed = false;
+      const after = await updateRun(store, run.id, (open) => {
+        changed = true;
+        return { ...open, state: 'abandoned', ended_at: at, last_call_at: at, reason: input.reason.trim().slice(0, 2_000) };
+      });
+      const state = after?.state ?? run.state;
+      if (state !== 'abandoned') throw ended(run.id, state);
+      return { run: run.id, kind: run.kind, abandoned: true, ...(changed ? {} : { replayed: true as const }), summary };
     });
-    const state = after?.state ?? run.state;
-    if (state !== 'abandoned') throw ended(run.id, state);
-    return { run: run.id, kind: run.kind, abandoned: true, ...(changed ? {} : { replayed: true as const }), summary };
   },
 });
