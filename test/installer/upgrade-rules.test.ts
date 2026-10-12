@@ -90,4 +90,80 @@ describe('init --upgrade', () => {
     // Done: the upgrade-in-progress record is gone.
     expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
   });
+
+  gitTest('interrupted after step 2, it is finished by the same command; meanwhile an old-pin init and doctor --fix skip the worktree with the message', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const crash = new Error('the process died after step 2');
+
+    const interrupted = initAt(world.a.dir, NEW, { flags: { upgrade: true }, extra: { onUpgradeStep: (step) => { if (step === 2) throw crash; } } });
+    await expect(interrupted).rejects.toBe(crash);
+
+    // The machine side is done, the checkout still pins OLD, and the record says an upgrade is under way.
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    expect(await changedPaths(world.a)).toEqual([]);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([{ key: expect.any(String), value: expect.objectContaining({ from: OLD, to: NEW }) }]);
+    const finish = `finish with \`npx @goksening/grimoire@${NEW} init --upgrade\`, or discard with \`git restore\``;
+    const oldInit = initAt(world.a.dir, OLD);
+    await expect(oldInit).rejects.toMatchObject({ code: 'INVALID', message: expect.stringContaining(finish) });
+    const oldDoctor = await runDoctor({ root: world.a.dir, version: OLD, fix: true, env: { ...process.env, CODEX_HOME: path.join(world.root, 'codex-home') } });
+    expect(oldDoctor.fix?.notices).toContainEqual(expect.stringContaining(finish));
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+
+    const { report } = await initAt(world.a.dir, NEW, { flags: { upgrade: true } });
+
+    expect(report.upgrade).toMatchObject({ from: OLD, to: NEW, resumed: true });
+    expect(await pinOf(world.a.dir)).toBe(NEW);
+    expect(report.upgrade!.commit.paths).toEqual(['.grimoire/config.yml']);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+    // Once it is done, the old pin's init is back to naming the pin.
+    await expect(initAt(world.a.dir, OLD)).rejects.toMatchObject({ code: 'INVALID', details: { pin: NEW, running: OLD } });
+  });
+
+  gitTest('--yes never raises compat: a release that needs the store at a newer compat refuses before anything is written', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    // A later release whose oldest runnable store format is 2: running it needs a migration that raises compat.
+    const later = { store: { J: 2, K: 2 }, machine: { J: 1, K: 1 }, install: { J: 1, K: 1 } };
+
+    const refused = initAt(world.a.dir, NEW, { flags: { upgrade: true }, extra: { formats: later } });
+
+    await expect(refused).rejects.toMatchObject({
+      code: 'INVALID',
+      message: expect.stringContaining('--yes never raises compat'),
+      details: { markers: [expect.objectContaining({ marker: 'store', compat: 1, verdict: 'compat-raise' })] },
+    });
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    expect(await changedPaths(world.a)).toEqual([]);
+    expect((await listCopies(store)).map((copy) => copy.version)).toEqual([OLD]);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+  });
+
+  gitTest('a downgrade runs the same command and keeps the newer launcher; one to a release that can’t run against the markers refuses', async ({ world }) => {
+    await installOld(world.a);
+    await initAt(world.a.dir, NEW, { flags: { upgrade: true } });
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    // A launcher newer than this release's: it never moves back.
+    const launcher = path.join(store.dir, 'launcher.cjs');
+    const { createHash } = await import('node:crypto');
+    const { writeFile } = await import('node:fs/promises');
+    const current = await readFile(launcher, 'utf8');
+    const body = current.slice(current.indexOf('\n') + 1).replace(/^const LAUNCHER_VERSION = (\d+);$/m, (_, n: string) => `const LAUNCHER_VERSION = ${Number(n) + 1};`);
+    const newer = `// grimoire-launcher ${Number(/^const LAUNCHER_VERSION = (\d+);$/m.exec(body)![1])} ${createHash('sha256').update(body, 'utf8').digest('hex')}\n${body}`;
+    await writeFile(launcher, newer);
+    // An older release that only understood a store format below the one this store is at.
+    const older = { store: { J: 0, K: 0 }, machine: { J: 1, K: 1 }, install: { J: 1, K: 1 } };
+
+    const refused = initAt(world.a.dir, OLD, { flags: { upgrade: true }, extra: { formats: older } });
+    await expect(refused).rejects.toMatchObject({ code: 'UPGRADE_REQUIRED', details: { marker: 'store', why: 'newer', running: OLD, pin: NEW } });
+    expect(await pinOf(world.a.dir)).toBe(NEW);
+
+    const { report } = await initAt(world.a.dir, OLD, { flags: { upgrade: true } });
+
+    expect(report.upgrade).toMatchObject({ from: NEW, to: OLD, direction: 'downgrade' });
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    expect(report.machine?.launcher).toBe('kept');
+    expect(await readFile(launcher, 'utf8')).toBe(newer);
+    expect(existsSync(path.join(store.dir, 'pkg', OLD, '.complete'))).toBe(true);
+  });
 });
