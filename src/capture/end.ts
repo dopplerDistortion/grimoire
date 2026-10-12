@@ -586,23 +586,27 @@ class ContextCut {
   }
 
   /**
-   * This context's `skill_read` events while the attempt was open, and those
-   * of the subagents its window launched: each credited to the context that
-   * made it.
+   * This context's `skill_read` events from `since` (epoch ms) to the ending
+   * call, and those of the subagents its window launched: each credited to
+   * the context that made it.
    */
-  private eventReads(launched: ReadonlySet<string>, own: { session: string | null; context: string | null }): SkillRead[] {
+  private eventReads(since: number, launched: ReadonlySet<string>, own: { session: string | null; context: string | null }): SkillRead[] {
     const { input, target } = this;
-    const opened = Date.parse(input.attempt?.start.at ?? input.call.at);
     const ended = Date.parse(input.call.at);
     return input.skillReads.flatMap((event) => {
       const at = Date.parse(event.at);
-      if (!(at >= opened && at <= ended)) return [];
+      if (!(at >= since && at <= ended)) return [];
       const actor = event.actor as Actor;
       if (sessionKey(actor) === target.key) return eventSkillReads([event], own);
       const context = contextOf(actor);
       const fromSubagent = own.session !== null && actor.session === own.session && context !== null && launched.has(context);
       return fromSubagent ? eventSkillReads([event], { session: own.session, context }) : [];
     });
+  }
+
+  /** Where this context's `skill_read` events start counting when no window was found. */
+  private eventsSince(): number {
+    return eventFloor(this.input, this.target.key);
   }
 
   private fromCut(cut: Cut, source: EvidenceSource | null, roots: readonly string[], scanned: SkillFacts | null = null): SessionRecord {
@@ -616,7 +620,9 @@ class ContextCut {
     // budget overtook, or one that couldn't read a subagent launched in the window, is partial.
     const facts: FactsStatus = failed ? (cut.status as FactsStatus) : windowFound && scanned?.complete === true ? 'scanned' : 'partial';
     const own = { session: cut.session === '' ? null : cut.session, context: cut.context === '' ? null : cut.context };
-    const reads = [...(scanned?.reads ?? []), ...this.eventReads(scanned?.launched ?? new Set(), own)];
+    // Events count over the span the transcript scan covers: the window, from the prompt opening its first turn.
+    const since = windowFound ? Date.parse(cut.window!.start.at) : this.eventsSince();
+    const reads = [...(scanned?.reads ?? []), ...this.eventReads(since, scanned?.launched ?? new Set(), own)];
     const text = excerpt === 'cut' && windowFound ? cut.excerpt : null;
     return {
       client: cut.client.name,
@@ -650,11 +656,11 @@ class ContextCut {
    */
   private factsOnly(excerpt: 'off' | 'no_transcript'): SessionRecord {
     const { input, target } = this;
-    const opened = Date.parse(input.attempt?.start.at ?? input.call.at);
+    const since = this.eventsSince();
     const ended = Date.parse(input.call.at);
     const events = input.skillReads.filter((event) => {
       const at = Date.parse(event.at);
-      return at >= opened && at <= ended && sessionKey(event.actor as Actor) === target.key;
+      return at >= since && at <= ended && sessionKey(event.actor as Actor) === target.key;
     });
     const latest = events.reduce<string | null>((last, event) => (last === null || Date.parse(event.at) > Date.parse(last) ? event.at : last), null);
     return {
@@ -662,10 +668,33 @@ class ContextCut {
       excerpt,
       excerpt_notes: excerpt === 'off' && input.capped ? ['capped'] : [],
       facts: 'events_only',
-      skills_read: byTime(this.eventReads(new Set(), { session: target.session, context: target.context })),
+      skills_read: byTime(this.eventReads(since, new Set(), { session: target.session, context: target.context })),
       reach: latest === null ? null : { at: latest, ref: String(events.length) },
     };
   }
+}
+
+/**
+ * Where a context's `skill_read` events start counting when no window says
+ * which turn its work began in (epoch ms): when the attempt opened, for a
+ * context bound later. The context that opened it may have read a skill in
+ * the turn before its claim, and an unclaimed close's attempt opens only at
+ * the close: theirs count from the context's previous ending, the issue's
+ * previous attempt's end, or the issue's creation, whichever came last.
+ */
+function eventFloor(input: EndCaptureInput, key: string): number {
+  const { attempt, view } = input;
+  const ended = Date.parse(input.call.at);
+  if (attempt !== null && sessionKey(attempt.start.actor as Actor) !== key) return Date.parse(attempt.start.at);
+  let floor = Date.parse(view.issue(input.issue)?.created_at ?? '');
+  if (!Number.isFinite(floor)) floor = -Infinity;
+  for (const other of view.allAttempts()) {
+    if (other.end === null || other.id === attempt?.id) continue;
+    if (other.issue !== input.issue && !other.sessions.has(key)) continue;
+    const at = Date.parse(other.end.at);
+    if (at > floor && at <= ended) floor = at;
+  }
+  return attempt === null ? floor : Math.min(floor, Date.parse(attempt.start.at));
 }
 
 function emptyRecord(target: Target, cutAt: string): SessionRecord {
