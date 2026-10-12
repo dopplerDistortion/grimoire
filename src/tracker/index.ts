@@ -54,3 +54,16 @@ export {
 } from './wiki';
 export type { NewQuarantineRecord, QuarantineDraft, QuarantineRecord, QuarantineView } from './quarantine';
 export { isKnownOp, opEffect, type OpEffect } from './ops';
+export {
+  CHORE_KINDS,
+  randomRunId,
+  RUN_PATTERN,
+  type ChoreKind,
+  type ChoreResult,
+  type ChoreRunDraft,
+  type ChoreRunRecord,
+  type ChoreRunView,
+  type ConsumedPair,
+  type NewChoreRun,
+  type ServedRef,
+} from './chore-runs';

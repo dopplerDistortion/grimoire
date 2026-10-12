@@ -141,6 +141,7 @@ describe('wiki edit, updating', () => {
         updated_at: T0.toISOString(),
         conflicted: false,
         quarantined: false,
+        flagged_by: [],
         body: 'Bind to port 0 and read the port back.\nNever hard-code 8080 in tests.\n',
         base: updated.base,
         sides: [],

@@ -37,6 +37,8 @@ export interface McpDeps {
    * `spawn_env`; it goes stale after a `/clear`, so it is never trusted alone.
    */
   readonly spawnEnvId?: string;
+  /** `GRIMOIRE_CHORE_ORIGIN` from the spawn env: `scheduled` restricts chore runs to the Wiki Maintainer (spec §16). */
+  readonly choreOrigin?: string;
   /** Told about every tools/call as it starts, so the process can let running calls finish before it exits. */
   readonly track?: (call: Promise<unknown>) => void;
   /** Told the connecting client once a request names it (tools/list or tools/call): the process record notes it. */
@@ -50,9 +52,10 @@ export interface McpDeps {
 }
 
 /** Connection facts the server keeps from its spawn env: ids only (spec §8, §14). */
-export function spawnEnvFacts(env: NodeJS.ProcessEnv): Pick<McpDeps, 'spawnEnvId'> {
+export function spawnEnvFacts(env: NodeJS.ProcessEnv): Pick<McpDeps, 'spawnEnvId' | 'choreOrigin'> {
   const id = env.CLAUDE_CODE_SESSION_ID?.trim();
-  return id ? { spawnEnvId: id } : {};
+  const origin = env.GRIMOIRE_CHORE_ORIGIN?.trim();
+  return { ...(id ? { spawnEnvId: id } : {}), ...(origin ? { choreOrigin: origin } : {}) };
 }
 
 export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
@@ -129,6 +132,7 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
         client,
         evidence: deps.spawnEnvId ? { spawnEnvId: deps.spawnEnvId } : {},
         mcp: { era, hint, meta: metaIds(extra.mcpReq._meta) },
+        ...(deps.choreOrigin ? { choreOrigin: deps.choreOrigin } : {}),
         nonce: deps.nonce,
       };
       notices.push(...noticesFor(root, deps.startDir, config?.pin ?? null));

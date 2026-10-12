@@ -27,6 +27,7 @@ export async function cliContext({ cwd, env, tty }: CliProcess): Promise<CallCon
     client: clientIn(env),
     evidence: evidenceIn(env),
     tty,
+    ...(env.GRIMOIRE_CHORE_ORIGIN?.trim() ? { choreOrigin: env.GRIMOIRE_CHORE_ORIGIN.trim() } : {}),
     nonce: randomBytes(8).toString('hex'),
   };
 }

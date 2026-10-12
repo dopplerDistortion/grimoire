@@ -14,6 +14,7 @@ import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
 import type { SyncResult, SyncStatusResult } from './sync';
+import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -30,6 +31,7 @@ export const create = define({
   kind: 'write',
   policy: 'agent',
   replay: 'idempotency-key',
+  issueWrite: true,
   input: s.object({
     title: s.string(oneLine),
     body: s.optional(s.string()),
@@ -132,6 +134,9 @@ export interface OpResults {
   wiki_edit: WikiEditResult;
   quarantine: QuarantineResult;
   unquarantine: QuarantineResult;
+  chore_start: ChoreBrief;
+  chore_read: ChoreReadResult;
+  chore_abandon: ChoreAbandonResult;
   sync: SyncResult;
   sync_status: SyncStatusResult;
 }

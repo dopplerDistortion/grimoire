@@ -14,6 +14,7 @@ import {
   type WikiPage,
   type WikiPageEntry,
 } from '../tracker';
+import { activeQuarantine, flaggedPages } from '../knowledge/chores/quarantine';
 import { recordedActor } from './attempts';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
@@ -84,23 +85,9 @@ export function checkPageWrite(
   if (Object.keys(problems).length > 0) throw invalid(problems);
 }
 
-/** The marks still in force: those no clear lifts. */
-function activeMarks(records: readonly QuarantineRecord[]): QuarantineRecord[] {
-  const cleared = new Set(records.flatMap((record) => (record.kind === 'quarantine-clear' ? record.clears : [])));
-  return records.filter((record) => record.kind === 'quarantine-mark' && !cleared.has(record.id));
-}
-
 /** The quarantined pages, each with the marks that keep it so, oldest first. */
-export async function quarantinedPages(view: { quarantine: QuarantineView }): Promise<Map<string, QuarantineRecord[]>> {
-  const pages = new Map<string, QuarantineRecord[]>();
-  for (const mark of activeMarks(await view.quarantine.records())) {
-    const slug = mark.target.page;
-    if (slug === undefined) continue;
-    let marks = pages.get(slug);
-    if (!marks) pages.set(slug, (marks = []));
-    marks.push(mark);
-  }
-  return pages;
+export async function quarantinedPages(view: { quarantine: QuarantineView }): Promise<ReadonlyMap<string, readonly QuarantineRecord[]>> {
+  return (await activeQuarantine(view)).pages;
 }
 
 function baseMoved(slug: string, current: WikiPageEntry | undefined, why: string): GrimoireError {
@@ -217,6 +204,8 @@ export interface WikiListRow {
   conflicted: boolean;
   /** Kept out of chores and evidence by a human. */
   quarantined: boolean;
+  /** Quarantined traces a compile that wrote this page consumed: shown, never filtered (spec §17). */
+  flagged_by: string[];
 }
 
 export interface WikiListResult {
@@ -233,6 +222,7 @@ export const wikiList = define({
   async run(_input, { tracker }): Promise<WikiListResult> {
     const view = await tracker.read();
     const quarantined = await quarantinedPages(view);
+    const flagged = await flaggedPages(view);
     const pages = await view.wiki.pages();
     const rows = await Promise.all(
       pages.map(async (page) => ({
@@ -246,6 +236,7 @@ export const wikiList = define({
         updated_at: page.updated_at,
         conflicted: (await view.wiki.conflicts(page.slug)).length > 0,
         quarantined: quarantined.has(page.slug),
+        flagged_by: flagged.get(page.slug) ?? [],
       })),
     );
     return { pages: rows };
@@ -301,6 +292,7 @@ export const wikiShow = define({
       updated_at: page.updated_at,
       conflicted: sides.length > 0,
       quarantined: (await quarantinedPages(view)).has(slug),
+      flagged_by: (await flaggedPages(view)).get(slug) ?? [],
       body: page.body,
       base: page.version,
       sides: sides.map((side) => ({

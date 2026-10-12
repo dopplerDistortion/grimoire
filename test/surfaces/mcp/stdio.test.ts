@@ -18,7 +18,22 @@ beforeAll(async () => {
 });
 afterAll(() => cleanup());
 
-const AGENT_TOOLS = ['show', 'list', 'labels', 'skill_list', 'skill_read', 'create', 'update', 'comment', 'claim', 'release', 'close'];
+const AGENT_TOOLS = [
+  'show',
+  'list',
+  'labels',
+  'skill_list',
+  'skill_read',
+  'create',
+  'update',
+  'comment',
+  'claim',
+  'release',
+  'close',
+  'chore_start',
+  'chore_read',
+  'chore_abandon',
+];
 
 describe('grimoire mcp over stdio', () => {
   gitTest('a 2025-06-18 client and a 2026-07-28 client list the same tools', async ({ world }) => {
@@ -75,7 +90,7 @@ describe('grimoire mcp over stdio', () => {
     for (const name of ['show', 'list', 'labels', 'skill_list', 'skill_read']) {
       expect(byName[name]!.annotations, name).toEqual({ readOnlyHint: true });
     }
-    for (const name of ['create', 'update', 'comment', 'claim']) {
+    for (const name of ['create', 'update', 'comment', 'claim', 'chore_start', 'chore_read', 'chore_abandon']) {
       expect(byName[name]!.annotations, name).toEqual({ destructiveHint: false, openWorldHint: false });
     }
     for (const name of ['close', 'release']) {
@@ -85,7 +100,12 @@ describe('grimoire mcp over stdio', () => {
       expect(tool, tool.name).not.toHaveProperty('outputSchema');
       // Codex defers MCP tools behind a BM25 tool_search over names and descriptions (spike E).
       expect(tool.description, tool.name).toMatch(/\bgrimoire\b/);
-      expect(tool.description, tool.name).toMatch(/\bissues?\b/);
+      if (tool.name.startsWith('chore_')) {
+        // The chore subagent selects its tools by name (spike C, C2); a search for issues or the wiki never finds them (spec §16).
+        expect(tool.description, tool.name).toBe('Grimoire maintenance chore. Use only while following the grimoire-chores skill.');
+      } else {
+        expect(tool.description, tool.name).toMatch(/\bissues?\b/);
+      }
       // The reserved hint key is never advertised, and inputs stay closed.
       expect(tool.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
       expect(Object.keys(tool.inputSchema.properties ?? {})).not.toContain('_grimoire');

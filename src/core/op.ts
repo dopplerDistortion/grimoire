@@ -45,6 +45,11 @@ export interface OpDefinition<I, R> {
   readonly mcp?: false;
   /** How a retried call replays (spec §8, Replays). */
   readonly replay: 'none' | 'idempotency-key' | 'attempt-and-reason';
+  /**
+   * A claim or issue write: NOT_ISOLATED from a context that holds an open
+   * chore run (spec §8, Chore contexts).
+   */
+  readonly issueWrite?: true;
   readonly input: Schema<I, false>;
   run(input: I, env: OpEnv): Promise<R>;
 }
