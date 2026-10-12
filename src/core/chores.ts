@@ -272,13 +272,22 @@ export async function withContextLock<T>(store: MachineLocalStore, ctx: CallCont
   const evidence = observedEvidence(ctx);
   const key = evidence.session ?? evidence.context ?? `process/${ctx.nonce}`;
   const name = `chore-context/${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+  let acquired: Awaited<ReturnType<MachineLocalStore['locks']['acquire']>>;
   try {
-    return await store.locks.withLock(name, fn);
+    acquired = await store.locks.acquire(name, { waitMs: 10_000 });
   } catch (error) {
-    if (error instanceof LockHeldError && error.holder.name === name) {
-      throw new GrimoireError('BUSY', 'another grimoire call from this session is writing; try again', {});
+    const code = (error as NodeJS.ErrnoException).code;
+    // EPERM: a Windows ACL (a sandbox's read-only .git/) refuses it (spike F); nothing changed yet.
+    if (code === 'EACCES' || code === 'EROFS' || code === 'EPERM') {
+      throw new GrimoireError('NOT_WRITABLE', `this process can't write grimoire's machine-local store (${code})`, {});
     }
     throw error;
+  }
+  if (acquired.status === 'held') throw new GrimoireError('BUSY', 'another grimoire call from this session is writing; try again', {});
+  try {
+    return await fn();
+  } finally {
+    await acquired.lock.release();
   }
 }
 
