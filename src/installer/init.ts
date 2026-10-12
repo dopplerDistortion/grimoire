@@ -78,7 +78,7 @@ import {
   type ReleaseFormats,
 } from './upgrade';
 import { ADAPTER_DOC, ADAPTER_MARKER, markdownMarkers } from './texts';
-import { applyFiles, planFiles, tomlMarkers, writePlanned, type FilePlan, type PlannedEntry } from './writer';
+import { applyFiles, planFiles, tomlMarkers, writePlanned, type FilePlan, type PlannedEntry, type PlanOptions } from './writer';
 
 export interface InitFlags {
   /** Take the safe defaults and ask nothing. */
@@ -653,6 +653,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   const adapter = await chooseAdapter(root, flags, existing?.adapter ?? null, upgrading ? null : prompter);
   const npmScript = (await stat(path.join(root, 'package.json')).catch(() => null))?.isFile() === true;
   const pointerOptions: PointerOptions = { clients, npmScript, adapter: adapter.placement };
+  let planOptions: PlanOptions = {};
   let filePlan: FilePlan = await planFiles(root, desiredEntries(pointerOptions));
   const kept = filePlan.entries.filter(keepsGrant);
   if (kept.length > 0 && prompter) {
@@ -663,7 +664,10 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       'no',
       { n: 'no', y: 'yes' },
     );
-    if (restore === 'yes') filePlan = await planFiles(root, desiredEntries(pointerOptions), { restoreGrants: true });
+    if (restore === 'yes') {
+      planOptions = { restoreGrants: true };
+      filePlan = await planFiles(root, desiredEntries(pointerOptions), planOptions);
+    }
   }
   for (const entry of filePlan.entries) {
     if (entry.action === 'conflict') warn('CONFLICT', `${entry.path} left untouched: ${entry.why}`);
@@ -929,7 +933,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
 
   // 8. The report; for an upgrade, step 7: exactly the paths to commit, as git sees them now.
   if (upgrade) {
-    const paths = await pathsToCommit(root, [...new Set([...filePlan.entries.map((entry) => entry.path), MANIFEST_PATH, CONFIG_PATH])]);
+    const paths = await pathsToCommit(root, desiredEntries(pointerOptions), planOptions);
     upgrade.commit = { paths, command: commitCommand(paths, version) };
   }
   const done = report({

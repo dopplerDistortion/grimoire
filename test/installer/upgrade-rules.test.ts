@@ -92,6 +92,24 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
     expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
   });
 
+  gitTest('the paths to commit leave out work the person hadn’t committed in files the upgrade doesn’t change', async ({ world }) => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(path.join(world.a.dir, 'package.json'), '{\n  "name": "host"\n}\n');
+    await writeFile(path.join(world.a.dir, 'AGENTS.md'), '# Agents\n');
+    await installOld(world.a);
+    // Uncommitted work of the person's own, outside anything grimoire owns.
+    await writeFile(path.join(world.a.dir, 'package.json'), (await readFile(path.join(world.a.dir, 'package.json'), 'utf8')).replace('"name": "host",', '"name": "host",\n  "dependencies": { "left-pad": "1.3.0" },'));
+    await writeFile(path.join(world.a.dir, 'AGENTS.md'), `${await readFile(path.join(world.a.dir, 'AGENTS.md'), 'utf8')}\nMy own note.\n`);
+    expect(await changedPaths(world.a)).toEqual(['AGENTS.md', 'package.json']);
+
+    const { report, said } = await initAt(world.a.dir, NEW, { flags: { upgrade: true } });
+
+    expect(await pinOf(world.a.dir)).toBe(NEW);
+    expect(report.upgrade!.commit.paths).toEqual(['.grimoire/config.yml']);
+    expect(said).not.toContain('git add .grimoire/config.yml package.json');
+    expect(await changedPaths(world.a)).toEqual(['.grimoire/config.yml', 'AGENTS.md', 'package.json']);
+  });
+
   gitTest('the plan, asked once: the pins, each marker, the files, the hooks, the other worktrees, live old-pin processes, the disclosure and the revert note', async ({ world }) => {
     await installOld(world.a);
     const other = await world.a.addWorktree('feature');

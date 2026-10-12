@@ -9,8 +9,12 @@
 //   (store, worktree) lease is taken and removed once config.yml pins the new
 //   version. While it exists, upkeep, `init` and `doctor --fix` at any other
 //   pin leave the worktree alone, and pruning keeps both copies.
-// - Step 7: exactly the paths to commit, read back from git, so a resumed
-//   upgrade reports what the interrupted run wrote too.
+// - Step 7: exactly the paths to commit: those the upgrade changes against
+//   HEAD (so a resumed upgrade reports what the interrupted run wrote too),
+//   never the person's own uncommitted work in files it leaves alone.
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { INSTALL_FORMAT_RANGE } from '../core/host';
 import { GrimoireError } from '../errors';
 import { runGit } from '../git/run';
@@ -18,7 +22,11 @@ import { MACHINE_FORMAT_RANGE, type MachineLocalStore } from '../machine-local';
 import { TRACKER_FORMAT_RANGE } from '../tracker';
 import { parseMarker } from '../tracker/marker';
 import { worktreeKey } from '../upkeep/checkout';
+import { CONFIG_PATH } from './config';
+import { MANIFEST_PATH } from './manifest';
+import type { DesiredEntry } from './pointers';
 import { UPGRADE_RECORDS, type UpgradeRecord } from './records';
+import { planFiles, type PlanOptions } from './writer';
 
 /** What a release understands of one marker: it runs iff J ≤ compat ≤ K. */
 export interface FormatRange {
@@ -124,8 +132,35 @@ export async function clearUpgradeRecord(store: MachineLocalStore, worktree: str
   }
 }
 
-/** Of `candidates` (checkout-relative, `/`-separated), those git sees changed or new: what the upgrade's commit takes. Sorted. */
-export async function pathsToCommit(root: string, candidates: readonly string[]): Promise<string[]> {
+/**
+ * Step 7: the paths the upgrade changes that git sees changed: what its commit
+ * takes. The upgrade's own change is the plan of `desired` against HEAD's
+ * blobs (so a resumed upgrade counts what the interrupted run wrote), never
+ * every path git reports: the person's uncommitted work in a file the upgrade
+ * leaves as HEAD has it stays out. config.yml is always a candidate. Sorted,
+ * checkout-relative, `/`-separated.
+ */
+export async function pathsToCommit(root: string, desired: readonly DesiredEntry[], options: PlanOptions = {}): Promise<string[]> {
+  const head = await mkdtemp(path.join(tmpdir(), 'grimoire-upgrade-head-'));
+  let touched: string[];
+  try {
+    for (const relative of new Set([...desired.map((entry) => entry.path), MANIFEST_PATH])) {
+      const blob = await runGit(root, ['cat-file', 'blob', `HEAD:${relative}`]);
+      if (blob.code !== 0) continue;
+      const file = path.join(head, ...relative.split('/'));
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, blob.stdout);
+    }
+    const plan = await planFiles(head, desired, options);
+    touched = [...plan.writes.map((write) => write.path), ...(plan.manifestWrite ? [MANIFEST_PATH] : []), CONFIG_PATH];
+  } finally {
+    await rm(head, { recursive: true, force: true }).catch(() => {});
+  }
+  return changedOf(root, [...new Set(touched)]);
+}
+
+/** Of `candidates`, those git sees changed or new. Sorted. */
+async function changedOf(root: string, candidates: readonly string[]): Promise<string[]> {
   if (candidates.length === 0) return [];
   const run = await runGit(root, ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...candidates]);
   if (run.code !== 0) return [...candidates].sort();
