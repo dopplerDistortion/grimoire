@@ -17,9 +17,12 @@
     "build:cli": "node scripts/build.mjs cli",
     "build:dashboard": "node scripts/build.mjs dashboard",
     "check": "node scripts/check.mjs",
+    "check:full": "node scripts/check.mjs --full",
     "check:deps": "node scripts/check-deps.mjs",
     "dev:dashboard": "vite",
     "test": "vitest run",
+    "test:main": "vitest run --project main",
+    "test:slow": "vitest run --project slow",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json && tsc -p src/surfaces/dashboard/tsconfig.json"
   },

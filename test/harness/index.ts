@@ -28,3 +28,4 @@ export {
   readFixtureJson,
 } from './fixtures';
 export { makeUnwritable, permissionsApply } from './permissions';
+export { trackPidFile } from './children';
