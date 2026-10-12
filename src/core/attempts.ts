@@ -14,6 +14,7 @@ import {
   type Verdict,
 } from '../tracker';
 import { afterSeal, cutForEnding, sealCaptures } from './capture';
+import { openingSkillFacts } from './skills';
 import { humanSurface, type Actor } from './context';
 import { fieldConflict, namesIssue, openAttemptsOf, stateConflict, type OpenAttemptFacts } from './derive';
 import { define, oneLine, writer, type OpEnv } from './op';
@@ -107,11 +108,13 @@ export const claim = define({
     id: s.string({ ...oneLine, description: 'the issue’s full id' }),
     idempotency_key: s.optional(s.string(oneLine)),
   }),
-  async run(input, { ctx, tracker, actor }): Promise<ClaimResult> {
+  async run(input, { ctx, tracker, actor, scanner }): Promise<ClaimResult> {
     const author = writer(ctx);
     const ref = parseWriteRef(input.id, 'id');
     const key = input.idempotency_key;
     const spec = { op: 'claim', author, actor, ...(key ? { idempotency: { key, fingerprint: { issue: ref } } } : {}) };
+    // What the claiming checkout offered, read once before the round: files on disk never wait inside it.
+    const skills = await openingSkillFacts(await tracker.read(), scanner, ctx.repo.root);
     const write = await tracker.transact(spec, (draft) => {
       const id = draft.resolveWrite(ref, 'id');
       checkClaimable(draft, id, author.email);
@@ -120,6 +123,7 @@ export const claim = define({
         actor: recordedActor(author.email, actor),
         opened: 'claim',
         wiki_exposed: actor.chore_exposure !== undefined,
+        ...skills,
       });
       return { result: { id, attempt: attempt.id, since: attempt.start.at }, issue: id, attempt: attempt.id };
     });
@@ -363,6 +367,8 @@ async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
   const checked = planEnd(view, request, me, ctx, actor);
   if (checked.replay) return checked.replay;
   const capture = await cutForEnding(env, view, { issue: checked.id, attempt: checked.record ?? null, op: request.op, binds });
+  // An unclaimed close opens its instant attempt in the ending commit: what this checkout offered, read before the round.
+  const opening = checked.record ? {} : await openingSkillFacts(view, scanner, ctx.repo.root);
   let sealed: { handle: string; keys: string[] } | null = null;
   const write = await tracker.transact({ op: request.op, author, actor }, async (draft) => {
     sealed = null;
@@ -377,6 +383,7 @@ async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
         actor: by,
         opened: 'unclaimed-close',
         wiki_exposed: actor.chore_exposure !== undefined,
+        ...opening,
       });
     const handle = record.id;
     if (parentEdit && parentEdit.body !== parentEdit.record.body) {
