@@ -19,7 +19,7 @@ import { settingsGet, settingsSet } from './settings';
 import { skillEdit, skillList, skillRead, skillShow } from './skills';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
-import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext } from './chores';
+import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
 import { choreSubmit } from './chore-submit';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
@@ -371,23 +371,29 @@ export function createCore(options: CoreOptions = {}): Core {
         const bindings: BindingWrite[] = [];
         let changedServed = false;
         let actor = actorOf(ctx);
-        if (op.kind === 'write' && actor.kind === 'agent') {
-          // Chore contexts never write issues; chore-exposed sessions and processes say so on every write (spec §8, §14).
-          const store = new MachineLocalStore(opened.location.commonDir, ctx.repo.root);
-          const now = opened.now();
-          if (op.issueWrite) await refuseChoreContext(store, ctx, now);
-          actor = await exposedActor(store, ctx, actor, now);
-        }
-        const result = await op.run(parsed, {
-          ctx,
-          tracker: watched(opened, requestSync, bindings),
-          actor,
-          scanner,
-          requestSync,
-          ...(options.capture ? { capture: options.capture } : {}),
-          servedChanged: () => void (changedServed = true),
-        });
-        if (bindings.length > 0) await leaveSeenHereRows(opened, ctx, actor, bindings);
+        const agentWrite = op.kind === 'write' && actor.kind === 'agent';
+        const store = agentWrite || op.name === choreStart.name ? new MachineLocalStore(opened.location.commonDir, ctx.repo.root) : null;
+        const execute = async () => {
+          if (agentWrite && store) {
+            // Chore contexts never write issues; chore-exposed sessions and processes say so on every write (spec §8, §14).
+            const now = opened.now();
+            if (op.issueWrite) await refuseChoreContext(store, ctx, now);
+            actor = await exposedActor(store, ctx, actor, now);
+          }
+          const result = await op.run(parsed, {
+            ctx,
+            tracker: watched(opened, requestSync, bindings),
+            actor,
+            scanner,
+            requestSync,
+            ...(options.capture ? { capture: options.capture } : {}),
+            servedChanged: () => void (changedServed = true),
+          });
+          if (bindings.length > 0) await leaveSeenHereRows(opened, ctx, actor, bindings);
+          return result;
+        };
+        // A chore start and a claim or issue write from one session never interleave (spec §16 Admission).
+        const result = store && (op.name === choreStart.name || (agentWrite && op.issueWrite)) ? await withContextLock(store, ctx, execute) : await execute();
         if (changedServed) refresh(ctx);
         const syncTip = syncTips.at(-1);
         if (syncTip !== undefined) await afterWrite(opened, syncTip, ctx);

@@ -113,6 +113,21 @@ export function writeRun(store: MachineLocalStore, run: OpenRun): Promise<void> 
   return store.records.write(OPEN_RUNS, run.id, run as never);
 }
 
+/**
+ * Changes the run `id` under the run records' machine-local lock, so updates
+ * never race (a read-modify-write each). Ended and abandoned are terminal: a
+ * run that is no longer open is left as it is. Returns the run as stored
+ * afterwards, or undefined when there is none.
+ */
+export async function updateRun(store: MachineLocalStore, id: string, change: (open: OpenRun) => OpenRun): Promise<OpenRun | undefined> {
+  return store.records.update<OpenRun>(OPEN_RUNS, id, (current) => (current === undefined || current.state !== 'open' ? current : change(current)));
+}
+
+/** Drops the run `id` (a start that didn't complete); false if it wasn't there. */
+export function removeRun(store: MachineLocalStore, id: string): Promise<boolean> {
+  return store.records.remove(OPEN_RUNS, id);
+}
+
 /** The live run the context `key` holds, or undefined. */
 export async function liveRunOf(store: MachineLocalStore, key: string, now: Date): Promise<OpenRun | undefined> {
   return (await listRuns(store)).find((run) => run.context === key && live(run, now));
@@ -183,12 +198,25 @@ export async function servedLog(store: MachineLocalStore, run: string): Promise<
 
 const markKey = (basis: ExposureMark['basis'], id: string) => `${basis}/${id}`;
 
-/** Marks a session or a server process as chore-exposed, pruning marks older than 30 days. */
-export async function markExposure(store: MachineLocalStore, basis: ExposureMark['basis'], id: string, run: string, now: Date): Promise<void> {
-  await store.records.write<ExposureMark>(EXPOSURE_MARKS, markKey(basis, id), { basis, run, at: now.toISOString() });
-  for (const entry of await store.records.list<ExposureMark>(EXPOSURE_MARKS)) {
-    if (now.getTime() - Date.parse(entry.value.at) > EXPOSURE_TTL_MS) await store.records.remove(EXPOSURE_MARKS, entry.key).catch(() => false);
+/**
+ * Marks a session or a server process as chore-exposed, pruning marks older
+ * than 30 days, and returns an undo that puts back what the mark replaced.
+ */
+export async function markExposure(store: MachineLocalStore, basis: ExposureMark['basis'], id: string, run: string, now: Date): Promise<() => Promise<void>> {
+  const key = markKey(basis, id);
+  const prior = await store.records.read<ExposureMark>(EXPOSURE_MARKS, key);
+  await store.records.write<ExposureMark>(EXPOSURE_MARKS, key, { basis, run, at: now.toISOString() });
+  try {
+    for (const entry of await store.records.list<ExposureMark>(EXPOSURE_MARKS)) {
+      if (now.getTime() - Date.parse(entry.value.at) > EXPOSURE_TTL_MS) await store.records.remove(EXPOSURE_MARKS, entry.key).catch(() => false);
+    }
+  } catch {
+    // Pruning is housekeeping: the next mark tries again.
   }
+  return async () => {
+    if (prior === undefined) await store.records.remove(EXPOSURE_MARKS, key);
+    else await store.records.write<ExposureMark>(EXPOSURE_MARKS, key, prior);
+  };
 }
 
 /**

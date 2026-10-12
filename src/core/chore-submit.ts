@@ -11,8 +11,8 @@ import {
   keepInvalidResult,
   lapsed,
   logNoPattern,
-  OPEN_RUNS,
   servedLog,
+  updateRun,
   writeCompile,
   type OpenRun,
   type Rejection,
@@ -78,14 +78,10 @@ async function withRunLock<T>(store: MachineLocalStore, run: string, fn: () => P
   }
 }
 
-/** Marks the run ended, keeping the answer a retried submit replays. */
+/** Marks the run ended, keeping the answer a retried submit replays (a run that stopped meanwhile stays as it is). */
 async function endRun(store: MachineLocalStore, id: string, now: Date, outcome: ChoreSubmitResult, failures?: number): Promise<void> {
   const at = now.toISOString();
-  await store.records.update<OpenRun>(OPEN_RUNS, id, (current) =>
-    current === undefined
-      ? current
-      : { ...current, state: 'ended', ended_at: at, last_call_at: at, outcome: outcome as never, ...(failures !== undefined ? { failures } : {}) },
-  );
+  await updateRun(store, id, (open) => ({ ...open, state: 'ended', ended_at: at, last_call_at: at, outcome: outcome as never, ...(failures !== undefined ? { failures } : {}) }));
 }
 
 export const choreSubmit = define({
@@ -234,9 +230,7 @@ async function refuse(
       summary: `grimoire chores: compile result refused (${reasons.join(', ')}); one fix-up left; run ${run.id}`,
     };
     const at = now.toISOString();
-    await store.records.update<OpenRun>(OPEN_RUNS, run.id, (current) =>
-      current === undefined || current.state !== 'open' ? current : { ...current, failures, last_call_at: at, refused: { key, outcome: outcome as never } },
-    );
+    await updateRun(store, run.id, (open) => ({ ...open, failures, last_call_at: at, refused: { key, outcome: outcome as never } }));
     return outcome;
   }
   const served = new Set(recorded.served.map((ref) => ref.item));

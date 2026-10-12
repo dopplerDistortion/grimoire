@@ -8,6 +8,7 @@
 // issue write from a context holding an open chore run is NOT_ISOLATED, and a
 // write from a chore-exposed session or process carries the exposure basis on
 // its actor (spec §14 Wiki-exposed).
+import { createHash } from 'node:crypto';
 import { GrimoireError } from '../errors';
 import {
   checkAttemptFree,
@@ -28,7 +29,9 @@ import {
   pageStart,
   pruneRuns,
   readRun,
+  removeRun,
   Serving,
+  updateRun,
   writeRun,
   LEASE_MS,
   type ChoreOrigin,
@@ -189,14 +192,16 @@ export const choreStart = define({
   }),
   async run(input, { ctx, tracker, scanner }): Promise<ChoreBrief> {
     const caller = classifyCaller(ctx);
-    const view = await tracker.read();
     const store = storeOf(tracker, ctx);
-    await checkAttemptFree(caller, view, store, ctx.person.email);
-    const now = tracker.now();
     const origin = originOf(ctx, input);
     const manual = input.manual === true;
-    // One start at a time on this machine, so no two runs of one chore start together.
+    // One start at a time on this machine, so no two runs of one chore start
+    // together; the core also holds this context's lock (withContextLock), so
+    // no claim or issue write from the caller's session lands mid-start.
     const { run, pages, why } = await withStartLock(store, async () => {
+      const view = await tracker.read();
+      await checkAttemptFree(caller, view, store, ctx.person.email);
+      const now = tracker.now();
       await pruneRuns(store, now);
       const due = await choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(store, now), manual });
       const kind = pickKind(due, input.kind, origin);
@@ -223,12 +228,22 @@ export const choreStart = define({
       const serving = await servingOf(view, fresh, ctx, scanner, now);
       const manifest = await serving.manifest();
       const started: OpenRun = { ...fresh, manifest };
-      await writeRun(store, started);
-      return { run: started, pages: await pageCount(serving, manifest, pageEnvelope(started.id)), why: due[kind].why };
+      const pages = await pageCount(serving, manifest, pageEnvelope(started.id));
+      // All or nothing: the exposure mark first (a run never stands unmarked),
+      // then the run; a failure on the way undoes what was written.
+      const undo: (() => Promise<unknown>)[] = [];
+      try {
+        // A chore outside an isolated context marks its session, or its server process (spec §16, Exposure).
+        if (caller.rootSession !== undefined) undo.push(await markExposure(store, 'session', caller.rootSession, started.id, now));
+        if (caller.process !== undefined) undo.push(await markExposure(store, 'process', caller.process, started.id, now));
+        undo.push(() => removeRun(store, started.id));
+        await writeRun(store, started);
+        return { run: started, pages, why: due[kind].why };
+      } catch (error) {
+        for (const step of undo.reverse()) await step().catch(() => undefined);
+        throw error;
+      }
     });
-    // A chore outside an isolated context marks its session, or its server process (spec §16, Exposure).
-    if (caller.rootSession !== undefined) await markExposure(store, 'session', caller.rootSession, run.id, now);
-    if (caller.process !== undefined) await markExposure(store, 'process', caller.process, run.id, now);
     return {
       run: run.id,
       kind: run.kind,
@@ -245,6 +260,36 @@ export const choreStart = define({
     };
   },
 });
+
+/**
+ * Runs `fn` under the lock of the caller's session (or, with none, its server
+ * process): the core holds it around `chore_start` and around every claim or
+ * issue write, so a start's admission check, run and exposure mark and a
+ * binding write from the same session never interleave (spec §16 Admission,
+ * §8 Chore contexts). BUSY when another call holds it past the wait.
+ */
+export async function withContextLock<T>(store: MachineLocalStore, ctx: CallContext, fn: () => Promise<T>): Promise<T> {
+  const evidence = observedEvidence(ctx);
+  const key = evidence.session ?? evidence.context ?? `process/${ctx.nonce}`;
+  const name = `chore-context/${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+  let acquired: Awaited<ReturnType<MachineLocalStore['locks']['acquire']>>;
+  try {
+    acquired = await store.locks.acquire(name, { waitMs: 10_000 });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // EPERM: a Windows ACL (a sandbox's read-only .git/) refuses it (spike F); nothing changed yet.
+    if (code === 'EACCES' || code === 'EROFS' || code === 'EPERM') {
+      throw new GrimoireError('NOT_WRITABLE', `this process can't write grimoire's machine-local store (${code})`, {});
+    }
+    throw error;
+  }
+  if (acquired.status === 'held') throw new GrimoireError('BUSY', 'another grimoire call from this session is writing; try again', {});
+  try {
+    return await fn();
+  } finally {
+    await acquired.lock.release();
+  }
+}
 
 /** Runs `fn` under this machine's chore-start lock; BUSY when another start holds it past the wait. */
 async function withStartLock<T>(store: MachineLocalStore, fn: () => Promise<T>): Promise<T> {
@@ -272,6 +317,11 @@ export async function heldRun(store: MachineLocalStore, ctx: CallContext, id: st
   return run;
 }
 
+/** NOT_FOUND for a run that has ended or been abandoned. */
+function ended(id: string, state: string): GrimoireError {
+  return new GrimoireError('NOT_FOUND', `the chore run ${id} has ended (${state})`, { run: id, state });
+}
+
 export interface ChoreReadResult {
   run: string;
   /** The served items: whole, or a part of one cut at its `text` (`offset`, `continues`). */
@@ -296,7 +346,7 @@ export const choreRead = define({
     const store = storeOf(tracker, ctx);
     const now = tracker.now();
     const run = await heldRun(store, ctx, input.run, now);
-    if (run.state !== 'open') throw new GrimoireError('NOT_FOUND', `the chore run ${run.id} has ended (${run.state})`, { run: run.id, state: run.state });
+    if (run.state !== 'open') throw ended(run.id, run.state);
     const view = await tracker.read();
     const serving = await servingOf(view, run, ctx, scanner, now);
     const item = input.item?.trim() ?? null;
@@ -306,7 +356,9 @@ export const choreRead = define({
     const ids = item === null ? run.manifest : await serving.itemIds(item);
     const page = await pageOf(serving, ids, pageStart(input.cursor, item), pageEnvelope(run.id));
     await logServed(store, run.id, page.served, now);
-    await writeRun(store, { ...run, last_call_at: now.toISOString() });
+    // Renews the lease, unless the run ended meanwhile: a terminal state is never reopened.
+    const renewed = await updateRun(store, run.id, (open) => ({ ...open, last_call_at: now.toISOString() }));
+    if (renewed?.state !== 'open') throw ended(run.id, renewed?.state ?? 'abandoned');
     return { run: run.id, items: page.items, ...(page.next !== null ? { truncated: true as const, cursor: page.next } : {}) };
   },
 });
@@ -336,10 +388,14 @@ export const choreAbandon = define({
     const now = tracker.now();
     const run = await heldRun(store, ctx, input.run, now);
     const summary = `grimoire chores: ${KIND_NAMES[run.kind]} run ${run.id} abandoned; nothing consumed`;
-    if (run.state === 'abandoned') return { run: run.id, kind: run.kind, abandoned: true, replayed: true, summary };
-    if (run.state !== 'open') throw new GrimoireError('NOT_FOUND', `the chore run ${run.id} has ended (${run.state})`, { run: run.id, state: run.state });
     const at = now.toISOString();
-    await writeRun(store, { ...run, state: 'abandoned', ended_at: at, last_call_at: at, reason: input.reason.trim().slice(0, 2_000) });
-    return { run: run.id, kind: run.kind, abandoned: true, summary };
+    let changed = false;
+    const after = await updateRun(store, run.id, (open) => {
+      changed = true;
+      return { ...open, state: 'abandoned', ended_at: at, last_call_at: at, reason: input.reason.trim().slice(0, 2_000) };
+    });
+    const state = after?.state ?? run.state;
+    if (state !== 'abandoned') throw ended(run.id, state);
+    return { run: run.id, kind: run.kind, abandoned: true, ...(changed ? {} : { replayed: true as const }), summary };
   },
 });

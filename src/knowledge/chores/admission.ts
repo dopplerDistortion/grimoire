@@ -152,8 +152,26 @@ export async function checkAttemptFree(caller: ChoreCaller, view: TrackerView, s
     }
   }
   if (caller.process !== undefined) {
-    const here = new Set((await seenHereRows(store).catch(() => [])).map((row) => row.handle));
-    const held = open.find((record) => record.start.assignee === person && here.has(record.id));
+    // Fails closed: with no git email any open attempt may be the caller's, and
+    // seen-here rows that can't be read can't show an attempt isn't held here.
+    const theirs = open.filter((record) => person === null || record.start.assignee === person);
+    if (theirs.length === 0) return;
+    let here: Set<string>;
+    try {
+      here = new Set((await seenHereRows(store)).map((row) => row.handle));
+    } catch {
+      throw notIsolated(
+        "grimoire can't tell this context apart, and couldn't read which attempts are open on this machine",
+        'run `grimoire doctor` to check this machine\'s grimoire data, or use a client grimoire can identify',
+      );
+    }
+    const held = theirs.find((record) => here.has(record.id));
+    if (held && person === null) {
+      throw notIsolated(
+        `grimoire can't tell this context apart, and with no git user.email it can't tell whether the open attempt ${held.id} on ${held.issue} on this machine is yours`,
+        'set git user.email in this repo, or finish the open attempts on this machine first',
+      );
+    }
     if (held) {
       throw notIsolated(
         `grimoire can't tell this context apart, and you hold the open attempt ${held.id} on ${held.issue} on this machine`,
