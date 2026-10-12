@@ -246,6 +246,29 @@ function scanText(text: string, field: string, p: Problems, scanner: SecretScann
   }
 }
 
+/**
+ * The secret scan over every string the raw result holds, field names
+ * included, before any check may return: whatever else refuses it, a secret
+ * still marks the rejection, so no result text is kept (spec §16 Failures).
+ */
+function scanRaw(value: unknown, field: string, p: Problems, scanner: SecretScanner): void {
+  const scan = (text: string, at: string) => {
+    const found = scanner.scan(text);
+    if (found.status !== 'scanned') return p.add('unscanned', at, 'could not be scanned for secrets');
+    if (found.hits.length === 0) return;
+    for (const hit of found.hits) p.rules.add(hit.rule);
+    p.add('secret', at, `holds what looks like a secret (${sortedUnique(found.hits.map((hit) => hit.rule)).join(', ')})`);
+  };
+  if (typeof value === 'string') return scan(value, field);
+  if (Array.isArray(value)) return value.forEach((item, i) => scanRaw(item, `${field}[${i}]`, p, scanner));
+  if (!isObject(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    const at = field === '' ? key : `${field}.${key}`;
+    scan(key, field === '' ? 'result' : field);
+    scanRaw(item, at, p, scanner);
+  }
+}
+
 /** The trace a cited item belongs to, or null when it is no trace part. */
 function traceOfItem(item: string): string | null {
   const match = /^(?:trace|issue|debrief):(.+)$/.exec(item) ?? /^excerpt:([^/]+)\//.exec(item);
@@ -316,6 +339,8 @@ async function negativeEvidence(name: string, cx: ProposeContext): Promise<{ cha
 export async function checkProposal(result: unknown, cx: ProposeContext): Promise<ProposeCheck> {
   const p = new Problems();
   const shape = shapeOf(result, p);
+  // After the shape (which judges an empty Problems), before every check that may return early.
+  scanRaw(result, '', p, cx.scanner);
   if (!shape) return { ok: false, rejection: p.rejection() };
   for (const key of ['client', 'model'] as const) if (shape[key] !== null) scanText(shape[key], key, p, cx.scanner);
   const unverified = { client: shape.client, model: shape.model };

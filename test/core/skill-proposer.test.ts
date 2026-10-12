@@ -380,6 +380,28 @@ describe('chore_submit: risk flags and the secret scan', () => {
     expect(await world.a.git(['grep', '-c', 'ghp_', tip, '--']).catch(() => 'none')).toBe('none');
   });
 
+  test('a secret beside an earlier refusal (a missing anchor, an unknown skill, a bad shape) is still found, and no text is kept', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const token = 'ghp_R7xK2mQ9vL4tB8nW3pZ6cY1hJ5sD0fG2aE9u';
+    const claims = { ...(patchResult(p).claims as Record<string, unknown>), rationale: `The CI token ${token} kept expiring.` };
+
+    const anchored = ok(await submit(p, patchResult(p, { claims, ops: [{ op: 'insert-after', anchor: 'no such line', text: '\nx\n' }] })));
+    expect(anchored).toMatchObject({ result: 'invalid', reasons: ['anchor_not_found', 'secret'] });
+    const unknown = ok(await submit(p, patchResult(p, { target: 'no-such-skill', ops: [{ op: 'append', text: `\n${token}\n` }] })));
+    expect(unknown).toMatchObject({ result: 'failed', reasons: ['secret', 'unknown_skill'] });
+    const again = await manualRun(p);
+    const shaped = ok(await submit(again, { ...patchResult(again), stray: { note: token } }));
+    expect(shaped).toMatchObject({ result: 'invalid', reasons: ['secret', 'shape'] });
+
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'), world.a.dir);
+    const kept = (await store.records.list<Record<string, unknown>>(INVALID_RESULTS)).map((entry) => entry.value);
+    expect(kept).toHaveLength(3);
+    for (const result of kept) {
+      expect(Object.keys(result).sort()).toEqual(['at', 'reasons', 'rules', 'run']);
+      expect(JSON.stringify(result)).not.toContain(token);
+    }
+  });
+
   test('no_action is recorded on the run and consumes its compiles', async ({ world, grimoire }) => {
     const p = await proposer(grimoire, world);
     const done = ok(await submit(p, { action: 'no_action', client: 'claude-code' }));
