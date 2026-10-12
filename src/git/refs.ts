@@ -53,7 +53,9 @@ const ATTEMPTS = 3;
  * given up on (later updates meet it as any other ref lock: BUSY, then
  * `stale_lock` once it is ~30 s old). A kill on Windows starts `taskkill`,
  * which on a loaded machine can take a second or more. Waiting costs no BUSY
- * its time: the update that killed the git doesn't wait for it.
+ * its time: the update that killed the git doesn't wait for it. A git killed
+ * once told to commit gets as long before whether the ref moved is given up
+ * on: only its exit lets that be found out.
  */
 const EXIT_AFTER_KILL_MS = 5_000;
 
@@ -321,10 +323,11 @@ export class RefUpdater {
         watchdog = setTimeout(() => {
           kill();
           if (told !== 'commit') return finish({ kind: 'stalled', stallMs });
-          // Its exit says `unknown`, and whether the ref moved is found out then, unless it never exits.
+          // Its exit says `unknown`, and whether the ref moved is found out then, unless it never exits
+          // (given as long as a killed git's lock is: the kill itself can take seconds on a loaded machine).
           watchdog = setTimeout(
             () => fail(new Error(`git update-ref --stdin stopped answering once told to commit, and outlived being killed: whether ${ref} moved is unknown`)),
-            stallMs,
+            Math.max(stallMs, EXIT_AFTER_KILL_MS),
           );
         }, stallMs);
       };

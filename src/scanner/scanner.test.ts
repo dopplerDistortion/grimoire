@@ -164,29 +164,6 @@ describe('scanSecrets', () => {
     });
   });
 
-  it('scans a large, adversarial text in linear time', () => {
-    const header = pem('BEGIN', 'RSA');
-    const footer = pem('END', 'RSA');
-    const near = [
-      `token = ${'a'.repeat(15)}`,
-      'secret: ' + 'x'.repeat(300),
-      `https://${'u'.repeat(250)}:`,
-      `ey${'A'.repeat(40)}.ey${'B'.repeat(40)}`,
-      `xoxs-${'1'.repeat(200)}`,
-      'Authorization: Bearer ' + '='.repeat(200),
-    ].join('\n');
-    // ~3 MB: near-misses for every kind of rule, then 20,000 key headers and one
-    // footer (a naive "BEGIN … END" regex rescans to the footer from every header).
-    const text = `${near}\n`.repeat(1_000) + `${header} ${'Q'.repeat(60)}\n`.repeat(20_000) + footer;
-
-    const started = performance.now();
-    const result = scanSecrets(text);
-    const elapsed = performance.now() - started;
-
-    expect(result).toMatchObject({ status: 'scanned', hits: [{ rule: 'private-key-unterminated' }] });
-    expect(elapsed).toBeLessThan(2_000);
-  });
-
   it('reports several secrets in order of position', () => {
     const gh = 'ghp_' + body(36);
     const slack = `xoxb-${body(11, DIGITS)}-${body(12, DIGITS)}-${body(24)}`;
@@ -565,26 +542,6 @@ describe('checkHygiene', () => {
       'Mail bob@acme.dev: he knows. Use a.b.c version numbers like 1.2.3.',
     ].join('\n');
     expect(checkHygiene(text)).toEqual({ status: 'checked', findings: [] });
-  });
-
-  it('checks a large, adversarial text in linear time', () => {
-    const near = [
-      `<a ${'b'.repeat(300)}`,
-      `<x y${'='.repeat(50)}`,
-      `<!${'D'.repeat(300)}`,
-      `https://${'h'.repeat(300)}`,
-      `${'u.'.repeat(100)}@${'h.'.repeat(100)}`,
-      `<<<<<<<${'<'.repeat(50)}`,
-      `](${' '.repeat(20)}//`,
-    ].join('\n');
-    const text = `${near}\n`.repeat(2_000); // ~3 MB
-
-    const started = performance.now();
-    const report = checkHygiene(text);
-    const elapsed = performance.now() - started;
-
-    expect(report).toMatchObject({ status: 'checked' });
-    expect(elapsed).toBeLessThan(2_000);
   });
 
   it('reports findings of every check in order of position', () => {

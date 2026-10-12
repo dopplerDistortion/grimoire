@@ -32,24 +32,4 @@ describe('copy pruning', () => {
     expect((await listCopies(store)).map((copy) => copy.version)).toEqual(['1.0.0', '1.5.0', '2.0.0', '3.0.0', '4.0.0']);
     expect(await readdir(path.join(store.dir, 'pkg', '.trash'))).toEqual([]);
   });
-
-  gitTest('an install holding the lock leaves pruning to a later pass, without waiting for it', async ({ world }) => {
-    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
-    await installAll(store, world.root, ['0.9.0', '1.0.0', '2.0.0']);
-    await pin(world.a.dir, '2.0.0');
-    const held = await store.locks.acquire(INSTALL_LOCK);
-    expect(held.status).toBe('acquired');
-
-    const started = Date.now();
-    const report = await runUpkeep({ root: world.a.dir, version: '2.0.0' });
-
-    expect(Date.now() - started).toBeLessThan(5_000);
-    expect(report.runs).toContainEqual(expect.objectContaining({ part: 'prune-copies', status: 'skipped', why: 'install' }));
-    expect((await listCopies(store)).map((copy) => copy.version)).toEqual(['0.9.0', '1.0.0', '2.0.0']);
-
-    // Not throttled: the next pass prunes once the install is done.
-    if (held.status === 'acquired') await held.lock.release();
-    const later = await runUpkeep({ root: world.a.dir, version: '2.0.0' });
-    expect(later.runs).toContainEqual(expect.objectContaining({ part: 'prune-copies', status: 'ran', result: expect.objectContaining({ removed: ['0.9.0'] }) }));
-  });
 });

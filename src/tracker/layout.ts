@@ -106,3 +106,16 @@ export function ledgerFile(id: string): string {
 export function skillVersionFile(version: string): string {
   return `${SKILL_VERSIONS_DIR}/${version}.md`;
 }
+
+/** A session key (spec §3): the hex hash naming one bound context's session record within its attempt. */
+export const SESSION_KEY_PATTERN = /^[0-9a-f]{16,64}$/;
+
+/** `attempts/<a>/<b>/<issue-id>/<attempt-id>/sessions/<session-key>.md`: one bound context's session record (spec §3, §14). */
+export function sessionFile(issue: string, attempt: string, key: string): string {
+  return `${attemptDir(issue, attempt)}/${SESSIONS_DIR}/${key}.md`;
+}
+
+/** `purges/<attempt-id>/<session-key>.md`: the tombstone of one purged session record (spec §3, §14). */
+export function sessionPurgeFile(attempt: string, key: string): string {
+  return `${PURGES_DIR}/${attempt}/${key}.md`;
+}

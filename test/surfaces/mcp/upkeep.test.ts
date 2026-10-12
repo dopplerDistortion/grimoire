@@ -1,7 +1,7 @@
 // Seam 3: upkeep inside the real `grimoire mcp` (spec §13 Where it runs, How
 // it runs). Two servers start together in one clone: every upkeep part runs
 // exactly once between them (the lease), and tool calls issued while one of
-// them is stuck in upkeep's push are answered at once. Transport and wiring
+// them is stuck in upkeep's push are answered while it hangs. Transport and wiring
 // only; the rules are seam 1's (test/upkeep).
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
@@ -95,23 +95,28 @@ describe('upkeep in grimoire mcp', () => {
     if (!claimed.ok) throw new Error(JSON.stringify(claimed.error));
     await writer.call('close', { id, attempt: (claimed.result as { attempt: string }).attempt, reason: 'done', debrief: DEBRIEF }, ctx);
     await writer.close();
-    // The remote takes its time with the push, and says when it started.
+    // The remote holds the push until the test lets it go (a minute at most), and says when it started.
+    const posix = (file: string) => file.split(path.sep).join('/');
     const started = path.join(world.root, 'push-started');
-    await writeFile(path.join(world.remote, 'hooks', 'pre-receive'), `#!/bin/sh\ntouch '${started.split(path.sep).join('/')}'\nsleep 8\n`, { mode: 0o755 });
+    const release = path.join(world.root, 'push-release');
+    await writeFile(
+      path.join(world.remote, 'hooks', 'pre-receive'),
+      `#!/bin/sh\ntouch '${posix(started)}'\ni=0\nwhile [ ! -e '${posix(release)}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\n`,
+      { mode: 0o755 },
+    );
 
     const servers = await Promise.all([server(root), server(root)]);
     try {
       await Promise.all(servers.map((s) => s.client.listTools()));
       await expect.poll(() => existsSync(started), { timeout: 30_000, interval: 50 }).toBe(true);
 
-      // During upkeep's push: both servers answer at once.
+      // While upkeep's push hangs, both servers answer. No clock: the push can't end before the release.
       for (const s of servers) {
-        const at = Date.now();
         const listed = await s.client.callTool({ name: 'list', arguments: {} });
         expect(listed.isError).toBeFalsy();
-        expect(Date.now() - at).toBeLessThan(2_500);
       }
       expect(await remoteTracker(world.a)).toBeNull();
+      await writeFile(release, '');
 
       // Then each part ran in exactly one of them.
       await expect
@@ -126,6 +131,7 @@ describe('upkeep in grimoire mcp', () => {
       expect(await read(root, '.claude/rules/grimoire.md')).toBe(instructionRulesText());
       expect(servers.map((s) => s.stderr()).join('')).toContain('grimoire refreshed 1 pointer file: commit it');
     } finally {
+      await writeFile(release, '');
       await Promise.all(servers.map((s) => s.client.close()));
     }
   });
