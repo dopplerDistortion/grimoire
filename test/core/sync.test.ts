@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect } from 'vitest';
+import { describe, expect, vi } from 'vitest';
 import { autoSync, createCore, syncNow, syncRequestOf, type CallContext, type Core } from '../../src/core';
 import { actorOf } from '../../src/core/context';
 import { openTracker, type NetworkGit, type SyncOutcome, type TrackerStore } from '../../src/tracker';
@@ -516,37 +516,56 @@ describe('the detached sync child', () => {
   });
 });
 
-/** How git answers a push that lost a race, by kind: the porcelain summary and what the remote said. */
+/** How git answers a push that lost a race, by kind: the porcelain summary and what the remote said, which says it moved. */
 const LOST_RACES: readonly (readonly [string, string])[] = [
   // The remote moved since the fetch.
   ['[rejected] (fetch first)', ''],
   // Another push moved it while this one ran: the remote's compare-and-set failed.
   ['[remote rejected] (failed to update ref)', "remote: error: cannot lock ref 'refs/heads/grimoire/tracker': is at 1111111111111111111111111111111111111111 but expected 2222222222222222222222222222222222222222\n"],
-  // Another push held the ref's lock.
+];
+
+/** Rejections that are a lost race only when the remote moved since, as its next listing tells. */
+const CONTENDED: readonly (readonly [string, string])[] = [
+  // Another push held the ref's lock, or a lock was left stale.
   ['[remote rejected] (failed to update ref)', "remote: error: cannot lock ref 'refs/heads/grimoire/tracker': Unable to create '/srv/remote.git/refs/heads/grimoire/tracker.lock': File exists.\n"],
   ['[rejected] (non-fast-forward)', ''],
 ];
 
+/** Another clone's push landing on the bare `remote`: its `grimoire/tracker` moves on to a new commit over the same tree. */
+async function landElsewhere(remote: string): Promise<void> {
+  const tip = await git(remote, ['rev-parse', 'refs/heads/grimoire/tracker']);
+  const env = { GIT_AUTHOR_NAME: 'Bob', GIT_AUTHOR_EMAIL: 'bob@example.com', GIT_COMMITTER_NAME: 'Bob', GIT_COMMITTER_EMAIL: 'bob@example.com' };
+  const next = await git(remote, ['commit-tree', `${tip}^{tree}`, '-p', tip, '-m', 'From another clone'], { env });
+  await git(remote, ['update-ref', 'refs/heads/grimoire/tracker', next, tip]);
+}
+
 /**
- * A remote busy with other clones' pushes, standing in for sync's network git:
- * each of the first `lost` pushes loses a race, answered the way git answers
- * each kind in turn; the pushes after those reach the real remote. The other
- * clones' pushes never land here, so the remote's refs stay as first listed
- * until a push of Alice's does: each round's `ls-remote` is answered from that
- * listing rather than spawning git again. The pauses before retries are
- * recorded, not waited out.
+ * A remote that rejects pushes, standing in for sync's network git: each of
+ * the first `lost` pushes is rejected, answered the way git answers each kind
+ * of `answers` in turn; the pushes after those reach the real remote. Busy
+ * (`landsOn`: the bare remote), another clone's push lands there with each
+ * rejection, so the next listing shows the remote moved: each one a lost race.
+ * Refusing (no `landsOn`), the remote's refs stay as first listed until a push
+ * of Alice's lands, and each round's `ls-remote` is answered from that listing
+ * rather than spawning git again: a lock left stale, or a push URL that reaches
+ * other refs than the fetch URL lists. The pauses before retries are recorded,
+ * not waited out.
  */
-function busyRemote(lost: number): { network: NetworkGit; pause: (ms: number) => Promise<void>; pushes: () => number; pauses: number[] } {
+function busyRemote(
+  lost: number,
+  { answers = [...LOST_RACES, ...CONTENDED], landsOn }: { answers?: readonly (readonly [string, string])[]; landsOn?: string } = {},
+): { network: NetworkGit; pause: (ms: number) => Promise<void>; pushes: () => number; pauses: number[] } {
   let pushes = 0;
   let listing: NetworkGitRun | null = null;
   const pauses: number[] = [];
   const network: NetworkGit = async (cwd, args, options) => {
-    if (args[0] === 'ls-remote' && pushes < lost) {
+    if (args[0] === 'ls-remote' && landsOn === undefined && pushes < lost) {
       listing ??= await runNetworkGit(cwd, args, options);
       return listing;
     }
     if (args[0] !== 'push' || ++pushes > lost) return runNetworkGit(cwd, args, options);
-    const [summary, said] = LOST_RACES[(pushes - 1) % LOST_RACES.length]!;
+    if (landsOn !== undefined) await landElsewhere(landsOn);
+    const [summary, said] = answers[(pushes - 1) % answers.length]!;
     const stdout = `To ${args.at(-2)}\n!\t${args.at(-1)}\t${summary}\nDone\n`;
     return { code: 1, stdout: Buffer.from(stdout), stderr: `${said}error: failed to push some refs to '${args.at(-2)}'\n`, timedOut: false };
   };
@@ -645,7 +664,7 @@ describe('concurrent clones', () => {
   }) => {
     await pushTracker(world.a);
     await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
-    const remote = busyRemote(4);
+    const remote = busyRemote(4, { landsOn: world.remote });
 
     const synced = await withTracker(world.a, (tracker) =>
       syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), network: remote.network, pause: remote.pause }),
@@ -664,7 +683,7 @@ describe('concurrent clones', () => {
   }) => {
     await pushTracker(world.a);
     await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
-    const remote = busyRemote(Infinity);
+    const remote = busyRemote(Infinity, { landsOn: world.remote });
     const request = syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx));
 
     const lost = await withTracker(world.a, (tracker) => syncNow(tracker, { ...request, network: remote.network, pause: remote.pause }));
@@ -678,5 +697,75 @@ describe('concurrent clones', () => {
     // The remote is busy, not refusing: no backoff holds the next automatic sync back.
     expect(await withTracker(world.a, (tracker) => autoSync(tracker, request))).toMatchObject({ state: 'pushed' });
     expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+  });
+
+  test.for([...LOST_RACES, ...CONTENDED])('a push rejected as %s while the remote doesn’t move is refused, not a lost race: it fails within three pushes as rejected with the remote’s message, and backs off', async (
+    answer,
+    { world, grimoire },
+  ) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    const remote = busyRemote(Infinity, { answers: [answer] });
+
+    const refused = await withTracker(world.a, (tracker) =>
+      syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), network: remote.network, pause: remote.pause }),
+    );
+    expect(refused).toMatchObject({ state: 'pending', reason: 'failed', failure: { class: 'rejected' } });
+    expect(refused.failure?.lostRace).toBeUndefined();
+    expect(refused.failure?.message).toMatch(/fetch first|but expected|File exists|non-fast-forward/);
+    // Three pushes, each followed by a listing that showed the remote hadn't moved.
+    expect(remote.pushes()).toBe(3);
+    expect(remote.pauses).toHaveLength(3);
+    // Once the remote showed no move, a held lock's holder gets at least a quarter second to let go.
+    expect(Math.min(...remote.pauses.slice(1))).toBeGreaterThanOrEqual(250);
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: { class: 'rejected' }, retry_at: expect.any(String) });
+  });
+
+  test('a push that meets the remote’s ref lock once, held by something that lets go without moving the remote, pushes again and lands, with no failure or backoff', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    // The lock's holder (a server-side pack-refs, say) lets go before the retry; the remote's listing never moves.
+    const remote = busyRemote(1, { answers: [CONTENDED[0]!] });
+
+    const synced = await withTracker(world.a, (tracker) =>
+      syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), network: remote.network, pause: remote.pause }),
+    );
+    expect(synced).toMatchObject({ state: 'pushed' });
+    expect(remote.pushes()).toBe(2);
+    expect(await remoteTracker(world.a)).toBe(await trackerTip(world.a));
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: null, retry_at: null, pending_since: null });
+  });
+
+  test('a push that meets the remote’s ref lock as the sync’s time runs out, with no listing after it to tell a race, is recorded as refused and backs off', async ({
+    world,
+    grimoire,
+  }) => {
+    await pushTracker(world.a);
+    await ok(grimoire.core.call('create', { title: 'From Alice' }, grimoire.ctx));
+    const refusing = busyRemote(Infinity, { answers: [CONTENDED[0]!] });
+    const budgetMs = 60_000;
+    // The push takes the rest of the sync's budget: no time is left for a pause and another listing.
+    const realNow = Date.now.bind(Date);
+    const network: NetworkGit = async (cwd, args, options) => {
+      const run = await refusing.network(cwd, args, options);
+      if (args[0] === 'push') vi.spyOn(Date, 'now').mockImplementation(() => realNow() + budgetMs);
+      return run;
+    };
+
+    try {
+      const refused = await withTracker(world.a, (tracker) =>
+        syncNow(tracker, { ...syncRequestOf(grimoire.ctx, actorOf(grimoire.ctx)), budgetMs, network, pause: refusing.pause }),
+      );
+      expect(refused).toMatchObject({ state: 'pending', reason: 'failed', failure: { class: 'rejected' } });
+      expect(refused.failure?.lostRace).toBeUndefined();
+      expect(refusing.pushes()).toBe(1);
+      expect(refusing.pauses).toHaveLength(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(await ok(grimoire.core.call('sync_status', {}, grimoire.ctx))).toMatchObject({ failure: { class: 'rejected' }, retry_at: expect.any(String) });
   });
 });
