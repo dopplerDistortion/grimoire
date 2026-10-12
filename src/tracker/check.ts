@@ -27,6 +27,7 @@ import { conflictName, parseConflict } from './conflict';
 import { shardOf } from './ids';
 import { GITATTRIBUTES, GITATTRIBUTES_FILE, FORMAT_FILE, LEDGER_DIR, SESSIONS_DIR, SETTINGS_FILE, SKILL_VERSIONS_DIR, TRACKER_REF } from './layout';
 import { lineValue, parseLines } from './lines';
+import { parseProposal, PROPOSAL_PATTERN, PROPOSALS_DIR, serializeProposal } from './proposals';
 import { isQuarantineKind, QUARANTINE_KEYS } from './quarantine';
 import { parseIssue, serializeIssue } from './record';
 import { parseForward, parseTombstone, serializeForward, serializeTombstone } from './retired';
@@ -237,6 +238,11 @@ function checkKnowledge(parts: readonly string[], bytes: Buffer, formats: Record
     return formats.ledgerRecord ? formats.ledgerRecord(last.slice(0, -3), bytes) : null;
   }
   if (file.startsWith(`${SKILL_VERSIONS_DIR}/`) && parts.length === 3) return contentNamed(last, bytes, 'a skill version');
+  if (file.startsWith(`${PROPOSALS_DIR}/`) && parts.length === 3) {
+    const id = last.slice(0, -3);
+    if (!PROPOSAL_PATTERN.test(id)) return nonCanonical('a proposal is named by its id (pp- and 10 Crockford characters)');
+    return roundTrip(bytes, (b) => serializeProposal(parseProposal(id, b)));
+  }
   return undefined;
 }
 
@@ -427,12 +433,12 @@ export async function inspectTrees(root: string, tips: TrackerRefTips, formats: 
 // ---------------------------------------------------------------------------
 // History: write-once edits, foreign commits, knowledge records without trailers.
 
-/** Files grimoire writes once and never edits (spec §3, §18): comments, the attempt's files, activity entries, ledger records, skill versions. */
+/** Files grimoire writes once and never edits (spec §3, §18): comments, the attempt's files, activity entries, ledger records, skill versions, proposals. */
 function writeOnce(file: string): boolean {
   const p = file.split('/');
   if (p[0] === 'issues') return p.length === 6 && p[4] === 'comments';
   if (p[0] === 'attempts') return (p.length === 6 && ['start.md', 'issue-at-start.md', 'end.md'].includes(p[5]!)) || (p.length === 7 && p[5] === 'activity');
-  return file.startsWith('knowledge/ledger/') || file.startsWith('knowledge/skill-versions/');
+  return file.startsWith('knowledge/ledger/') || file.startsWith('knowledge/skill-versions/') || file.startsWith('knowledge/proposals/');
 }
 
 /** The trailers every grimoire commit carries (spec §3, Commits). */

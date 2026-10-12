@@ -77,32 +77,45 @@ const SKILL_PROPOSER = {
   required: ['action'],
   additionalProperties: false,
   properties: {
-    action: { enum: ['create', 'patch', 'no_action'] },
-    target: { type: 'string', description: 'the evolved skill: a new name (create) or an existing one (patch)' },
-    base_version: { type: ['string', 'null'], description: 'the skill version you were served (null for a create)' },
-    text: { type: 'string', description: 'create: the whole SKILL.md (name, description of at most 300 characters, trigger words first, then the body)' },
+    action: { enum: ['create', 'patch', 'no_action'], description: 'create a new evolved skill, patch one, or no_action when the evidence shows nothing worth proposing' },
+    target: { type: 'string', description: 'the evolved skill: a new kebab-case name of at most 55 characters (create), or an existing one you were served (patch)' },
+    base_version: { type: ['string', 'null'], description: 'patch: the skill version you were served; null for a create' },
+    text: {
+      type: 'string',
+      description: 'create: the whole SKILL.md, at most 150 lines and 8,000 characters: name and description frontmatter only (the description at most 300 characters, trigger words first), then a self-contained body',
+    },
     ops: {
       type: 'array',
-      description: 'patch: anchored edits, each anchor matching exactly once',
+      description: 'patch: anchored edits applied in order, each anchor matching exactly once; a patch changes at most half of the skill’s lines',
       items: {
         type: 'object',
         required: ['op', 'text'],
+        additionalProperties: false,
         properties: {
           op: { enum: ['append', 'replace', 'insert-after'] },
-          anchor: { type: 'string' },
+          anchor: { type: 'string', description: 'replace and insert-after: text that occurs exactly once in the skill' },
           text: { type: 'string' },
         },
       },
     },
-    citations,
+    citations: {
+      ...citations,
+      description:
+        'ids of served items the proposal rests on: at least 1 pattern page (page:<slug>) and 3 traces (trace:<handle>) from 2 issues, 2 of them failing now; only served items may be cited',
+    },
     claims: {
       type: 'object',
-      required: ['rationale'],
+      required: ['rationale', 'failures', 'expected_signal', 'provenance'],
+      additionalProperties: false,
       properties: {
         rationale: { type: 'string', maxLength: 600 },
-        failures: { type: 'array', items: { type: 'object', properties: { trace: { type: 'string' }, line: { type: 'string' } } } },
-        expected_signal: { type: 'string' },
-        provenance: { type: 'string' },
+        failures: {
+          type: 'array',
+          description: 'one line for each cited failing trace',
+          items: { type: 'object', required: ['trace', 'line'], additionalProperties: false, properties: { trace: { type: 'string' }, line: { type: 'string' } } },
+        },
+        expected_signal: { type: 'string', maxLength: 600, description: 'what should change once the skill is in use' },
+        provenance: { type: 'string', maxLength: 600, description: 'where the advice comes from' },
       },
     },
     ...reported,

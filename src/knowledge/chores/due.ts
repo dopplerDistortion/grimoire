@@ -31,6 +31,8 @@ export interface ChoreThresholds {
   readonly strikes: number;
   /** Fails among unconsumed compiles that make the Skill Proposer due. */
   readonly proposeFails: number;
+  /** Pending proposals that fill the pending slot (proposals.pending_limit): the Skill Proposer is not due then. */
+  readonly pendingLimit: number;
 }
 
 /** The verdict a pair was compiled under before its outcome flipped. */
@@ -90,7 +92,7 @@ export interface SkillProposerDue extends DueState {
   readonly compiles: readonly string[];
   /** Fail pairs among them. */
   readonly fails: number;
-  /** The pending proposal holding the slot, or null when it is free. */
+  /** The oldest pending proposal, or null when none is pending. */
   readonly pending: string | null;
 }
 
@@ -109,11 +111,14 @@ export interface ChoresDue {
  * then the slot is always free and nothing goes stale.
  */
 export interface ProposalSignals {
+  /** The oldest pending proposal, or null. */
   readonly pending: string | null;
+  /** How many proposals are pending: the slot is full at proposals.pending_limit. */
+  readonly pendingCount: number;
   staleOrLapsedSince(at: string | null): boolean;
 }
 
-export const NO_PROPOSALS: ProposalSignals = { pending: null, staleOrLapsedSince: () => false };
+export const NO_PROPOSALS: ProposalSignals = { pending: null, pendingCount: 0, staleOrLapsedSince: () => false };
 
 export interface DueOptions {
   readonly now: Date;
@@ -242,7 +247,9 @@ export async function choresDue(view: TrackerView, options: DueOptions): Promise
   const lastProposer = proposerRuns.at(-1)?.at ?? null;
   const proposerWhy = ((): DueState => {
     if (t.paused) return { due: false, why: 'the knowledge loop is paused' };
-    if (proposals.pending !== null) return { due: false, why: 'a skill proposal is pending human review' };
+    if (proposals.pendingCount >= t.pendingLimit) {
+      return { due: false, why: proposals.pendingCount === 1 ? 'a skill proposal is pending human review' : `${proposals.pendingCount} skill proposals are pending human review` };
+    }
     if (inProgress.has('skill-proposer')) return { due: false, why: 'a Skill Proposer run is in progress on this machine' };
     if (failing.size >= t.proposeFails) return { due: true, why: `${failing.size} failing traces in compiles not yet proposed from` };
     if (proposals.staleOrLapsedSince(lastProposer)) return { due: true, why: 'a proposal went stale or lapsed' };

@@ -41,6 +41,7 @@ import {
   type ServedItem,
 } from '../knowledge/chores';
 import { observedEvidence } from '../capture/evidence';
+import { proposalSignals } from '../knowledge';
 import { LockHeldError, MachineLocalStore } from '../machine-local';
 import { CHORE_KINDS, randomRunId, type ChoreKind, type TrackerStore, type TrackerView } from '../tracker';
 import type { SecretScanner } from '../scanner';
@@ -48,6 +49,7 @@ import type { Actor, CallContext } from './context';
 import { define, oneLine } from './op';
 import { s } from './schema';
 import { storeSetting } from './settings';
+import { traceFacts } from './skills';
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -66,6 +68,7 @@ export function choreThresholds(view: Pick<TrackerView, 'settings'>): ChoreThres
     batchPasses: n('chores.batch_passes'),
     strikes: n('chores.strikes'),
     proposeFails: n('chores.propose_fails'),
+    pendingLimit: n('proposals.pending_limit'),
   };
 }
 
@@ -80,7 +83,7 @@ async function kindsInProgress(store: MachineLocalStore, now: Date): Promise<Set
 export async function dueChores(tracker: TrackerStore, ctx: CallContext) {
   const view = await tracker.read();
   const now = tracker.now();
-  return choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(storeOf(tracker, ctx), now) });
+  return choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(storeOf(tracker, ctx), now), proposals: await proposalSignals(view) });
 }
 
 /**
@@ -153,7 +156,7 @@ function pageEnvelope(run: string) {
 /** Everything a run is served, against the tracker as it stands now. */
 async function servingOf(view: TrackerView, run: OpenRun, ctx: CallContext, scanner: SecretScanner, now: Date): Promise<Serving> {
   const { pairs } = await chorePairs(view, { now, thresholds: choreThresholds(view) });
-  return new Serving({ view, run, root: ctx.repo.root, scanner, pairs: new Map(pairs.map((pair) => [pair.trace, pair])) });
+  return new Serving({ view, run, root: ctx.repo.root, scanner, pairs: new Map(pairs.map((pair) => [pair.trace, pair])), traceFacts: () => traceFacts(view) });
 }
 
 export interface ChoreBrief {
@@ -203,7 +206,7 @@ export const choreStart = define({
       await checkAttemptFree(caller, view, store, ctx.person.email);
       const now = tracker.now();
       await pruneRuns(store, now);
-      const due = await choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(store, now), manual });
+      const due = await choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(store, now), manual, proposals: await proposalSignals(view) });
       const kind = pickKind(due, input.kind, origin);
       const wiki = due['wiki-maintainer'];
       const at = now.toISOString();

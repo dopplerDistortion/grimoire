@@ -68,6 +68,7 @@ describe('store settings', () => {
       'excerpts',
       'knowledge.loop',
       'link_base',
+      'proposals.pending_limit',
       'skills.delivery',
       'skills.description_max',
       'skills.max_active',
