@@ -7,12 +7,12 @@
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import { fixturePath, makeTempDir, removeDir } from '#harness';
+import { fixturePath, gitTest, makeTempDir, removeDir } from '#harness';
 import { parseSessionRecord, serializeSessionRecord } from '../../src/capture/session-record';
 import { putMachineSetting } from '../../src/core/settings';
 import { runDoctor, type DoctorReport } from '../../src/installer/doctor';
 import { MachineLocalStore } from '../../src/machine-local';
-import { openTracker } from '../../src/tracker';
+import { openTracker, trackerTips } from '../../src/tracker';
 import { countLateDrops } from '../../src/tracker/capture-stats';
 import { setExcerptMode } from '../core/capture-support';
 import { coreTest as test } from '../core/support';
@@ -182,7 +182,9 @@ describe('doctor --readers', () => {
     ]);
   });
 
-  test('is skipped when this machine caps the mode at none before the clone has a tracker: no transcript is opened', async ({ world }) => {
+  // A plain git world, not coreTest's: there clone a starts with a tracker.
+  gitTest('is skipped when this machine caps the mode at none before the clone has a tracker: no transcript is opened', async ({ world }) => {
+    expect(await trackerTips(world.a.dir)).toEqual({ local: null, remotes: new Map() });
     const claudeDir = await makeTempDir('grimoire-claude-config-');
     try {
       const project = path.join(claudeDir, 'projects', path.resolve(world.a.dir).replace(/[^a-zA-Z0-9]/g, '-'));
