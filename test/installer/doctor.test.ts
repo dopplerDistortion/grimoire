@@ -174,6 +174,25 @@ describe('store checks', SLOW, () => {
     expect(bad.find((finding) => finding.subject === forged)?.message).toContain('canonical serializer');
   });
 
+  test('a body is its verbatim bytes: CR line ends in an issue body, a page body or a session excerpt are canonical, in a frontmatter line they are not', async ({ world, grimoire }) => {
+    const human = terminal(grimoire.ctx);
+    const { id } = await ok(grimoire.core.call('create', { title: 'Written on Windows', body: 'Step one.\r\nStep two.\r\n' }, grimoire.ctx));
+    await ok(grimoire.core.call('wiki_edit', { ...PAGE, body: PAGE.body.replace(/\n/g, '\r\n'), base: null }, human));
+    const { attempt } = await ok(grimoire.core.call('claim', { id }, grimoire.ctx));
+    const start = (await trackerFiles(world)).find((file) => file.endsWith(`/${attempt}/start.md`))!;
+    const session = start.replace(/start\.md$/, 'sessions/s1.md');
+    const crlfFrontmatter = start.replace(/start\.md$/, 'sessions/s2.md');
+    await commitToTracker(world.a, {
+      // An excerpt keeps a Windows tool's output as it was.
+      [session]: '---\nclient: "claude-code"\n---\nPS> npm test\r\nok\r\n',
+      [crlfFrontmatter]: '---\r\nclient: "codex"\r\n---\r\n',
+    });
+
+    const report = await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS });
+
+    expect(report.findings).toEqual([expect.objectContaining({ kind: 'non-canonical', subject: crlfFrontmatter, message: expect.stringContaining('CR') })]);
+  });
+
   test('a record that doesn’t parse is reported unparsable, and the checks that need the merged view say they couldn’t read it', async ({ world, grimoire }) => {
     const { id } = await ok(grimoire.core.call('create', { title: 'Broken' }, grimoire.ctx));
     await commitToTracker(world.a, { [issuePath(id)]: 'not a record\n' });
