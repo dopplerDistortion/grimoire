@@ -334,6 +334,7 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
 /** The runtime verbs that aren't core ops (spec §10 Runtime): each has its own `--help`. */
 const RUNTIME_VERBS = [
   { verb: 'init', kind: 'write', policy: 'human-only', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
+  { verb: 'leave', kind: 'write', policy: 'human-only', description: 'Remove grimoire from this clone on this machine: generated output, the machine-local store, version copies and launcher, and the local tracker ref once the remote holds its tip.' },
   { verb: 'status', kind: 'read', policy: 'agent', description: 'What to know about this checkout now: sync, refreshed pointer files, Node, stale claims, the excerpt mode, the Codex hook. Writes nothing.' },
   { verb: 'doctor', kind: 'read', policy: 'agent', description: 'A report on the store, the install and capture statistics; --fix makes the single-answer repairs (content pointer files, stale locks); --readers adds the transcript readers’ structure statistics.' },
 ] as const;
