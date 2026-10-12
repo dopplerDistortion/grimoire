@@ -12,6 +12,7 @@
 // - Step 7: exactly the paths to commit: those the upgrade changes against
 //   HEAD (so a resumed upgrade reports what the interrupted run wrote too),
 //   never the person's own uncommitted work in files it leaves alone.
+import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -21,7 +22,7 @@ import { runGit } from '../git/run';
 import { MACHINE_FORMAT_RANGE, type MachineLocalStore } from '../machine-local';
 import { TRACKER_FORMAT_RANGE } from '../tracker';
 import { parseMarker } from '../tracker/marker';
-import { worktreeKey } from '../upkeep/checkout';
+import { upgradeInProgress, worktreeKey } from '../upkeep/checkout';
 import { CONFIG_PATH } from './config';
 import { MANIFEST_PATH } from './manifest';
 import type { DesiredEntry } from './pointers';
@@ -117,18 +118,49 @@ export function describeMarker(plan: MarkerPlan, range: FormatRange): string {
   }
 }
 
-/** Step 2: marks `worktree` as moving from `from` to `to`. */
-export async function writeUpgradeRecord(store: MachineLocalStore, worktree: string, from: string, to: string): Promise<void> {
-  await store.coordination.write<UpgradeRecord>(UPGRADE_RECORDS, await worktreeKey(worktree), { worktree, from, to, started_at: Date.now() });
+function sameRecord(a: UpgradeRecord | null | undefined, b: UpgradeRecord | null | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return a.from === b.from && a.to === b.to && a.started_at === b.started_at && a.token === b.token;
 }
 
-/** Once config.yml pins the new version: the upgrade is done. Every record naming `worktree` goes. */
-export async function clearUpgradeRecord(store: MachineLocalStore, worktree: string): Promise<void> {
+/**
+ * Step 2: marks `worktree` as moving from `from` to `to`, a compare-and-set
+ * against `expected` (the record this run read before its plan). Returns the
+ * record written, or null when another upgrade's record came first: this run
+ * then refuses, and leaves that one alone.
+ */
+export async function claimUpgradeRecord(store: MachineLocalStore, worktree: string, expected: UpgradeRecord | null, from: string, to: string): Promise<UpgradeRecord | null> {
+  const mine: UpgradeRecord = { worktree, from, to, started_at: Date.now(), token: randomBytes(8).toString('hex') };
+  let claimed = false;
+  await store.coordination.update<UpgradeRecord>(UPGRADE_RECORDS, await worktreeKey(worktree), async (current) => {
+    if (!sameRecord(await upgradeInProgress(store, worktree), expected)) return current;
+    claimed = true;
+    return mine;
+  });
+  return claimed ? mine : null;
+}
+
+/**
+ * Undoes a claim when the run did nothing: back to the record it replaced,
+ * unless that upgrade is done meanwhile (config.yml pins its `to`). A record
+ * another run wrote since stays as it is.
+ */
+export async function releaseUpgradeRecord(store: MachineLocalStore, worktree: string, mine: UpgradeRecord, replaced: UpgradeRecord | null, pinned: string | null): Promise<void> {
+  await store.coordination.update<UpgradeRecord>(UPGRADE_RECORDS, await worktreeKey(worktree), (current) =>
+    !sameRecord(current, mine) ? current : replaced && replaced.to !== pinned ? replaced : undefined,
+  );
+}
+
+/**
+ * Once config.yml pins `pinned`: this run's record goes, and so does any
+ * record of an upgrade to `pinned` (it is done too). A record of an upgrade to
+ * another version, written since by another run, stays.
+ */
+export async function finishUpgradeRecord(store: MachineLocalStore, worktree: string, mine: UpgradeRecord, pinned: string): Promise<void> {
   const key = await worktreeKey(worktree);
   for (const { key: name, value } of await store.coordination.list<Partial<UpgradeRecord>>(UPGRADE_RECORDS)) {
-    if (name === key || (typeof value?.worktree === 'string' && (await worktreeKey(value.worktree)) === key)) {
-      await store.coordination.remove(UPGRADE_RECORDS, name);
-    }
+    if (name !== key && !(typeof value?.worktree === 'string' && (await worktreeKey(value.worktree)) === key)) continue;
+    await store.coordination.update<UpgradeRecord>(UPGRADE_RECORDS, name, (current) => (current && (sameRecord(current, mine) || current.to === pinned) ? undefined : current));
   }
 }
 

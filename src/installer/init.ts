@@ -58,7 +58,7 @@ import {
   type RemoteListing,
   type Remotes,
 } from './preflight';
-import { readJoinRecord, writeJoinRecord, type JoinRecord } from './records';
+import { readJoinRecord, writeJoinRecord, type JoinRecord, type UpgradeRecord } from './records';
 import { existingAdapterPlacement } from './refresh';
 import { holdWorktreeLease, operationInProgress, runUpkeep, upgradeInProgress, upgradeSkipNotice, worktreeKey, type UpkeepReport } from '../upkeep';
 import { nodeMajor, readClientRuntimes } from './client-runtime';
@@ -66,14 +66,15 @@ import { codexHookState } from './codex-trust';
 import { compareSemver } from './semver';
 import { worktreePins } from './worktrees';
 import {
-  clearUpgradeRecord,
+  claimUpgradeRecord,
+  finishUpgradeRecord,
   commitCommand,
   describeMarker,
   pathsToCommit,
   planMarker,
   readStoreMarker,
   RELEASE_FORMATS,
-  writeUpgradeRecord,
+  releaseUpgradeRecord,
   type MarkerPlan,
   type ReleaseFormats,
 } from './upgrade';
@@ -902,8 +903,9 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       else skipped.push({ path: CONFIG_PATH, why });
     }
     // config.yml pins the new version: the upgrade is done, and other pins may touch this worktree again.
-    if (upgrade && (await readInstallConfig(root))?.version === version) await clearUpgradeRecord(store, root);
-    return { copy, launched, joinWrite, written, skipped };
+    const finished = upgrade === null || (await readInstallConfig(root))?.version === version;
+    if (upgrade && finished) await finishUpgradeRecord(store, root, mine!, version);
+    return { copy, launched, joinWrite, written, skipped, finished };
   };
   // From before its copy is installed until config.yml pins it, this process
   // counts as running `version`: no other process's pruning (every server's
@@ -911,20 +913,33 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   const registration = await store.processes.register({ role: 'init', client: null, worktree: root, pin: version, pathSource: null }).catch(() => null);
   let wrote: Awaited<ReturnType<typeof writeAll>>;
   let upkeep: UpkeepReport;
+  // This run's upgrade-in-progress record: a run only ever undoes or clears its own.
+  let mine: UpgradeRecord | null = null;
   try {
     // Step 2 of an upgrade: the upgrade-in-progress record, before the lease, so every other pin leaves this worktree alone from here.
-    if (upgrade) await writeUpgradeRecord(store, root, upgrade.from, version);
+    // A compare-and-set against the record this run read: another upgrade's record that came since is never overwritten.
+    if (upgrade) {
+      mine = await claimUpgradeRecord(store, root, inProgress, upgrade.from, version);
+      if (!mine) {
+        throw new GrimoireError('BUSY', `another init --upgrade started on ${root} meanwhile; nothing changed, so run init --upgrade again once it is done`, {});
+      }
+    }
+    // Nothing was done: the record goes back to what it was, unless another run's record replaced it meanwhile.
+    const undoClaim = async () => {
+      if (mine) await releaseUpgradeRecord(store, root, mine, inProgress, (await readInstallConfig(root).catch(() => null))?.version ?? null);
+    };
     // The (live store, worktree) lease upkeep's per-worktree part and doctor --fix share: held through step 6.
     const worktreeLease = await holdWorktreeLease(store, root);
     if (!worktreeLease) {
-      // Nothing was done: an upgrade that wasn't in progress before isn't now.
-      if (upgrade && !upgrade.resumed) {
-        if (inProgress) await writeUpgradeRecord(store, root, inProgress.from, inProgress.to);
-        else await clearUpgradeRecord(store, root);
-      }
+      await undoClaim();
       throw new GrimoireError('BUSY', `another grimoire process keeps working on ${root} (upkeep, doctor --fix or init); nothing changed, so run init again in a moment`, {});
     }
     try {
+      if (upgrade && (await readInstallConfig(root))?.text !== existing!.text) {
+        // The plan was made against the config.yml this run read: another run moved the checkout while this one waited.
+        await undoClaim();
+        throw new GrimoireError('BUSY', `${CONFIG_PATH} changed while init --upgrade waited (another init or a checkout moved it); nothing changed, so run init --upgrade again`, {});
+      }
       wrote = await writeAll();
     } finally {
       await worktreeLease.release().catch(() => {});
@@ -934,14 +949,15 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   } finally {
     await registration?.unregister().catch(() => {});
   }
-  const { copy, launched, joinWrite, written, skipped } = wrote;
+  const { copy, launched, joinWrite, written, skipped, finished } = wrote;
   const pruneRun = upkeep.runs.find((run) => run.part === 'prune-copies' && run.status === 'ran');
   const removed = (pruneRun?.result as { removed?: unknown } | undefined)?.removed;
   const pruned = Array.isArray(removed) ? removed.filter((version): version is string => typeof version === 'string') : [];
 
   // 8. The report; for an upgrade, step 7: exactly the paths to commit, as git sees them now.
+  // An upgrade whose config.yml write was left undone never reached its commit point: nothing to commit yet.
   if (upgrade) {
-    const paths = await pathsToCommit(root, desiredEntries(pointerOptions), planOptions);
+    const paths = finished ? await pathsToCommit(root, desiredEntries(pointerOptions), planOptions) : [];
     upgrade.commit = { paths, command: commitCommand(paths, version) };
   }
   const done = report({
@@ -966,11 +982,19 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       ...(failure ? { failure } : {}),
     }).toBody();
   }
+  if (!finished) {
+    const command = `${joinCommand(version)} --upgrade`;
+    done.error = new GrimoireError(
+      'BUSY',
+      `${CONFIG_PATH} changed while init --upgrade ran, so it was left alone and the upgrade to ${version} isn't finished: run \`${command}\` again to finish it`,
+      { upgrade: { from: upgrade!.from, to: version }, command },
+    ).toBody();
+  }
   say(
     [
       written.length > 0 ? `Wrote ${written.join(', ')}.` : 'No checkout files changed.',
       ...(skipped.length > 0 ? skipped.map((entry) => `Left alone: ${entry.path} (${entry.why}).`) : []),
-      ...(done.error ? [`NOT_SYNCED: ${done.error.message}`] : []),
+      ...(done.error ? [`${done.error.code}: ${done.error.message}`] : []),
       ...(warnings.some((w) => w.code === 'SYNC_PENDING') ? [`SYNC_PENDING: ${warnings.find((w) => w.code === 'SYNC_PENDING')!.message}`] : []),
       ...upkeep.notices,
       'Next steps:',

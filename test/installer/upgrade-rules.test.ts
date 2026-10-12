@@ -29,7 +29,7 @@ interface InitRun {
 async function initAt(
   root: string,
   version: string,
-  options: { flags?: Partial<InitFlags>; answers?: { when: RegExp; type: string }[]; extra?: Partial<InitOptions> } = {},
+  options: { flags?: Partial<InitFlags>; answers?: { when: RegExp; type: string | (() => Promise<string>) }[]; extra?: Partial<InitOptions> } = {},
 ): Promise<InitRun> {
   const said: string[] = [];
   const answers = options.answers ? [...options.answers] : null;
@@ -39,7 +39,8 @@ async function initAt(
           said.push(question);
           const at = answers.findIndex((answer) => answer.when.test(question));
           if (at < 0) throw new Error(`unexpected question: ${question}`);
-          return answers.splice(at, 1)[0]!.type;
+          const { type } = answers.splice(at, 1)[0]!;
+          return typeof type === 'string' ? type : type();
         },
       }
     : null;
@@ -68,6 +69,13 @@ async function installOld(clone: Clone): Promise<void> {
 async function changedPaths(checkout: Checkout): Promise<string[]> {
   const out = await checkout.git(['status', '--porcelain', '--untracked-files=all']);
   return out === '' ? [] : out.split('\n').map((line) => line.slice(3)).sort();
+}
+
+/** A promise a test opens by hand. */
+function gate<T = void>(): { opened: Promise<T>; open: (value: T) => void } {
+  let open!: (value: T) => void;
+  const opened = new Promise<T>((resolve) => (open = resolve));
+  return { opened, open };
 }
 
 const pinOf = async (root: string) => /^version: (.+)$/m.exec(await readFile(path.join(root, '.grimoire/config.yml'), 'utf8'))?.[1];
@@ -120,6 +128,74 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
     await expect(refused).rejects.toMatchObject({ code: 'NOT_SYNCED', details: { remote: 'origin' } });
     expect(await pinOf(world.a.dir)).toBe(OLD);
     expect((await listCopies(store)).map((copy) => copy.version)).toEqual([OLD]);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+  });
+
+  gitTest('an upgrade that read no record before another one wrote its own refuses BUSY, and leaves that one’s record alone', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const asked = gate();
+    const consent = gate<string>();
+    // The second upgrade reads the records, then waits at its consent.
+    const second = initAt(world.a.dir, NEW, { flags: { upgrade: true }, answers: [{ when: /Go ahead\?/, type: () => (asked.open(), consent.opened) }] });
+    second.catch(() => {});
+    await asked.opened;
+    // The first one writes its record and holds the worktree lease, mid-upgrade.
+    const atStep2 = gate();
+    const carryOn = gate();
+    const first = initAt(world.a.dir, NEW, { flags: { upgrade: true }, extra: { onUpgradeStep: async (step) => { if (step === 2) { atStep2.open(); await carryOn.opened; } } } });
+    await atStep2.opened;
+
+    consent.open('y');
+
+    await expect(second).rejects.toMatchObject({ code: 'BUSY' });
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([{ key: expect.any(String), value: expect.objectContaining({ from: OLD, to: NEW }) }]);
+    carryOn.open();
+    await first;
+    expect(await pinOf(world.a.dir)).toBe(NEW);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+  });
+
+  gitTest('when config.yml moves while an upgrade waits at its consent, the upgrade refuses BUSY with nothing written and no record left behind', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const MID = '1.0.0-test.3';
+    const asked = gate();
+    const consent = gate<string>();
+    const waiting = initAt(world.a.dir, NEW, { flags: { upgrade: true }, answers: [{ when: /Go ahead\?/, type: () => (asked.open(), consent.opened) }] });
+    waiting.catch(() => {});
+    await asked.opened;
+    // Meanwhile another release's upgrade runs to the end.
+    await initAt(world.a.dir, MID, { flags: { upgrade: true } });
+
+    consent.open('y');
+
+    await expect(waiting).rejects.toMatchObject({ code: 'BUSY' });
+    expect(await pinOf(world.a.dir)).toBe(MID);
+    expect((await listCopies(store)).map((copy) => copy.version)).not.toContain(NEW);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+  });
+
+  gitTest('when the step 6 write of config.yml finds it changed, the upgrade reports itself unfinished: an error, no commit command, and the record stays for the re-run', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const config = path.join(world.a.dir, '.grimoire/config.yml');
+    const { writeFile } = await import('node:fs/promises');
+    // An editor saves config.yml between steps 5 and 6.
+    const edited = initAt(world.a.dir, NEW, { flags: { upgrade: true }, extra: { onUpgradeStep: async (step) => { if (step === 5) await writeFile(config, `${await readFile(config, 'utf8')}# a note\n`); } } });
+
+    const { report, said } = await edited;
+
+    expect(report.error).toMatchObject({ code: 'BUSY', message: expect.stringContaining(`npx @goksening/grimoire@${NEW} init --upgrade`) });
+    expect(report.upgrade!.commit).toEqual({ paths: [], command: null });
+    expect(said.slice(said.lastIndexOf('Next steps:'))).not.toContain('Commit the upgrade');
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([{ key: expect.any(String), value: expect.objectContaining({ from: OLD, to: NEW }) }]);
+
+    // The same command finishes it.
+    const rerun = await initAt(world.a.dir, NEW, { flags: { upgrade: true } });
+    expect(rerun.report.error).toBeUndefined();
+    expect(await pinOf(world.a.dir)).toBe(NEW);
     expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
   });
 

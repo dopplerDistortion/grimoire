@@ -55,5 +55,5 @@ export { applyFiles, planFiles, type EntryAction, type FilePlan, type PlannedEnt
 export { existingAdapterPlacement, planContentRefresh, refreshContentPointers, type ContentPlan, type ContentRefresh, type ContentSkip } from './refresh';
 export { disclosureLines } from '../core/settings';
 export { runInit, type InitFlags, type InitOptions, type InitReport, type Prompter, type UpgradeReport, type UpgradeStep } from './init';
-export { RELEASE_FORMATS, clearUpgradeRecord, pathsToCommit, planMarker, readStoreMarker, writeUpgradeRecord, type FormatRange, type MarkerPlan, type MarkerVerdict, type ReleaseFormats } from './upgrade';
+export { RELEASE_FORMATS, claimUpgradeRecord, finishUpgradeRecord, pathsToCommit, planMarker, readStoreMarker, releaseUpgradeRecord, type FormatRange, type MarkerPlan, type MarkerVerdict, type ReleaseFormats } from './upgrade';
 export { runningPackage } from './source';
