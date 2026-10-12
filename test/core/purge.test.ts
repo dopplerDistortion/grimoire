@@ -239,6 +239,34 @@ describe('a purge across two clones', () => {
   });
 });
 
+describe('two clones purging one session record differently', () => {
+  coreTest('the purge that took the facts stands over the one that kept them, whichever clone wrote it, and on both clones', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const { id } = await ok(core.call('create', { title: 'Shared' }, ctx));
+    const { attempt } = await ok(core.call('claim', { id }, ctx));
+    await bothClones(world);
+    const tombstone = (by: string, facts: 'kept' | 'purged') =>
+      `---\nby: "${by}@example.com"\nat: "2026-10-11T04:00:00.000Z"\nreason: "r"\nfacts: "${facts}"\n---\n` + (facts === 'kept' ? '---\nreach: {"at":"2026-10-11T03:20:00.000Z","ref":"7"}\n---\n' : '');
+    const [first, second] = ['0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'].map((key) => `purges/${attempt}/${key}.md`) as [string, string];
+    // Each clone took the facts of one record and kept the other's: whatever the blob hashes, one pair would go the wrong way.
+    await commitToTracker(world.a, { [first]: tombstone('alice', 'kept'), [second]: tombstone('alice', 'purged') });
+    await commitToTracker(world.b, { [first]: tombstone('bob', 'purged'), [second]: tombstone('bob', 'kept') });
+    const bob = agentContext(world.b);
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    await ok(core.call('comment', { id, body: 'fold on b' }, bob));
+    await pushTracker(world.b);
+    await fetchTracker(world.a);
+    await ok(core.call('comment', { id, body: 'fold on a' }, ctx));
+
+    for (const clone of [world.a, world.b]) {
+      const tip = (await trackerTip(clone))!;
+      expect(await trackerFile(clone, tip, first)).toBe(tombstone('bob', 'purged'));
+      expect(await trackerFile(clone, tip, second)).toBe(tombstone('alice', 'purged'));
+    }
+  });
+});
+
 describe('the human-only gate', () => {
   coreTest('purge from MCP, under an agent marker or without a TTY gives HUMAN_ONLY; neither op is an MCP tool', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
