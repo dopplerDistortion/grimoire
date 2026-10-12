@@ -6,7 +6,7 @@
 import type { ReconcileReport } from './reconcile';
 import { strayEditNotice } from './stray';
 
-export { mayHoldGeneratedOutput, reconcileWorktree, MOVED_ASIDE, type ReconcileMode, type ReconcileReport } from './reconcile';
+export { existingFolders, mayHoldGeneratedOutput, reconcileWorktree, MOVED_ASIDE, type ReconcileMode, type ReconcileReport } from './reconcile';
 export {
   cachedServedSet,
   ledgerMayExist,

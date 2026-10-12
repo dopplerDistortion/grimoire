@@ -66,7 +66,7 @@ export interface ReconcileReport {
 /** Records kind: each folder reconcile moved aside, `{worktree, path, to, at}`. */
 export const MOVED_ASIDE = 'moved-aside';
 
-type FolderKind = { readonly kind: 'copy' } | { readonly kind: 'stub'; readonly client: StubClient };
+export type FolderKind = { readonly kind: 'copy' } | { readonly kind: 'stub'; readonly client: StubClient };
 
 interface Wanted {
   readonly skill: ServedSkill;
@@ -377,7 +377,7 @@ export async function mayHoldGeneratedOutput(worktree: string): Promise<boolean>
 }
 
 /** The generated folders that may exist in `worktree`: every copy folder, and every `grimoire-*` stub folder but the chore carriers. */
-async function existingFolders(worktree: string): Promise<{ folder: string; skill: string; kind: FolderKind }[]> {
+export async function existingFolders(worktree: string): Promise<{ folder: string; skill: string; kind: FolderKind }[]> {
   const folders: { folder: string; skill: string; kind: FolderKind }[] = [];
   const names = async (root: string): Promise<string[]> => {
     if ((await linkedComponent(worktree, root)) !== null) return [];
