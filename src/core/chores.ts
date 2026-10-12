@@ -66,7 +66,7 @@ export function choreThresholds(view: Pick<TrackerView, 'settings'>): ChoreThres
   };
 }
 
-const storeOf = (tracker: TrackerStore, ctx: CallContext) => new MachineLocalStore(tracker.location.commonDir, ctx.repo.root);
+export const storeOf = (tracker: TrackerStore, ctx: CallContext) => new MachineLocalStore(tracker.location.commonDir, ctx.repo.root);
 
 /** The chore kinds with a live run on this machine. */
 async function kindsInProgress(store: MachineLocalStore, now: Date): Promise<Set<ChoreKind>> {
@@ -109,7 +109,7 @@ export async function exposedActor(store: MachineLocalStore, ctx: CallContext, a
   return { ...rest, chore_exposure: basis };
 }
 
-const KIND_NAMES: Readonly<Record<ChoreKind, string>> = { 'wiki-maintainer': 'Wiki Maintainer', 'skill-proposer': 'Skill Proposer' };
+export const KIND_NAMES: Readonly<Record<ChoreKind, string>> = { 'wiki-maintainer': 'Wiki Maintainer', 'skill-proposer': 'Skill Proposer' };
 
 function notDue(why: string, kinds?: Record<string, string>): GrimoireError {
   return new GrimoireError('NOT_DUE', `no chore to run: ${why}`, { why, ...(kinds ? { kinds } : {}) });
@@ -257,7 +257,7 @@ async function withStartLock<T>(store: MachineLocalStore, fn: () => Promise<T>):
 }
 
 /** The run `id` on this machine, held by the calling context; RUN_SUPERSEDED for an expired one a newer run replaced. */
-async function heldRun(store: MachineLocalStore, ctx: CallContext, id: string, now: Date): Promise<OpenRun> {
+export async function heldRun(store: MachineLocalStore, ctx: CallContext, id: string, now: Date): Promise<OpenRun> {
   const run = await readRun(store, id.trim());
   if (!run) throw new GrimoireError('NOT_FOUND', `there is no chore run ${id} on this machine`, { run: id });
   if (choreContextKey(ctx) !== run.context) {

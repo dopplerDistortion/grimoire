@@ -18,6 +18,10 @@ export { CHORE_AGENT_TYPE, checkAttemptFree, choreContextKey, classifyCaller, ty
 export {
   EXPOSURE_MARKS,
   EXPOSURE_TTL_MS,
+  INVALID_RESULTS,
+  keepInvalidResult,
+  logNoPattern,
+  type InvalidResult,
   LEASE_MS,
   OPEN_RUNS,
   SERVED_LOGS,
@@ -44,3 +48,4 @@ export {
 export { PAGE_LIMIT, pageCount, pageOf, pageStart, Serving, type Page, type ServedItem, type ServingContext } from './serving';
 export { activeQuarantine, flaggedPages, type ActiveQuarantine } from './quarantine';
 export { OUTPUT_SCHEMAS } from './schemas';
+export { checkCompile, PAGE_WRITE_LIMIT, writeCompile, type CompileCheck, type CompileContext, type CompilePlan, type PlannedPage, type Rejection } from './compile';

@@ -125,6 +125,7 @@ export function compileRecord(id: string, at: string, pairs: readonly (readonly 
     proposal: null,
     reasons: [],
     pairs: [],
+    resolved: [],
   };
 }
 

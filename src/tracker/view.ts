@@ -485,9 +485,9 @@ export class Draft implements TrackerDraft {
     private readonly storeCommentMs = 0,
     private readonly randomHandle: () => string = randomAttemptHandle,
   ) {
-    this.wiki = new WikiDraftState(base.wiki, now);
-    this.quarantine = new QuarantineDraftState(base.quarantine, now);
     this.choreRuns = new ChoreRunDraftState(base.choreRuns);
+    this.wiki = new WikiDraftState(base.wiki, now, () => this.choreRuns.records());
+    this.quarantine = new QuarantineDraftState(base.quarantine, now);
   }
 
   get tip(): string {

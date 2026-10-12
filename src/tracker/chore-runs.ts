@@ -89,6 +89,8 @@ export interface ChoreRunRecord {
   readonly reasons: readonly string[];
   /** Failed compiles: the pair ids it was served (`<trace>@<outcome>`), which the 2-strike rule counts. */
   readonly pairs: readonly string[];
+  /** Compiled: the set-aside sides of conflicted pages its reconciling writes resolved, as `<slug>/<side id>`. */
+  readonly resolved: readonly string[];
   /** Keys this release doesn't know, as their raw value text. */
   readonly extra: Readonly<Record<string, string>>;
 }
@@ -111,6 +113,7 @@ const KEYS = [
   'proposal',
   'reasons',
   'pairs',
+  'resolved',
 ] as const;
 const KNOWN: ReadonlySet<string> = new Set(KEYS);
 
@@ -141,6 +144,7 @@ export function serializeChoreRun(record: NewChoreRun | ChoreRunRecord): Buffer 
     proposal: record.proposal,
     reasons: [...record.reasons],
     pairs: sortedUnique(record.pairs),
+    resolved: sortedUnique(record.resolved),
   };
   const lines = KEYS.map((key) => formatLine(key, values[key]));
   const extra = 'extra' in record ? record.extra : {};
@@ -188,6 +192,7 @@ export function parseChoreRun(id: string, bytes: Buffer): ChoreRunRecord {
     proposal: strOrNull(values.get('proposal')),
     reasons: strings(values.get('reasons')),
     pairs: sortedUnique(strings(values.get('pairs'))),
+    resolved: sortedUnique(strings(values.get('resolved'))),
     extra,
   };
 }
