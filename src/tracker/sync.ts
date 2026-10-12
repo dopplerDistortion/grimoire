@@ -133,7 +133,9 @@ const RACE_PAUSE_MS = 100;
  * many rejections in a row at most, before it counts as the remote's refusal
  * (`rejected`, which backs off): a ref lock's holder that lets go without a
  * push of its own (a server-side pack-refs, say) gets its moment, and a
- * refusal (a lock left stale) fails within a few rounds rather than ten.
+ * refusal fails within a few rounds rather than ten: a lock left stale, or a
+ * push URL (`pushurl`, `pushInsteadOf`) that reaches other refs than the
+ * fetch URL lists, where even `fetch first` comes with no move to fetch.
  */
 const UNMOVED_REJECTIONS = 3;
 /** The least pause before a retry once a rejection may be a held lock: its holder had it for git's whole lock timeout already. */
@@ -284,7 +286,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
   };
 
   /** The last push's rejection, which only a remote that moved since makes a lost race: the tip it saw, and the failure. */
-  let contended: { readonly tracker: string | null; readonly failure: SyncFailure } | null = null;
+  let rejection: { readonly tracker: string | null; readonly failure: SyncFailure } | null = null;
   /** Rejections in a row the remote's next listing showed no move after. */
   let unmoved = 0;
   for (let round = 1; ; round++) {
@@ -293,11 +295,11 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     if (listing.code !== 0 || listing.timedOut) return failed('ls-remote', listing);
     const { head, tracker } = parseListing(listing.stdout);
     // No push raced the last one: a lock let go of, or the remote refusing it (a lock left stale, say).
-    if (contended !== null) {
-      unmoved = contended.tracker === tracker ? unmoved + 1 : 0;
-      if (unmoved >= UNMOVED_REJECTIONS) return outcome({ state: 'pending', reason: 'failed', failure: contended.failure });
+    if (rejection !== null) {
+      unmoved = rejection.tracker === tracker ? unmoved + 1 : 0;
+      if (unmoved >= UNMOVED_REJECTIONS) return outcome({ state: 'pending', reason: 'failed', failure: rejection.failure });
     }
-    contended = null;
+    rejection = null;
 
     // 2. Fetch it with the explicit refspec, deepening a shallow history.
     refs = await host.trackerRefs();
@@ -388,10 +390,10 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     const said = remoteLines(push.stderr);
     const rejected: SyncFailure = { class: 'rejected', message: recordable(said ? `${reason}: ${said}` : reason) };
     if (race && round < PUSH_ROUNDS) {
-      const pauseMs = Math.max(race === 'contended' ? LOCK_PAUSE_MS : 0, Math.random() * RACE_PAUSE_MS * round);
+      const pauseMs = Math.max(race === 'contended' || unmoved > 0 ? LOCK_PAUSE_MS : 0, Math.random() * RACE_PAUSE_MS * round);
       if (spec.deadline === undefined || Date.now() + pauseMs < spec.deadline) {
         await (spec.pause ?? sleep)(pauseMs);
-        if (race === 'contended') contended = { tracker, failure: rejected };
+        rejection = { tracker, failure: rejected };
         continue;
       }
     }
