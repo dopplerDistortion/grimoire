@@ -87,6 +87,8 @@ export interface CoreOptions {
   readonly clock?: () => Date;
   /** Draws an issue id suffix of the given length (default: crypto-random Crockford). */
   readonly randomIdSuffix?: (length: number) => string;
+  /** Draws an attempt handle (default: crypto-random); tests pin it. */
+  readonly randomAttemptHandle?: () => string;
   /** How long one write may keep retrying before BUSY (default ~10 s). */
   readonly writeBudgetMs?: number;
   /** The secret scanner for debriefs (default: the bundled rules). */
@@ -338,6 +340,7 @@ export function createCore(options: CoreOptions = {}): Core {
       tracker = openTracker(root, {
         ...(options.clock ? { clock: options.clock } : {}),
         ...(options.randomIdSuffix ? { randomIdSuffix: options.randomIdSuffix } : {}),
+        ...(options.randomAttemptHandle ? { randomAttemptHandle: options.randomAttemptHandle } : {}),
         ...(options.writeBudgetMs !== undefined ? { budgetMs: options.writeBudgetMs } : {}),
       });
       tracker.catch(() => trackers.delete(root));

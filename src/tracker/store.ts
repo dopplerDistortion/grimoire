@@ -66,6 +66,8 @@ export interface TrackerOptions {
   readonly clock?: () => Date;
   /** Draws an id suffix of the given length (default: crypto-random Crockford). */
   readonly randomIdSuffix?: (length: number) => string;
+  /** Draws an attempt handle (default: crypto-random); tests pin it. */
+  readonly randomAttemptHandle?: () => string;
   /** How long one write may keep retrying before BUSY (default ~10 s). */
   readonly budgetMs?: number;
   /** How long a local git may say nothing before it is killed as stuck (default GIT_STALL_MS). */
@@ -652,7 +654,7 @@ class GitTrackerStore implements TrackerStore {
       if (replay) return { result: replay.result as R, commit: null, replayed: true, sealed: false };
     }
     checkTrackerMarker(snapshot.marker);
-    const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs);
+    const draft = new Draft(snapshot, now, () => this.takenIds(snapshot, tips), this.randomSuffix, this.commentMs, this.options.randomAttemptHandle);
     const outcome = await body(draft);
     const edits = draft.edits();
     if (spec.idempotency) {

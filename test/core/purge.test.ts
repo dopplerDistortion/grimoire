@@ -170,6 +170,21 @@ describe('purging a trace', () => {
     expect(await world.a.git(['merge-base', '--is-ancestor', pushedTip, TRACKER_REF]).then(() => true)).toBe(true);
   });
 
+  coreTest('a purged handle stays taken: a new claim that draws it draws again', async ({ grimoire }) => {
+    const handles = ['at-k1m0x2', 'at-k1m0x2', 'at-c4ndy5'];
+    const core = grimoire.makeCore({ randomAttemptHandle: () => handles.shift()! });
+    const { ctx } = grimoire;
+    const { attempt } = await endedAttempt(core, ctx);
+    expect(attempt).toBe('at-k1m0x2');
+    await ok(core.call('purge_trace', { attempt, reason: 'secret' }, terminal(ctx)));
+    const { id } = await ok(core.call('create', { title: 'Next' }, ctx));
+
+    const claim = await ok(core.call('claim', { id }, ctx));
+
+    expect(claim.attempt).toBe('at-c4ndy5');
+    expect(JSON.stringify(await core.call('show', { ref: id }, ctx))).toContain('at-c4ndy5');
+  });
+
   coreTest('purging a pushed trace again still says pushed history keeps it', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     const { id, attempt } = await endedAttempt(core, ctx);
