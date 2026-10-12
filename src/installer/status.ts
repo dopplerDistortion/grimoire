@@ -14,6 +14,7 @@ import { DEFAULT_STALE_AFTER_MS, staleCutoff } from '../core/stale';
 import { GrimoireError } from '../errors';
 import { findGitDirs, MachineLocalStore, type GitDirs, type Json } from '../machine-local';
 import { openTracker, type TrackerStore, type TrackerView } from '../tracker';
+import { runnerStatus } from '../runner';
 import { refreshedPointerFiles, refreshNotice } from '../upkeep';
 import { VERSION } from '../version';
 import { nodeMajor, pathSourceOf, readClientRuntimes } from './client-runtime';
@@ -195,8 +196,19 @@ const strayFact: StatusFact = {
   },
 };
 
+/**
+ * The runner (spec §16 Caps, Billing guard): whether one is enabled, its
+ * runs in the last 24 hours against the daily cap, the 6 h pause, the auth
+ * method its runs bill (an allowed API-billing method shown as such), and how
+ * the last run ended. The client is never started for it.
+ */
+const runnerFact: StatusFact = {
+  key: 'runner',
+  read: ({ store, now }) => runnerStatus(store, now),
+};
+
 /** Every fact this release reports, in order. */
-export const STATUS_FACTS: readonly StatusFact[] = [syncFact, refreshedFact, strayFact, nodeFact, staleFact, excerptFact, codexFact];
+export const STATUS_FACTS: readonly StatusFact[] = [syncFact, refreshedFact, strayFact, nodeFact, staleFact, excerptFact, codexFact, runnerFact];
 
 /** Reads every fact of `root`. Writes nothing. */
 export async function readStatus(options: StatusOptions): Promise<{ report: StatusReport; lines: string[] }> {
