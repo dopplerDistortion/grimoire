@@ -164,6 +164,9 @@ describe('chore_submit: a Wiki Maintainer result', () => {
     // The record: no free text, the consumption map without the no_pattern reason, page versions, served ids and hashes.
     const text = await trackerFile(world.a, tip, record);
     expect(text).not.toContain('IGNORE-ME');
+    // Nowhere on the tracker: the no_pattern reason is never committed.
+    expect(await world.a.git(['grep', '-c', 'IGNORE-ME', tip]).catch(() => 'no match')).toBe('no match');
+    expect(await world.a.git(['log', '-p', '--format=%B', TRACKER_REF])).not.toContain('IGNORE-ME');
     expect(text).not.toContain('Fixed port collisions');
     const served = await servedLog(new MachineLocalStore(path.join(world.a.dir, '.git')), brief.run);
     const versions = {
