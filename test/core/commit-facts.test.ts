@@ -142,6 +142,51 @@ describe('observed commits', { timeout: 180_000 }, () => {
       expect(flagged(resolved)).toBe(true);
     },
   );
+
+  commitTest(
+    'a clean git merge that makes a commit is observed, flagged when its skill file blends both sides; a fast-forward makes none',
+    async ({ world, grimoire, capture, session }) => {
+      const { core } = session;
+      const skill = '.grimoire/skills/notes/SKILL.md';
+      const before = '2026-10-12T12:38:00Z';
+      await commitAt(world.a, before, { [skill]: 'a\nb\nc\nd\ne\n' }, 'Base');
+      const main = await world.a.git(['rev-parse', '--abbrev-ref', 'HEAD']);
+      await gitAt(world.a, before, ['checkout', '--quiet', '-b', 'theirs']);
+      await commitAt(world.a, before, { [skill]: 'A\nb\nc\nd\ne\n' }, 'Their first line');
+      // A merge someone made before, on a branch HEAD can fast-forward to.
+      await gitAt(world.a, before, ['checkout', '--quiet', '-b', 'side', main]);
+      await commitAt(world.a, before, { 'side.txt': 'x\n' }, 'Side');
+      await gitAt(world.a, before, ['checkout', '--quiet', '-b', 'ahead', main]);
+      await gitAt(world.a, before, ['merge', '--quiet', '--no-ff', '-m', 'Ahead', 'side']);
+      const ahead = await world.a.git(['rev-parse', 'HEAD']);
+      await gitAt(world.a, before, ['checkout', '--quiet', main]);
+
+      capture.at('2026-10-12T12:39:05.000Z');
+      const id = await created(core, grimoire.ctx, 'Merges');
+      const claim = await core.call('claim', { id }, claudeCallIn(grimoire.ctx, SESSION, LAUNCH));
+      if (!claim.ok) throw new Error(JSON.stringify(claim.error));
+      const attempt = claim.result.attempt;
+      // All inside the main line's Agent call. A fast-forward moves HEAD to a commit made before.
+      expect((await gitAt(world.a, '2026-10-12T12:39:10Z', ['merge', '--quiet', '--ff-only', 'ahead'])).code).toBe(0);
+      const direct = await commitAt(world.a, '2026-10-12T12:39:11Z', { [skill]: 'a\nb\nc\nd\nE\n' }, 'Our last line');
+      // git merges both edits on its own: the merged file matches neither parent.
+      expect((await gitAt(world.a, '2026-10-12T12:39:12Z', ['merge', '--quiet', '--no-ff', '-m', 'Blend', 'theirs'])).code).toBe(0);
+      const blend = await world.a.git(['rev-parse', 'HEAD']);
+      expect(await world.a.git(['show', `HEAD:${skill}`])).toBe('A\nb\nc\nd\nE');
+      capture.at('2026-10-12T12:39:30.000Z');
+
+      await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCallIn(grimoire.ctx, SESSION, 'toolu_close'));
+
+      const [record] = await sessionRecords(world.a, id, attempt);
+      const commits = record!.fields.commits as { hash: string; agent_skill_edit?: true; subject?: string }[];
+      expect(commits.map((commit) => [commit.hash, commit.agent_skill_edit ?? null])).toEqual([
+        ['dba2f59', null],
+        [direct, true],
+        [blend, true],
+      ]);
+      expect(JSON.stringify(commits)).not.toContain(ahead);
+    },
+  );
 });
 
 describe('referenced commits', { timeout: 180_000 }, () => {

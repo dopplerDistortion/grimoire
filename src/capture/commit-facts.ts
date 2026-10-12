@@ -6,7 +6,8 @@
 //   running `git commit` (`--amend` included), `cherry-pick` or `revert`, in
 //   the context's window or a subagent launched in it; or a creating
 //   HEAD-reflog entry in the session's worktree timed inside one of the
-//   context's tool calls. Hashes printed by `log`, `show`, `pull`, `branch` or
+//   context's tool calls (a merge commit git made on its own, by `merge` or
+//   `pull`, included; a fast-forward or a rebase creates none). Hashes printed by `log`, `show`, `pull`, `branch` or
 //   `worktree` never count: only a creating command's result is read.
 // - `via: referenced`, in `end.md`: a commit on any branch of the clone whose
 //   `Refs:` trailer names the issue, with a commit time inside the attempt.
@@ -127,18 +128,29 @@ export interface ReflogCreation {
   readonly at: number;
 }
 
-/** Reflog subjects of the creating verbs: `commit:`, `commit (initial|amend|merge):`, `cherry-pick:`, `revert:`. */
+/** Reflog subjects of the committing verbs: `commit:`, `commit (initial|amend|merge):`, `cherry-pick:`, `revert:`. */
 const CREATING_REFLOG = /^(?:commit(?: \((?:initial|amend|merge)\))?|cherry-pick|revert):/;
+/**
+ * Reflog subjects of a merge git may finish on its own: `merge <what>: …`, and
+ * `pull[ <args>]: …` merging what it fetched. Only one whose entry is a merge
+ * commit created one: a fast-forward moves HEAD to a commit made before. A
+ * rebase (`rebase (pick): …`, `pull --rebase (pick): …`) creates none either:
+ * it replays commits already made, by whoever made them.
+ */
+const MERGING_REFLOG = /^(?:merge|pull)(?: [^:(]*)?:/;
 const REFLOG_ENTRIES = 5_000;
 
 /** The creating entries of `worktree`'s own HEAD reflog, newest first; empty when it can't be read. */
 export async function reflogCreations(worktree: string, options: { stallMs?: StallLimit } = {}): Promise<ReflogCreation[]> {
-  const run = await runGit(worktree, ['log', '-g', `-n${REFLOG_ENTRIES}`, '--date=unix', '--format=%H%x1f%gd%x1f%gs', 'HEAD', '--'], options);
+  const run = await runGit(worktree, ['log', '-g', `-n${REFLOG_ENTRIES}`, '--date=unix', '--format=%H%x1f%P%x1f%gd%x1f%gs', 'HEAD', '--'], options);
   if (run.code !== 0) return [];
   const entries: ReflogCreation[] = [];
   for (const line of run.stdout.toString('utf8').split('\n')) {
-    const [hash, selector, subject] = line.split('\x1f');
-    if (!hash || selector === undefined || subject === undefined || !CREATING_REFLOG.test(subject)) continue;
+    const [hash, parents, selector, subject] = line.split('\x1f');
+    if (!hash || parents === undefined || selector === undefined || subject === undefined) continue;
+    // A fast-forward can land on a merge someone else made: its subject tells it apart.
+    const merged = MERGING_REFLOG.test(subject) && !subject.endsWith(': Fast-forward') && parents.split(' ').filter(Boolean).length >= 2;
+    if (!merged && !CREATING_REFLOG.test(subject)) continue;
     const seconds = /@\{(\d+)\}$/.exec(selector)?.[1];
     if (seconds !== undefined) entries.push({ hash, at: Number(seconds) * 1000 });
   }
