@@ -38,6 +38,8 @@ const OP_EFFECTS: ReadonlyMap<string, OpEffect> = new Map<string, OpEffect>([
       // The wiki (spec §17) and trace quarantine.
       'wiki-edit',
       'compile',
+      // A Skill Proposer run's end: its proposal, no_action or failure (spec §16).
+      'propose',
       'quarantine',
       'unquarantine',
     ] as const

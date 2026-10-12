@@ -47,7 +47,21 @@ export {
   type ServedEntry,
   type ServedLog,
 } from './runs';
-export { PAGE_LIMIT, pageCount, pageOf, pageStart, Serving, type Page, type ServedItem, type ServingContext } from './serving';
+export { handwritten, PAGE_LIMIT, pageCount, pageOf, pageStart, Serving, type Page, type ServedItem, type ServingContext } from './serving';
 export { activeQuarantine, flaggedPages, type ActiveQuarantine } from './quarantine';
 export { OUTPUT_SCHEMAS } from './schemas';
 export { checkCompile, PAGE_WRITE_LIMIT, writeCompile, type CompileCheck, type CompileContext, type CompilePlan, type PlannedPage, type Rejection } from './compile';
+export {
+  addedTokens,
+  checkProposal,
+  EVIDENCE,
+  MAX_CHANGED_SHARE,
+  MAX_SKILL_CHARS,
+  MAX_SKILL_LINES,
+  riskFlags,
+  type AddedToken,
+  type NoActionPlan,
+  type ProposalPlan,
+  type ProposeCheck,
+  type ProposeContext,
+} from './propose';
