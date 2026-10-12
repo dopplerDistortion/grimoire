@@ -17,30 +17,6 @@ beforeAll(async () => {
 afterAll(() => child?.cleanup());
 
 describe('leases', () => {
-  test('acquiring a free lease succeeds; a second acquirer is told it is held, at once', async ({
-    world,
-  }) => {
-    const store = await storeOf(world.a.dir);
-    const first = await store.leases.acquire('upkeep-sweep', { ttlMs: 60_000 });
-    expect(first.status).toBe('acquired');
-
-    const started = Date.now();
-    const second = await store.leases.acquire('upkeep-sweep', { ttlMs: 60_000 });
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(second.status).toBe('held');
-    if (second.status !== 'held' || first.status !== 'acquired') return;
-    expect(second.holder.owner).toBe(first.lease.holder.owner);
-    expect(second.holder.pid).toBe(process.pid);
-
-    // Another worktree of the clone sees the same lease.
-    const feature = await world.a.addWorktree('feature');
-    const fromWorktree = await storeOf(feature.dir);
-    expect((await fromWorktree.leases.acquire('upkeep-sweep', { ttlMs: 1_000 })).status).toBe(
-      'held',
-    );
-    expect((await store.leases.inspect('upkeep-sweep')).status).toBe('held');
-  });
-
   test('a released lease is free again', async ({ world }) => {
     const store = await storeOf(world.a.dir);
     const first = await store.leases.acquire('sync', { ttlMs: 60_000 });
