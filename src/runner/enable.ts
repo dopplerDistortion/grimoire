@@ -93,6 +93,8 @@ export interface EnableOptions {
    * a token or a cloud provider (the interactive enable): true allows it.
    */
   readonly allowBilling?: (why: string) => Promise<boolean>;
+  /** Asked once the preflight passed, before anything is stored (the typed confirmation): false stores nothing. */
+  readonly confirm?: (runner: RunnerConfig) => Promise<boolean>;
 }
 
 export interface EnableResult {
@@ -145,6 +147,9 @@ export async function enableRunner(options: EnableOptions): Promise<EnableResult
     enabled_at: (options.now?.() ?? new Date()).toISOString(),
     auth_method: checked.auth_method,
   };
+  if (options.confirm && !(await options.confirm(runner))) {
+    throw new GrimoireError('INVALID', `runner enable was not confirmed: type ${options.kind} exactly to run it; nothing changed`, { fields: { confirmation: `must be ${options.kind}` } });
+  }
   await writeRunnerConfig(store, runner);
   return { runner, warnings: enableWarnings(options.kind), ...(checked.mcp_servers ? { mcp_servers: checked.mcp_servers } : {}) };
 }

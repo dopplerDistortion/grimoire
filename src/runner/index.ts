@@ -5,7 +5,7 @@
 export { RUNNER_KINDS, isRunnerKind, readRunnerConfig, type RunnerConfig, type RunnerKind } from './config';
 export { capState, RUNS_PER_DAY, PAUSE_MS, FAILURES_BEFORE_PAUSE, type CapState, type LastRun } from './caps';
 export { disableRunner, enableRunner, enableWarnings, findBinary, type EnableOptions, type EnableResult } from './enable';
-export { runChores, SPAWN_TIMEOUT_MS, type ChoreRunReport, type RunChoresOptions, type RunnerRun } from './run';
+export { runChores, storeAt, SPAWN_TIMEOUT_MS, type ChoreRunReport, type RunChoresOptions, type RunnerRun } from './run';
 export { runnerStatus } from './status';
 export { readRunnerLogs, type RunnerLog } from './log';
 export { BUNDLE_HEADER, PROCEDURE } from './bundle';

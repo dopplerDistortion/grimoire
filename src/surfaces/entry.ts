@@ -55,6 +55,10 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
     const run = rest[0] === 'start' ? runStartVerb : runOpenVerb;
     return run(withFrom(rest.slice(1)), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
   }
+  if (rest[0] === 'runner' || (rest[0] === 'chore' && rest[1] === 'run')) {
+    const { runRunnerVerb } = await import('./cli/runner');
+    return runRunnerVerb(withFrom(rest), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
+  }
   const { runCli } = await import('./cli/run');
   return runCli(withFrom(rest), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
 }
