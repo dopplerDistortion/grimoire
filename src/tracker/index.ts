@@ -16,7 +16,7 @@ export {
   TRACKER_ROOT_KEY,
   namedTrackerRoot,
 } from './store';
-export type { SyncOutcome, SyncSpec, SyncFailure, TextPolicy } from './sync';
+export type { NetworkGit, SyncOutcome, SyncSpec, SyncFailure, TextPolicy } from './sync';
 export { stripUserinfo, type SyncFailureClass } from './remote';
 export type { TrackerView, TrackerDraft, NewComment, NewAttempt, NewEnd, NewOutcome, NewPurge } from './view';
 export { parsePurge, serializePurge, type PurgeTombstone, type PurgedFacts } from './purge';

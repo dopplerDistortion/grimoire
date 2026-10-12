@@ -98,6 +98,9 @@ export interface SyncRequest {
   readonly timeoutMs?: number;
   /** The sync's time as a whole (default: AUTO_BUDGET_MS for automatic syncs, none for `sync`). */
   readonly budgetMs?: number;
+  /** Test seams, handed to the tracker's sync as they are (SyncSpec). */
+  readonly network?: SyncSpec['network'];
+  readonly pause?: SyncSpec['pause'];
 }
 
 /** What a custom automatic sync is handed: the sync-pending marker for `tip` is already set. */
@@ -246,6 +249,8 @@ async function syncRounds(
     timeoutMs: options.timeoutMs,
     ...(deadline !== undefined ? { deadline } : {}),
     text: PUSH_TEXT,
+    ...(request.network ? { network: request.network } : {}),
+    ...(request.pause ? { pause: request.pause } : {}),
   };
   let outcome: SyncOutcome | null = null;
   for (let round = 0; round < DRAIN_ROUNDS; round++) {
