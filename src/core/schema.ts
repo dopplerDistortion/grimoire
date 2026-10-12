@@ -122,6 +122,11 @@ function array<T>(item: Schema<T, false>, description?: string): Schema<T[], fal
   };
 }
 
+/** Any value, passed through for the op to check itself (a chore result, whose refusals are reason codes). */
+function unchecked(json: Record<string, unknown>): Schema<unknown, false> {
+  return { json, optional: false, parse: (value) => value };
+}
+
 function optional<T>(schema: Schema<T, false>): Schema<T, true> {
   return { ...schema, optional: true };
 }
@@ -206,7 +211,7 @@ function tagged<const K extends string, const V extends Variants>(
   };
 }
 
-export const s = { string, boolean, integer, literal, nullable, either, array, optional, object, tagged };
+export const s = { string, boolean, integer, literal, nullable, either, array, optional, object, tagged, unchecked };
 
 /** Parses an op's input, or throws INVALID with every field error. */
 export function parseInput<T>(schema: Schema<T>, input: unknown): T {

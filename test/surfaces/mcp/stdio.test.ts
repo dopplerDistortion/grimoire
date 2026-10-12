@@ -32,6 +32,7 @@ const AGENT_TOOLS = [
   'close',
   'chore_start',
   'chore_read',
+  'chore_submit',
   'chore_abandon',
 ];
 
@@ -90,7 +91,7 @@ describe('grimoire mcp over stdio', () => {
     for (const name of ['show', 'list', 'labels', 'skill_list', 'skill_read']) {
       expect(byName[name]!.annotations, name).toEqual({ readOnlyHint: true });
     }
-    for (const name of ['create', 'update', 'comment', 'claim', 'chore_start', 'chore_read', 'chore_abandon']) {
+    for (const name of ['create', 'update', 'comment', 'claim', 'chore_start', 'chore_read', 'chore_submit', 'chore_abandon']) {
       expect(byName[name]!.annotations, name).toEqual({ destructiveHint: false, openWorldHint: false });
     }
     for (const name of ['close', 'release']) {

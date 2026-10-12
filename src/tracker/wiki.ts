@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { TREE_MODE, type TreeEntry } from '../git/objects';
 import { VERSION } from '../version';
 import { formatLine, lineValue, parseLines } from './lines';
+import type { ChoreRunRecord } from './chore-runs';
 import { mergeText } from './merge-text';
 import type { FileEdit, ObjectSource } from './objects';
 import { sortedUnique } from './record';
@@ -348,6 +349,8 @@ export interface WikiDraft extends WikiView {
   dropConflicts(slug: string, ids: readonly string[]): Promise<void>;
   /** Records a human wiki edit at the round's instant. Returns the record. */
   addEdit(edit: NewWikiEdit): Promise<WikiEdit>;
+  /** Derives the index and the log again: after a chore-run record joined the round (the log lists compiles). */
+  refresh(): Promise<void>;
 }
 
 /** The changes one write round makes to the wiki, and the derived files they regenerate. */
@@ -360,6 +363,8 @@ export class WikiDraftState implements WikiDraft {
   constructor(
     private readonly base: WikiReader,
     private readonly now: Date,
+    /** The chore-run records as the round sees them: the log lists the compiles. */
+    private readonly runs: () => Promise<readonly ChoreRunRecord[]> = async () => [],
   ) {}
 
   private async contents(): Promise<WikiContents> {
@@ -415,8 +420,12 @@ export class WikiDraftState implements WikiDraft {
     return record;
   }
 
+  async refresh(): Promise<void> {
+    await this.regenerate();
+  }
+
   private async regenerate(): Promise<void> {
-    this.derived = deriveWikiFiles(await this.contents());
+    this.derived = deriveWikiFiles(await this.contents(), await this.runs());
   }
 
   /** The file edits this round makes to the wiki. */
@@ -473,20 +482,46 @@ export function renderWikiIndex(pages: readonly WikiPage[], conflicted: (slug: s
   return derivedFile('Wiki index', lines, 'No pages yet.');
 }
 
-/** One line per human wiki edit, oldest first. */
-export function renderWikiLog(edits: readonly WikiEdit[]): Buffer {
-  const lines = edits.map((edit) => {
-    const person = typeof edit.actor.person === 'string' ? edit.actor.person : 'someone';
-    const resolved = edit.resolved.length === 0 ? '' : `, resolving ${edit.resolved.length} conflict${edit.resolved.length === 1 ? '' : 's'}`;
-    return `- ${edit.at}: ${person} ${edit.action === 'create' ? 'created' : 'updated'} [${edit.slug}](${PAGES}/${edit.slug}.md) (human wiki edit${resolved})`;
-  });
-  return derivedFile('Wiki log', lines, 'Nothing yet.');
+const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+const pageLink = (slug: string) => `[${slug}](${PAGES}/${slug}.md)`;
+
+/** A compile's log line: counts, ids and the slugs it wrote, never page text (chore-run records hold none). */
+function compileLine(run: ChoreRunRecord): string {
+  const slugs = Object.keys(run.pages).sort(byCodePoint);
+  const resolved = run.resolved.length === 0 ? '' : `, resolving ${plural(run.resolved.length, 'conflict')}`;
+  const wrote = slugs.length === 0 ? ', writing no pages' : ` into ${plural(slugs.length, 'page')}: ${slugs.map(pageLink).join(', ')}`;
+  return `- ${run.at}: Wiki Maintainer run ${run.id} compiled ${plural(run.consumption.length, 'trace')}${wrote}${resolved}`;
+}
+
+/**
+ * The log (spec §17): one line per human wiki edit and per compile (a chore-run
+ * record of a Wiki Maintainer run that compiled), oldest first. Edits keep
+ * their chain order; at one instant edits come before compiles.
+ */
+export function renderWikiLog(edits: readonly WikiEdit[], runs: readonly ChoreRunRecord[] = []): Buffer {
+  const entries = [
+    ...edits.map((edit, i) => {
+      const person = typeof edit.actor.person === 'string' ? edit.actor.person : 'someone';
+      const resolved = edit.resolved.length === 0 ? '' : `, resolving ${plural(edit.resolved.length, 'conflict')}`;
+      const line = `- ${edit.at}: ${person} ${edit.action === 'create' ? 'created' : 'updated'} ${pageLink(edit.slug)} (human wiki edit${resolved})`;
+      return { at: edit.at, rank: 0, i, line };
+    }),
+    ...runs
+      .filter((run) => run.kind === 'wiki-maintainer' && run.result === 'compiled')
+      .map((run, i) => ({ at: run.at, rank: 1, i, line: compileLine(run) })),
+  ];
+  entries.sort((x, y) => compareTimes(x.at, y.at) || x.rank - y.rank || x.i - y.i);
+  return derivedFile(
+    'Wiki log',
+    entries.map((entry) => entry.line),
+    'Nothing yet.',
+  );
 }
 
 /** The index and log for these contents; null for a file a newer release generated, which stays. */
-function deriveWikiFiles(contents: WikiContents): { index: Buffer | null; log: Buffer | null } {
+function deriveWikiFiles(contents: WikiContents, runs: readonly ChoreRunRecord[]): { index: Buffer | null; log: Buffer | null } {
   const index = renderWikiIndex([...contents.pages.values()], (slug) => contents.conflicts.has(slug));
-  const log = renderWikiLog(contents.edits);
+  const log = renderWikiLog(contents.edits, runs);
   return {
     index: newerRelease(contents.index) || contents.index?.equals(index) ? null : index,
     log: newerRelease(contents.log) || contents.log?.equals(log) ? null : log,
@@ -618,10 +653,15 @@ export async function regenerateWikiTree(
   merged: string | null,
   a: string | null,
   b: string | null,
+  /** The folded chore-run records (they live outside the wiki directory): the log lists the compiles. */
+  runs: () => Promise<readonly ChoreRunRecord[]> = async () => [],
 ): Promise<string | null> {
   if (!merged) return merged;
   const contents = await readWiki(objects, merged);
-  const fresh = { [INDEX]: renderWikiIndex([...contents.pages.values()], (slug) => contents.conflicts.has(slug)), [LOG]: renderWikiLog(contents.edits) };
+  const fresh = {
+    [INDEX]: renderWikiIndex([...contents.pages.values()], (slug) => contents.conflicts.has(slug)),
+    [LOG]: renderWikiLog(contents.edits, await runs()),
+  };
   const edits = new Map<string, FileEdit>();
   for (const name of [INDEX, LOG] as const) {
     const sides = (await Promise.all([derivedOf(objects, a, name), derivedOf(objects, b, name)])).filter((x): x is Buffer => x !== null && newerRelease(x));

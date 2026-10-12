@@ -31,6 +31,7 @@ import {
   SESSIONS_DIR,
   SETTINGS_FILE,
 } from './layout';
+import { ChoreRunReader, type ChoreRunRecord } from './chore-runs';
 import { bareId } from './ids';
 import type { FileEdit, VirtualObjects } from './objects';
 import { collisionHash, parseIssue } from './record';
@@ -237,11 +238,28 @@ class Fold {
   /** Issues kept against a delete: their `deleted/<id>.md` tombstones are dropped. */
   private readonly undeleted = new Set<string>();
 
+  /** Both sides' chore-run records. */
+  private runs: Promise<readonly ChoreRunRecord[]> | null = null;
+
   constructor(
     private readonly objects: VirtualObjects,
     private readonly roots: { readonly a: string | null; readonly b: string | null },
     private readonly report?: FoldReport,
   ) {}
+
+  /**
+   * The folded chore-run records: append-only with random ids, so the union of
+   * both sides' (the wiki's log lists the compiles, from outside its directory).
+   */
+  private choreRuns(): Promise<readonly ChoreRunRecord[]> {
+    return (this.runs ??= (async () => {
+      const byId = new Map<string, ChoreRunRecord>();
+      for (const root of [this.roots.a, this.roots.b]) {
+        if (root) for (const run of await new ChoreRunReader(this.objects, root).records()) if (!byId.has(run.id)) byId.set(run.id, run);
+      }
+      return [...byId.values()];
+    })());
+  }
 
   /**
    * Reads every purge tombstone the trees hold. Tombstones are add-only, so
@@ -492,7 +510,7 @@ class Fold {
     if (isTree(a) && isTree(b)) {
       let oid = await this.dir(path, isTree(base) ? base.oid : null, a.oid, b.oid);
       // The wiki's index and log are never merged as text: the fold derives them again (spec §17).
-      if (kind === 'wiki-dir') oid = await regenerateWikiTree(this.objects, oid, a.oid, b.oid);
+      if (kind === 'wiki-dir') oid = await regenerateWikiTree(this.objects, oid, a.oid, b.oid, () => this.choreRuns());
       if (kind === 'attempt-dir' && oid !== null) oid = await this.dropLateRecords(name, a.oid, b.oid, oid);
       return oid === null ? null : { mode: TREE_MODE, name, oid };
     }

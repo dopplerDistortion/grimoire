@@ -16,6 +16,7 @@ import type { QuarantineResult } from './quarantine';
 import type { PurgeSessionResult, PurgeTraceResult } from './purge';
 import type { SyncResult, SyncStatusResult } from './sync';
 import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
+import type { ChoreSubmitResult } from './chore-submit';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -139,6 +140,7 @@ export interface OpResults {
   purge_session: PurgeSessionResult;
   chore_start: ChoreBrief;
   chore_read: ChoreReadResult;
+  chore_submit: ChoreSubmitResult;
   chore_abandon: ChoreAbandonResult;
   sync: SyncResult;
   sync_status: SyncStatusResult;

@@ -15,6 +15,8 @@ import type { ChoreKind } from '../../tracker';
 export const OPEN_RUNS = 'chore-runs';
 export const SERVED_LOGS = 'chore-served';
 export const EXPOSURE_MARKS = 'chore-exposure';
+/** Invalid chore results (spec §6): kept on this machine only, by `<run>/<n>`. */
+export const INVALID_RESULTS = 'chore-results';
 
 /** A run expires after this long without a chore call (spec §16, Lease). */
 export const LEASE_MS = 60 * 60_000;
@@ -59,6 +61,12 @@ export interface OpenRun {
   readonly compiles: readonly string[];
   /** The items paged in order without `item`. */
   readonly manifest: readonly string[];
+  /** Submits that failed the checks: the second ends the run `failed` (spec §16, One fix-up). */
+  readonly failures?: number;
+  /** What the submit that ended the run answered: a retried submit replays it. */
+  readonly outcome?: Readonly<Record<string, unknown>>;
+  /** The refused submit's answer and its idempotency key: a retry with that key replays it. */
+  readonly refused?: { readonly key: string | null; readonly outcome: Readonly<Record<string, unknown>> };
 }
 
 /** One served item, as the run's served-item log keeps it. */
@@ -72,6 +80,8 @@ export interface ServedEntry {
 export interface ServedLog {
   readonly run: string;
   readonly items: readonly ServedEntry[];
+  /** A compile's `no_pattern` reasons, by pair: the agent's text, kept here and never committed. */
+  readonly no_pattern?: Readonly<Record<string, string>>;
 }
 
 /** A chore-exposure mark: a session or a server process that ran a chore outside an isolated context. */
@@ -134,6 +144,7 @@ export async function pruneRuns(store: MachineLocalStore, now: Date): Promise<vo
     if (now.getTime() - stopped <= RUN_KEEP_MS) continue;
     await store.records.remove(OPEN_RUNS, run.id).catch(() => false);
     await store.records.remove(SERVED_LOGS, run.id).catch(() => false);
+    for (const n of [1, 2]) await store.records.remove(INVALID_RESULTS, `${run.id}/${n}`).catch(() => false);
   }
 }
 
@@ -153,8 +164,32 @@ export async function logServed(store: MachineLocalStore, run: string, served: r
       seen.add(`${item}\n${hash}`);
       items.push({ item, hash, at: at.toISOString() });
     }
-    return { run, items };
+    return { ...current, run, items };
   });
+}
+
+/** Keeps a compile's `no_pattern` reasons in the run's served-item log (spec §16: never committed). */
+export async function logNoPattern(store: MachineLocalStore, run: string, reasons: Readonly<Record<string, string>>): Promise<void> {
+  if (Object.keys(reasons).length === 0) return;
+  await store.records.update<ServedLog>(SERVED_LOGS, run, (current) => ({ run, items: current?.items ?? [], no_pattern: { ...current?.no_pattern, ...reasons } }));
+}
+
+/**
+ * An invalid result, as this machine keeps it (spec §16, Failures and replays):
+ * its reason codes, the problems and its text; after a secret-scan failure,
+ * only the reason codes and the matched rule ids.
+ */
+export interface InvalidResult {
+  readonly run: string;
+  readonly at: string;
+  readonly reasons: readonly string[];
+  readonly rules: readonly string[];
+  readonly problems?: Readonly<Record<string, string>>;
+  readonly text?: string;
+}
+
+export function keepInvalidResult(store: MachineLocalStore, n: number, result: InvalidResult): Promise<void> {
+  return store.records.write<InvalidResult>(INVALID_RESULTS, `${result.run}/${n}`, result);
 }
 
 export async function servedLog(store: MachineLocalStore, run: string): Promise<ServedLog> {

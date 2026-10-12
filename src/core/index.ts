@@ -21,6 +21,7 @@ import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
 import { purgeSession, purgeTrace } from './purge';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
+import { choreSubmit } from './chore-submit';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
@@ -59,6 +60,7 @@ export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, Shown
 export type { QuarantineResult } from './quarantine';
 export type { PurgeHistory, PurgeSessionResult, PurgeTraceResult, CitingPage } from './purge';
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
+export type { ChoreSubmitResult } from './chore-submit';
 export { choreThresholds, dueChores } from './chores';
 export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
 export { AUTO_SYNC_SETTING, autoSync, autoSyncOn, markSyncPending, readSyncStatus, syncNow, syncRequestOf } from './sync';
@@ -180,6 +182,7 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   purgeSession,
   choreStart,
   choreRead,
+  choreSubmit,
   choreAbandon,
   sync,
   syncStatus,

@@ -31,10 +31,15 @@ export const PAGE_KINDS = ['failure', 'strategy'] as const;
 
 const characters = (text: string) => [...text].length;
 
+/** Whether `slug` is a page slug: kebab-case, lowercase letters and digits, at most 64 characters. */
+export function isSlug(slug: string): boolean {
+  return SLUG.test(slug) && slug.length <= SLUG_LIMIT;
+}
+
 /** A page's slug, as a write names it: kebab-case, lowercase letters and digits, at most 64 characters. */
 export function parseSlug(input: string, field = 'slug'): string {
   const slug = input.trim();
-  if (!SLUG.test(slug) || slug.length > SLUG_LIMIT) {
+  if (!isSlug(slug)) {
     throw invalid({ [field]: `"${input}" is not a page slug (kebab-case: lowercase letters, digits and single hyphens, at most ${SLUG_LIMIT} characters)` });
   }
   return slug;
@@ -55,34 +60,89 @@ export function checkPageWrite(
   previous: readonly string[],
   scanner: SecretScanner,
 ): void {
-  const problems: Record<string, string> = {};
-  if (characters(page.summary) > SUMMARY_LIMIT) problems.summary = `holds ${characters(page.summary)} characters; at most ${SUMMARY_LIMIT}`;
+  const problems = pageWriteProblems(page, previous, scanner, 'human');
+  if (problems.length > 0) throw invalid(Object.fromEntries(problems.map((problem) => [problem.field, problem.message])));
+}
+
+/** Why a page write is refused: a reason code (spec §16), the field and a message that never quotes the text. */
+export interface PageProblem {
+  readonly field: 'title' | 'summary' | 'body';
+  readonly code: 'summary_too_long' | 'page_too_long' | 'page_shrinks' | 'secret' | 'unscanned' | 'hygiene';
+  readonly message: string;
+  /** `secret`: the rule ids that matched. */
+  readonly rules?: readonly string[];
+}
+
+const HYGIENE_WORDS: Readonly<Record<string, string>> = {
+  'control-character': 'hidden control characters',
+  'conflict-marker': 'conflict markers',
+  html: 'raw HTML',
+  'grimoire-path': 'a path into the .grimoire folder',
+  'remote-content': 'a reference to remote content',
+};
+
+/**
+ * The page-write guards (see checkPageWrite) as reason codes. `human` hygiene
+ * refuses only what a person's own text trips by accident (hidden characters,
+ * conflict markers); `agent` hygiene, for a chore write, refuses every finding.
+ */
+export function pageWriteProblems(
+  page: { title: string; summary: string; body: string },
+  previous: readonly string[],
+  scanner: SecretScanner,
+  hygiene: 'human' | 'agent',
+): PageProblem[] {
+  const problems = new Map<PageProblem['field'], PageProblem>();
+  if (characters(page.summary) > SUMMARY_LIMIT) {
+    problems.set('summary', { field: 'summary', code: 'summary_too_long', message: `holds ${characters(page.summary)} characters; at most ${SUMMARY_LIMIT}` });
+  }
   const length = characters(page.body);
   if (length > PAGE_CHARACTER_CAP) {
-    problems.body = `holds ${length.toLocaleString('en-US')} characters; a page holds at most ${PAGE_CHARACTER_CAP.toLocaleString('en-US')}`;
+    problems.set('body', {
+      field: 'body',
+      code: 'page_too_long',
+      message: `holds ${length.toLocaleString('en-US')} characters; a page holds at most ${PAGE_CHARACTER_CAP.toLocaleString('en-US')}`,
+    });
   } else if (previous.length > 0) {
     const larger = Math.max(...previous.map(characters));
     if (length < larger * (1 - PAGE_SHRINK_LIMIT)) {
-      problems.body = `holds ${length.toLocaleString('en-US')} characters, down from ${larger.toLocaleString('en-US')}: a write may shrink a page by at most ${PAGE_SHRINK_LIMIT * 100}% of the larger side`;
+      problems.set('body', {
+        field: 'body',
+        code: 'page_shrinks',
+        message: `holds ${length.toLocaleString('en-US')} characters, down from ${larger.toLocaleString('en-US')}: a write may shrink a page by at most ${PAGE_SHRINK_LIMIT * 100}% of the larger side`,
+      });
     }
   }
   for (const field of ['title', 'summary', 'body'] as const) {
-    if (problems[field]) continue;
+    if (problems.has(field)) continue;
     const scan = scanner.scan(page[field]);
-    if (scan.status !== 'scanned') problems[field] = 'could not be scanned for secrets, so it is not written';
-    else if (scan.hits.length > 0) {
-      problems[field] = `holds what looks like a secret (${sortedUnique(scan.hits.map((hit) => hit.rule)).join(', ')}); remove it`;
-    } else {
-      const hygiene = checkHygiene(page[field]);
-      if (hygiene.status !== 'checked') problems[field] = 'could not be checked, so it is not written';
-      else {
-        const found = sortedUnique(hygiene.findings.map((f) => f.check).filter((check) => check === 'control-character' || check === 'conflict-marker'));
-        if (found.includes('control-character')) problems[field] = 'holds hidden control characters; remove them';
-        else if (found.includes('conflict-marker')) problems[field] = 'holds conflict markers; reconcile the sides and remove the markers';
+    if (scan.status !== 'scanned') {
+      problems.set(field, { field, code: 'unscanned', message: 'could not be scanned for secrets, so it is not written' });
+      continue;
+    }
+    if (scan.hits.length > 0) {
+      const rules = sortedUnique(scan.hits.map((hit) => hit.rule));
+      problems.set(field, { field, code: 'secret', message: `holds what looks like a secret (${rules.join(', ')}); remove it`, rules });
+      continue;
+    }
+    const report = checkHygiene(page[field]);
+    if (report.status !== 'checked') {
+      problems.set(field, { field, code: 'hygiene', message: 'could not be checked, so it is not written' });
+      continue;
+    }
+    const found = sortedUnique(report.findings.map((f) => f.check)).filter(
+      (check) => hygiene === 'agent' || check === 'control-character' || check === 'conflict-marker',
+    );
+    if (hygiene === 'human') {
+      if (found.includes('control-character')) problems.set(field, { field, code: 'hygiene', message: 'holds hidden control characters; remove them' });
+      else if (found.includes('conflict-marker')) {
+        problems.set(field, { field, code: 'hygiene', message: 'holds conflict markers; reconcile the sides and remove the markers' });
       }
+    } else if (found.length > 0) {
+      problems.set(field, { field, code: 'hygiene', message: `holds ${found.map((check) => HYGIENE_WORDS[check] ?? check).join(', ')}; remove it` });
     }
   }
-  if (Object.keys(problems).length > 0) throw invalid(problems);
+  return [...problems.values()];
 }
 
 /** The quarantined pages, each with the marks that keep it so, oldest first. */
