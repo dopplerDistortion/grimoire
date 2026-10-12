@@ -558,7 +558,11 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
         `Codex: trust this project${announceCodex ? ', then approve grimoire’s hook in `/hooks`. Codex will skip grimoire’s hook until you approve it in `/hooks`, once per clone of this repo; Codex runs the main checkout’s .codex/ in every linked worktree' : ''}.`,
       );
     }
-    steps.push('Restart open Claude Code and Codex sessions so they load grimoire.', `Launch agent clients from the repo root (${root}).`);
+    steps.push(
+      'Restart open Claude Code and Codex sessions so they load grimoire.',
+      `Launch agent clients from the repo root (${root}).`,
+      'Use `git stash -u`, never `git stash --all`: grimoire’s generated skill copies are git-ignored, and `--all` would stash them.',
+    );
     return steps;
   };
   const tracker: InitReport['tracker'] = {

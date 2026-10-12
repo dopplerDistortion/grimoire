@@ -25,6 +25,12 @@ export interface OpEnv {
   readonly requestSync: (commit: string) => void;
   /** Where attempt-end capture looks for transcripts, and its budgets (spec §14); defaults when absent. */
   readonly capture?: CaptureOptions;
+  /**
+   * Says the write changed what agents are served (spec §15 Refresh scope: a
+   * decision, a skill edit, the delivery switch): after the call answers,
+   * this process refreshes the generated output of every worktree on its pin.
+   */
+  readonly servedChanged: () => void;
 }
 
 export interface OpDefinition<I, R> {

@@ -3,12 +3,14 @@
 // accepts. Claude Code reloads skills from `hookSpecificOutput.reloadSkills`;
 // Codex fails the hook on any key it doesn't know, so it only ever gets the
 // plain line.
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { gitTest, readFixture, readFixtureJson } from '#harness';
+import { gitTest, readFixture, readFixtureJson, type GitWorld } from '#harness';
+import { createCore } from '../../../src/core';
 import { runUpkeep } from '../../../src/upkeep';
+import { agentContext, initializeTracker } from '../../core/support';
 import { installed } from '../../upkeep/support';
 import { runHook } from '../../../src/surfaces/hooks/run-hook';
 import { sessionStart, sessionStartClient, sessionStartOutput } from '../../../src/surfaces/hooks/session-start';
@@ -16,6 +18,39 @@ import { sessionStart, sessionStartClient, sessionStartOutput } from '../../../s
 const CLAUDE = ['startup', 'startup-plain', 'clear', 'compact', 'resume', 'fork'].map((name) => `claude-code/hook-payloads/session-start-${name}.json`);
 const CODEX = ['startup', 'resume'].map((name) => `codex/hook-payloads/session-start-${name}.json`);
 const LINE = 'grimoire: 1 chore is due; run the grimoire-chores skill';
+/** What Claude Code is told when the hook wrote skill stubs (spike C, B1). */
+const RELOAD = '{"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true}}';
+const NOTES = '---\nname: release-notes\ndescription: Use when recording a change in the release notes.\n---\n# Release notes\n\nCreate `changes/<slug>.md`.\n';
+
+/** Clone a installed and committed on this pin, its tracker serving one evolved skill, and no generated output yet. */
+async function withServedSkill(world: GitWorld): Promise<string> {
+  const root = world.a.dir;
+  await installed(root);
+  await world.a.git(['add', '-A']);
+  await world.a.git(['commit', '--quiet', '-m', 'install grimoire']);
+  await initializeTracker(world.a, world.a);
+  const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
+  try {
+    const edit = await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, { ...agentContext(world.a), surface: 'cli', client: null, evidence: {}, tty: true });
+    if (!edit.ok) throw new Error(JSON.stringify(edit.error));
+  } finally {
+    await core.close();
+  }
+  return root;
+}
+
+/** Runs the verb as the client would, with a captured payload; its exit code and stdout. */
+async function hook(root: string, fixture: string): Promise<{ code: number; output: string }> {
+  let output = '';
+  const stdout = new Writable({
+    write(chunk: Buffer, _encoding, done) {
+      output += chunk.toString('utf8');
+      done();
+    },
+  });
+  const code = await runHook('session-start', root, { stdin: Readable.from([readFixture(fixture)]), stdout });
+  return { code, output };
+}
 
 describe('telling the clients apart by the payload alone', () => {
   it('every captured Claude Code payload is claude-code; every Codex payload (permission_mode) is codex', () => {
@@ -23,24 +58,26 @@ describe('telling the clients apart by the payload alone', () => {
     for (const fixture of CODEX) expect(sessionStartClient(readFixtureJson(fixture)), fixture).toBe('codex');
   });
 
-  it('the verb, under Claude Code’s env markers (a Codex started from Claude Code’s shell inherits them), gives a Codex payload no JSON Codex would reject', async () => {
+  gitTest('the verb, under Claude Code’s env markers (a Codex started from Claude Code’s shell inherits them), gives a Codex payload no JSON Codex would reject, even when it wrote skill stubs', async ({
+    world,
+  }) => {
+    const root = await withServedSkill(world);
     vi.stubEnv('CLAUDECODE', '1');
-    vi.stubEnv('CLAUDE_PROJECT_DIR', process.cwd());
+    vi.stubEnv('CLAUDE_PROJECT_DIR', root);
 
     for (const fixture of CODEX) {
-      let output = '';
-      const stdout = new Writable({
-        write(chunk: Buffer, _encoding, done) {
-          output += chunk.toString('utf8');
-          done();
-        },
-      });
-      const code = await runHook('session-start', process.cwd(), { stdin: Readable.from([readFixture(fixture)]), stdout });
+      await rm(path.join(root, '.claude', 'skills', 'grimoire-release-notes'), { recursive: true, force: true });
+      const { code, output } = await hook(root, fixture);
 
       expect(code, fixture).toBe(0);
-      // Codex's schema denies unknown keys: reloadSkills (Claude Code's) would fail the hook and drop the line.
+      // It wrote the stub, which a Claude Code payload answers with reloadSkills…
+      expect(await readFile(path.join(root, '.claude/skills/grimoire-release-notes/SKILL.md'), 'utf8'), fixture).toContain('name: grimoire-release-notes');
+      // …but Codex's schema denies unknown keys: reloadSkills would fail the hook and drop the line.
       expect(output, fixture).not.toContain('reloadSkills');
     }
+    // The same run for Claude Code, under the same markers, does say it.
+    await rm(path.join(root, '.claude', 'skills', 'grimoire-release-notes'), { recursive: true, force: true });
+    expect((await hook(root, CLAUDE[0]!)).output).toBe(`${RELOAD}\n`);
   });
 
   it('anything else is no client', () => {
@@ -91,5 +128,58 @@ describe('the session line', () => {
 
     await world.a.git(['commit', '--quiet', '-am', 'take the shipped text']);
     expect(await sessionStart(readFixture(CLAUDE[0]!), { startDir: root })).toBe('');
+  });
+});
+
+describe('the skill fast path', () => {
+  const folders = ['.grimoire/skills/release-notes', '.claude/skills/grimoire-release-notes', '.agents/skills/grimoire-release-notes'];
+  const exists = async (file: string) => (await stat(file).catch(() => null)) !== null;
+
+  gitTest('in a worktree missing its copies and stubs, it writes them and Claude Code reloads its skills; a second run writes nothing and says nothing', async ({
+    world,
+  }) => {
+    const root = await withServedSkill(world);
+
+    const first = await hook(root, CLAUDE[0]!);
+    const second = await hook(root, CLAUDE[0]!);
+
+    expect(first).toEqual({ code: 0, output: `${RELOAD}\n` });
+    expect(await readFile(path.join(root, '.grimoire/skills/release-notes/SKILL.md'), 'utf8')).toBe(NOTES);
+    for (const folder of folders) expect(await readFile(path.join(root, folder, '.gitignore'), 'utf8'), folder).toBe('*\n');
+    expect(await world.a.git(['status', '--porcelain', '--untracked-files=all'])).toBe('');
+    expect(second).toEqual({ code: 0, output: '' });
+  });
+
+  gitTest('it never removes or replaces generated output, and writes nothing mid-merge', async ({ world }) => {
+    const root = await withServedSkill(world);
+    const write = async (file: string, text: string) => {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), text);
+    };
+    await write('.agents/skills/grimoire-retired/SKILL.md', 'a stub nothing serves\n');
+    await write('.agents/skills/grimoire-retired/.gitignore', '*\n');
+    await write('.grimoire/skills/release-notes/SKILL.md', 'edited by hand\n');
+    await write('.grimoire/skills/release-notes/.gitignore', '*\n');
+
+    const kept = await hook(root, CLAUDE[0]!);
+
+    expect(kept.output).toBe('');
+    expect(await readFile(path.join(root, '.agents/skills/grimoire-retired/SKILL.md'), 'utf8')).toBe('a stub nothing serves\n');
+    expect(await readFile(path.join(root, '.grimoire/skills/release-notes/SKILL.md'), 'utf8')).toBe('edited by hand\n');
+    // A stub would point at a copy that doesn't hold the served text: none is written.
+    expect(await exists(path.join(root, '.claude/skills/grimoire-release-notes'))).toBe(false);
+
+    await rm(path.join(root, '.grimoire', 'skills'), { recursive: true });
+    await world.a.commitFile('shared.txt', 'base\n');
+    await world.a.git(['switch', '--quiet', '-c', 'other']);
+    await world.a.commitFile('shared.txt', 'theirs\n');
+    await world.a.git(['switch', '--quiet', 'main']);
+    await world.a.commitFile('shared.txt', 'ours\n');
+    expect((await world.a.gitResult(['merge', '--quiet', 'other'])).code).not.toBe(0);
+
+    const merging = await hook(root, CLAUDE[0]!);
+
+    expect(merging.output).toBe('');
+    for (const folder of folders) expect(await exists(path.join(root, folder)), folder).toBe(false);
   });
 });

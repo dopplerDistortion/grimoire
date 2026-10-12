@@ -82,6 +82,10 @@ _Avoid_: Harness, IDE, host, agent (for the program itself)
 A pointer file that makes one evolved skill visible to one agent client's own skill discovery, carrying the skill's name and description but not its text; grimoire generates it in each checkout, and nobody commits it.
 _Avoid_: Skill mirror, skill copy, skill shim
 
+**Generated output**:
+The evolved-skill copies and skill stubs grimoire writes into every worktree that pins a release, byte for byte from what is served, each in a folder that ignores itself; it exists only where a pin is, nobody commits it, and a path git tracks is never written over.
+_Avoid_: Generated files, build output, cache
+
 ### Tracking
 
 **Issue**:

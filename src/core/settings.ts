@@ -24,6 +24,9 @@ interface SettingSpec {
 
 const MACHINE_SETTINGS = 'machine-settings';
 
+/** The store's evolved-skill delivery switch (spec §15, Delete and delivery off). */
+export const DELIVERY_SETTING = 'skills.delivery';
+
 function oneOf(values: readonly string[]): Pick<SettingSpec, 'parse' | 'why'> {
   return {
     parse: (value) => (typeof value === 'string' && values.includes(value.trim()) ? value.trim() : undefined),
@@ -66,9 +69,10 @@ const linkBase: Pick<SettingSpec, 'parse' | 'why'> = {
  * Every setting this release knows, by key. The part of grimoire a setting
  * governs adds it here, with whatever a change must do in the same commit
  * (the excerpt mode, the loop pause and the chore and proposal thresholds come
- * with the parts that use them; turning `skills.delivery` off removes copies
- * and stubs once generated output exists). A tracker's keys this release
- * doesn't know are still shown and kept.
+ * with the parts that use them). Turning `skills.delivery` off removes every
+ * copy and stub: the refresh after the write reconciles this pin's worktrees
+ * with nothing served. A tracker's keys this release doesn't know are still
+ * shown and kept.
  */
 const SETTINGS: ReadonlyMap<string, SettingSpec> = new Map<string, SettingSpec>(Object.entries({
   'auto-sync': {
@@ -274,7 +278,7 @@ export const settingsSet = define({
   policy: 'human-only',
   replay: 'none',
   input: s.object({ key: s.string(oneLine), value: scalar }),
-  async run(input, { ctx, tracker, actor }): Promise<SettingsSetResult> {
+  async run(input, { ctx, tracker, actor, servedChanged }): Promise<SettingsSetResult> {
     const spec = SETTINGS.get(input.key) ?? unknownKey(input.key);
     const value = spec.parse(input.value);
     if (value === undefined) throw invalid({ value: `${input.key} ${spec.why}` });
@@ -295,6 +299,8 @@ export const settingsSet = define({
       const at = draft.now.toISOString();
       return { result: { key: input.key, scope: 'store' as const, value, changed: true, at, by: author.email } };
     });
+    // The delivery switch: off removes every copy and stub, on brings them back (spec §15).
+    if (write.result.changed && input.key === DELIVERY_SETTING) servedChanged();
     return write.result;
   },
 });

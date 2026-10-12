@@ -26,6 +26,7 @@ import { completeUpgradeDetails } from './upgrade';
 import { autoSync as runAutoSync, markSyncPending, sync, syncRequestOf, syncStatus, type AutoSyncRequest } from './sync';
 import { INSTALL_FORMAT_RANGE } from './host';
 import { findGitDirs } from '../machine-local/git-dirs';
+import { readServedFingerprint } from '../generated/served';
 import { VERSION } from '../version';
 import type { CaptureOptions } from '../capture/end';
 
@@ -102,6 +103,23 @@ export interface CoreOptions {
    * own folders and the spec's budgets.
    */
   readonly capture?: CaptureOptions;
+  /**
+   * How this process refreshes generated output after a write changed the
+   * served set (spec §15 Refresh scope):
+   * - `in-process` (default): the skill reconcile of every worktree on this
+   *   pin runs here, after the call answers (`close()` waits for it), as a
+   *   short-lived CLI call needs;
+   * - a function: long-lived processes trigger their upkeep loop, forced;
+   * - `off`: no refresh (upkeep catches up on its own schedule).
+   */
+  readonly refreshSkills?: 'in-process' | 'off' | ((request: RefreshRequest) => void | Promise<void>);
+}
+
+/** What a custom refresh is handed: the call that changed the served set. */
+export interface RefreshRequest {
+  /** The host repo root of the call. */
+  readonly root: string;
+  readonly ctx: CallContext;
 }
 
 export interface Core {
@@ -233,6 +251,7 @@ export function createCore(options: CoreOptions = {}): Core {
   const trackers = new Map<string, Promise<TrackerStore>>();
   const scanner = options.scanner ?? createScanner(bundledRules);
   const autoSyncMode = options.autoSync ?? 'in-process';
+  const refreshMode = options.refreshSkills ?? 'in-process';
   /** Background work started after a call answered: close() waits for it. */
   const background = new Set<Promise<void>>();
   /** Per clone: an in-process sync is running, and whether another write asked for one meanwhile. */
@@ -280,7 +299,25 @@ export function createCore(options: CoreOptions = {}): Core {
         return;
       }
       const request = syncRequestOf(ctx, actorOf(ctx));
-      await inLane(commonDir, () => runAutoSync(tracker, request));
+      await inLane(commonDir, async () => {
+        const before = await readServedFingerprint(tracker, scanner);
+        const outcome = await runAutoSync(tracker, request);
+        // A fold that changed what agents are served: refresh this pin's worktrees (spec §15 Refresh scope).
+        if ('fetched' in outcome && outcome.fetched && (await readServedFingerprint(tracker, scanner)) !== before) refresh(ctx);
+      });
+    });
+  };
+
+  /** After a write that changed the served set: the refresh runs after the call answers, never failing or delaying it. */
+  const refresh = (ctx: CallContext): void => {
+    if (refreshMode === 'off') return;
+    later(async () => {
+      if (typeof refreshMode === 'function') {
+        await refreshMode({ root: ctx.repo.root, ctx });
+        return;
+      }
+      const { refreshGeneratedOutput } = await import('../upkeep/refresh');
+      await refreshGeneratedOutput({ root: ctx.repo.root, surface: ctx.surface, nonce: ctx.nonce });
     });
   };
 
@@ -323,6 +360,7 @@ export function createCore(options: CoreOptions = {}): Core {
         const requestSync = (commit: string): void => void syncTips.push(commit);
         const bindings: BindingWrite[] = [];
         const actor = actorOf(ctx);
+        let changedServed = false;
         const result = await op.run(parsed, {
           ctx,
           tracker: watched(opened, requestSync, bindings),
@@ -330,8 +368,10 @@ export function createCore(options: CoreOptions = {}): Core {
           scanner,
           requestSync,
           ...(options.capture ? { capture: options.capture } : {}),
+          servedChanged: () => void (changedServed = true),
         });
         if (bindings.length > 0) await leaveSeenHereRows(opened, ctx, actor, bindings);
+        if (changedServed) refresh(ctx);
         const syncTip = syncTips.at(-1);
         if (syncTip !== undefined) await afterWrite(opened, syncTip, ctx);
         return { ok: true, result } as never;
