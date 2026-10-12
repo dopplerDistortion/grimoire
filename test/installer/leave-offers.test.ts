@@ -9,6 +9,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { Checkout } from '#harness';
 import { stripExcerptText } from '../../src/capture/session-record';
+import { SEEN_HERE } from '../../src/capture/seen-here';
 import { listStrayEdits } from '../../src/generated';
 import { MachineLocalStore } from '../../src/machine-local';
 import { attemptDir, claimed, created, parseRecord, test as captureTest, type StoredRecord } from '../core/capture-support';
@@ -65,6 +66,35 @@ describe('the offers', () => {
     // No excerpt text is left to strip.
     expect(stripExcerptText(Buffer.from(records[0]!.raw))).toBeNull();
     expect(report.sync).toMatchObject({ pushed: true });
+  });
+
+  captureTest('contexts the cut leaves uncut stop leave before the removal, so their seen-here rows stay; the next leave cuts them', async ({ world, grimoire, capture }) => {
+    const id = await created(capture.core, grimoire.ctx, 'Still open');
+    const attempt = await claimed(capture.core, grimoire.ctx, id);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+
+    // No time at all for the cut: the context is left uncut.
+    const stopped = await leave(world.a.dir, grimoire.ctx, ['n', '', 'n', 'leave', ''], { capture: capture.options, cutBudgetMs: 0 });
+
+    expect(stopped.asked[4]).toMatch(/Stop now, so you can run leave again to cut it\? \[Y\/n\]/);
+    expect(stopped.report).toMatchObject({ left: false, stopped: 'uncut', cut: { contexts: 0, attached: 0, uncut: 1 } });
+    expect(existsSync(store.dir)).toBe(true);
+    expect(await store.coordination.list(SEEN_HERE)).toHaveLength(1);
+
+    const gone = await leave(world.a.dir, grimoire.ctx, ['n', '', 'n', 'leave'], { capture: capture.options });
+
+    expect(gone.report).toMatchObject({ left: true, cut: { contexts: 1, attached: 1, uncut: 0 } });
+    expect(await remoteSessionRecords(world.a, id, attempt)).toHaveLength(1);
+  });
+
+  captureTest('going on past the uncut contexts says what is lost', async ({ world, grimoire, capture }) => {
+    const id = await created(capture.core, grimoire.ctx, 'Still open');
+    await claimed(capture.core, grimoire.ctx, id);
+
+    const { report } = await leave(world.a.dir, grimoire.ctx, ['n', '', 'n', 'leave', 'n'], { capture: capture.options, cutBudgetMs: 0 });
+
+    expect(report.left).toBe(true);
+    expect(report.warnings).toContainEqual(expect.stringMatching(/1 bound context wasn’t cut: its session records are lost/));
   });
 
   test('stray edits are listed, saved ones and copies edited since; stopping to record them saves each and removes nothing', async ({ world, grimoire }) => {

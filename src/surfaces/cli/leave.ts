@@ -60,7 +60,8 @@ function printJson(io: CliIo, value: unknown): void {
 /** The lines a person reads after leave: what stayed, and what to do next. */
 function closingLines(report: LeaveReport): string[] {
   const lines: string[] = [];
-  if (!report.left) return lines;
+  // A stop before the removal: the plan's lines said why, except for what went wrong (a process started meanwhile).
+  if (!report.left) return report.problems.map((problem) => `Problem: ${problem}`);
   if (report.kept.tracker_ref) {
     lines.push(`The local tracker ref stays (${report.kept.tracker_ref.why}). Delete it once you don’t need it: ${report.kept.tracker_ref.command}`);
   }

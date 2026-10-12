@@ -4,7 +4,8 @@
 // files.
 //
 // 1. Refuses while live grimoire processes run in the clone (process records,
-//    detached sync children included, and the `start` lock).
+//    detached sync children included, and the `start` lock), and when a
+//    record or the lock can't be read: it fails closed.
 // 2. Read-only preflight, with its offers: release the open attempts held
 //    from this machine; cut the bound contexts still uncut (which consumes
 //    pending `skill_read` events); list the stray edits, saved and unsaved,
@@ -13,7 +14,8 @@
 //    their excerpt text first if asked.
 // 3. One typed confirmation. Nothing changes before it.
 // 4. The accepted offers, then a final sync: a push when allowed, else a
-//    fetch only.
+//    fetch only. Contexts the cut left uncut, or a process started since the
+//    preflight, stop it here with a report (what it committed stays).
 // 5. Removal, reading only what the cross-pin contract freezes (rule 7), so
 //    any later release removes any install: the generated output of every
 //    registered worktree (the generated-path list, plus every `grimoire-*`
@@ -50,7 +52,7 @@ import {
 } from '../generated';
 import { runGit } from '../git/run';
 import { normalizeSkillText, skillVersionOf, STUB_PREFIX } from '../knowledge';
-import { cloneId, findGitDirs, MachineLocalStore, retryTransient, runningStart, type ProcessRecord } from '../machine-local';
+import { cloneId, findGitDirs, MachineLocalStore, readTextIfExists, retryTransient, runningStart, type ProcessRecord } from '../machine-local';
 import { linkedComponent, readCheckoutText } from '../safe-write';
 import { removeControlFiles } from '../surfaces/start/control';
 import { openTracker, TRACKER_REF, type SyncOutcome, type TextPolicy, type TrackerStore, type TrackerView } from '../tracker';
@@ -82,6 +84,10 @@ export interface LeaveOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Where the cuts find transcripts (default: the clients' own folders). */
   readonly capture?: CaptureOptions;
+  /** How long the cut of every uncut context may take, all told (default 30 s). */
+  readonly cutBudgetMs?: number;
+  /** Runs between the removal and its re-check (a test seam: a session that starts while leave removes). */
+  readonly afterRemoval?: () => Promise<void>;
 }
 
 /** A live grimoire process that makes leave refuse. */
@@ -94,13 +100,20 @@ export interface LiveProcess {
 }
 
 export interface LeaveReport {
-  /** False when the person stopped to record stray edits first: nothing was removed. */
+  /** False when leave stopped before the removal: nothing was removed (what it committed to the tracker stays). */
   readonly left: boolean;
-  readonly stopped?: 'stray-edits' | 'moved-aside';
+  /**
+   * Why it stopped: to record stray edits or copy out folders moved aside
+   * first; contexts the cut left uncut (the person stopped so a later leave
+   * cuts them); or a grimoire process that started after the preflight.
+   */
+  readonly stopped?: 'stray-edits' | 'moved-aside' | 'uncut' | 'busy';
+  /** With `stopped: 'busy'`: the live processes (empty when leave couldn't tell; see `problems`). */
+  readonly processes?: LiveProcess[];
   /** Open attempts released as abandoned. */
   readonly released: { id: string; attempt: string }[];
-  /** Contexts cut, and the session records attached. */
-  cut: { contexts: number; attached: number } | null;
+  /** Contexts cut, the session records attached, and the contexts left uncut (over the cut's budget, or failed). */
+  cut: { contexts: number; attached: number; uncut: number } | null;
   /** Unpushed commits written again without their excerpt text. */
   purged: number;
   /** The final sync: whether it pushed, and whether the remote holds the local tip. */
@@ -141,29 +154,74 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The live processes that make leave refuse, by client, worktree and pid. */
-export async function liveProcesses(store: MachineLocalStore): Promise<LiveProcess[]> {
-  const records: ProcessRecord[] = await store.processes.live().catch(() => []);
+/** What the liveness check found: the live processes, or what it couldn't read (so it can't tell). */
+type ProcessCheck = { readonly live: LiveProcess[]; readonly unreadable: null } | { readonly live: null; readonly unreadable: string };
+
+function errorCodeOf(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | null)?.code;
+}
+
+/**
+ * The live processes that make leave refuse, by client, worktree and pid. It
+ * fails closed: a process record or `start` lock it can't read is named
+ * instead, since leave can't tell whether its process still runs.
+ */
+async function checkProcesses(store: MachineLocalStore): Promise<ProcessCheck> {
+  const unreadable = (what: string, error: unknown): ProcessCheck => ({ live: null, unreadable: `${what} (${messageOf(error)})` });
+  const dir = path.join(store.dir, 'processes');
+  let names: string[] = [];
+  try {
+    names = await readdir(dir);
+  } catch (error) {
+    // No store, or no records yet: nothing runs.
+    if (errorCodeOf(error) !== 'ENOENT' && errorCodeOf(error) !== 'ENOTDIR') return unreadable(dir, error);
+  }
+  for (const name of names.sort()) {
+    if (name.startsWith('.') || !name.endsWith('.json')) continue;
+    try {
+      await readTextIfExists(path.join(dir, name));
+    } catch (error) {
+      return unreadable(path.join(dir, name), error);
+    }
+  }
+  let records: ProcessRecord[];
+  try {
+    records = await store.processes.live();
+  } catch (error) {
+    return unreadable(`the process records in ${dir}`, error);
+  }
   const live: LiveProcess[] = records
     .filter((record) => !(record.pid === process.pid && record.host === store.host))
     .map(({ pid, role, client, worktree, pin }) => ({ pid, role, client, worktree, pin }));
-  const start = await runningStart(store).catch(() => null);
+  let start: Awaited<ReturnType<typeof runningStart>>;
+  try {
+    start = await runningStart(store);
+  } catch (error) {
+    return unreadable('the `start` lock', error);
+  }
   if (start && !live.some((entry) => entry.pid === start.pid)) live.push({ pid: start.pid, role: 'start', client: null, worktree: null, pin: '?' });
-  return live;
+  return { live, unreadable: null };
 }
 
 function describeProcess(entry: LiveProcess): string {
   return `${entry.client ?? 'grimoire'} ${entry.role} (pid ${entry.pid}${entry.worktree ? `, ${entry.worktree}` : ''})`;
 }
 
-async function refuseLive(store: MachineLocalStore, after = 'nothing changed'): Promise<void> {
-  const live = await liveProcesses(store);
-  if (live.length === 0) return;
-  throw new GrimoireError(
-    'BUSY',
-    `grimoire processes still run in this clone: ${live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run leave again; ${after}`,
-    { processes: live.map((entry) => ({ ...entry })) },
-  );
+/** Why leave can't go on (`after`: what that means at this point), or null when nothing runs. */
+function busyText(check: ProcessCheck, after: string): string | null {
+  if (check.live === null) {
+    return `grimoire can’t tell whether grimoire processes run in this clone: it can’t read ${check.unreadable}, so it won’t remove the store under them. Make that readable (or remove it once no grimoire process runs), then run leave again; ${after}`;
+  }
+  if (check.live.length === 0) return null;
+  return `grimoire processes still run in this clone: ${check.live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run leave again; ${after}`;
+}
+
+/** Throws BUSY while grimoire processes run in the clone, or when leave can't tell. */
+async function refuseLive(store: MachineLocalStore): Promise<void> {
+  const check = await checkProcesses(store);
+  const busy = busyText(check, 'nothing changed');
+  if (busy === null) return;
+  throw new GrimoireError('BUSY', busy, check.live === null ? { unreadable: check.unreadable } : { processes: check.live.map((entry) => ({ ...entry })) });
 }
 
 /** An open attempt this machine's agents bound, held by the person. */
@@ -208,7 +266,7 @@ async function localTipOf(root: string): Promise<string | null> {
 async function unsavedStrays(worktree: string, served: ServedSet): Promise<UnsavedStray[]> {
   const found: UnsavedStray[] = [];
   const listed = await runGit(worktree, ['ls-files', '-z', '--', COPY_ROOT]);
-  const tracked = new Set(listed.code === 0 ? listed.stdout.toString('utf8').split(' ').filter((file) => file !== '') : []);
+  const tracked = new Set(listed.code === 0 ? listed.stdout.toString('utf8').split('\0').filter((file) => file !== '') : []);
   for (const { folder, skill, kind } of await existingFolders(worktree)) {
     if (kind.kind !== 'copy') continue;
     const file = `${folder}/${SKILL_FILE}`;
@@ -280,8 +338,9 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 /**
  * Runs leave in the clone `options.root` is a checkout of. Throws BUSY while
- * grimoire processes run in it, and INVALID when the typed confirmation
- * doesn't match; both before anything changed.
+ * grimoire processes run in it (or it can't tell), and INVALID when the typed
+ * confirmation doesn't match; both before anything changed. Once the accepted
+ * offers have committed, a stop is a report (`left: false`), never an error.
  */
 export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
   const { ctx, prompter, say } = options;
@@ -380,7 +439,19 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     }
 
     // The accepted offers.
-    if (release || cut) await settleAttempts(options, pre, store, report, { release, cut });
+    if (release || cut) await settleAttempts(options, pre, store, report, { release, cut, contexts: uncut.length });
+    const left = report.cut?.uncut ?? 0;
+    if (left > 0) {
+      // Their seen-here rows go with the store, and no later sweep would cut them.
+      const them = left === 1 ? 'it' : 'them';
+      say(`${plural(left, 'bound context')} ${left === 1 ? 'wasn’t' : 'weren’t'} cut in time; leaving now loses ${left === 1 ? 'its' : 'their'} session records.`);
+      const answer = await prompter.ask(`Stop now, so you can run leave again to cut ${them}? [Y/n] `);
+      if (answer === null || yes(answer, true)) {
+        say('Nothing was removed. What leave committed stays in the local tracker ref; run leave again to cut the rest and push.');
+        return { ...report, stopped: 'uncut' };
+      }
+      report.warnings.push(`${plural(left, 'bound context')} ${left === 1 ? 'wasn’t' : 'weren’t'} cut: ${left === 1 ? 'its' : 'their'} session records are lost`);
+    }
     if (purge) {
       try {
         report.purged = await pre.tracker.stripUnpushedText(PURGE_TEXT);
@@ -391,9 +462,17 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     const outcome = await finalSync(pre.tracker, ctx, push, report);
     await pre.tracker.close();
 
-    // A process may have started since the preflight.
-    await refuseLive(store, 'nothing was removed yet (what leave committed to the tracker stays)');
+    // A process may have started since the preflight. What leave committed stays, so this is a report, not an error.
+    const late = await checkProcesses(store);
+    const busy = busyText(late, 'nothing was removed; what leave committed and pushed is in this report');
+    if (busy !== null) {
+      report.problems.push(busy);
+      return { ...report, stopped: 'busy', processes: late.live ?? [] };
+    }
     await removeAll(store, commonDir, root, pre.worktrees, env, outcome, report);
+    await options.afterRemoval?.();
+    // Nothing stops a session started meanwhile (older pins' processes honour no marker): say what came back.
+    await reportReturns(store, pre.worktrees, report);
   } finally {
     await pre.tracker.close().catch(() => {});
   }
@@ -426,7 +505,7 @@ async function settleAttempts(
   pre: Preflight,
   store: MachineLocalStore,
   report: LeaveReport,
-  accepted: { release: boolean; cut: boolean },
+  accepted: { release: boolean; cut: boolean; contexts: number },
 ): Promise<void> {
   const core = createCore({ autoSync: 'off', refreshSkills: 'off', ...(options.capture ? { capture: options.capture } : {}) });
   try {
@@ -445,12 +524,16 @@ async function settleAttempts(
     const swept = await sweepContexts(pre.tracker, store, async () => options.ctx, {
       idleMs: 0,
       sync: false,
-      budgetMs: CUT_BUDGET_MS,
+      budgetMs: options.cutBudgetMs ?? CUT_BUDGET_MS,
       ...(options.capture ? { capture: options.capture } : {}),
     });
-    report.cut = { contexts: swept.cut, attached: swept.attached };
+    // A cancelled sweep committed nothing; a context the budget overtook keeps its row, uncut.
+    report.cut = swept.cancelled
+      ? { contexts: 0, attached: 0, uncut: accepted.contexts }
+      : { contexts: swept.cut - swept.budget, attached: swept.attached, uncut: swept.budget };
   } catch (error) {
     report.problems.push(`cutting the uncut contexts failed: ${messageOf(error)}`);
+    report.cut = { contexts: 0, attached: 0, uncut: accepted.contexts };
   }
 }
 
@@ -508,6 +591,22 @@ async function removeAll(
     report.problems.push(`removing the control channel’s files failed: ${messageOf(error)}`);
   }
   await removeTrackerRef(root, outcome, report);
+}
+
+/** Reports what came back after the removal: the store (with who runs from it now) and generated folders. */
+async function reportReturns(store: MachineLocalStore, worktrees: readonly string[], report: LeaveReport): Promise<void> {
+  if (await lstat(store.dir).then(() => true, () => false)) {
+    const check = await checkProcesses(store);
+    const who = check.live !== null && check.live.length > 0 ? ` (${check.live.map(describeProcess).join('; ')})` : '';
+    report.problems.push(`${store.dir} came back while leave ran: a grimoire process started in this clone during leave${who}. End it, then run leave again`);
+  }
+  for (const worktree of worktrees) {
+    const kept = new Set(report.kept.generated.filter((entry) => entry.worktree === worktree).map((entry) => entry.path));
+    const back = (await existingFolders(worktree).catch(() => [])).map((entry) => entry.folder).filter((folder) => !kept.has(folder));
+    if (back.length > 0) {
+      report.problems.push(`generated output came back in ${worktree}: ${back.join(', ')}. A grimoire session started there during leave: end it, then run leave again`);
+    }
+  }
 }
 
 /** A generated folder's shape (`.grimoire/skills/<name>`, `<stub root>/grimoire-<name>`), POSIX and relative; null for anything else. */
