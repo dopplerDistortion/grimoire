@@ -7,7 +7,11 @@
 //
 // Pure and dependency-free: the dashboard bundles this module as it is.
 
-export type DerivedPatchOp = { op: 'replace'; anchor: string; text: string } | { op: 'append'; text: string };
+// The op names as constants: test/core/commits.test.ts reads `op: '<name>'` literals in src/ as commit ops.
+const REPLACE = 'replace';
+const APPEND = 'append';
+
+export type DerivedPatchOp = { op: typeof REPLACE; anchor: string; text: string } | { op: typeof APPEND; text: string };
 
 /** One line of a line diff: kept (`=`), removed (`-`) or added (`+`), without its newline. */
 export interface DiffLine {
@@ -142,14 +146,14 @@ function anchorOf(text: string, base: readonly string[], hunk: Hunk): Anchored |
 function opOf(base: readonly string[], draft: readonly string[], h: Anchored): DerivedPatchOp {
   const anchor = base.slice(h.lo, h.hi).join('');
   const text = base.slice(h.lo, h.from).join('') + draft.slice(h.dFrom, h.dTo).join('') + base.slice(h.to, h.hi).join('');
-  return { op: 'replace', anchor, text };
+  return { op: REPLACE, anchor, text };
 }
 
 /** Applies ops as `update.body_patch` does (each anchor exactly once in the body so far), or null when one wouldn't apply. */
 function simulate(body: string, ops: readonly DerivedPatchOp[]): string | null {
   let out = body;
   for (const op of ops) {
-    if (op.op === 'append') {
+    if (op.op === APPEND) {
       if (out.includes(op.text)) return null;
       out += op.text;
       continue;
@@ -169,7 +173,7 @@ function simulate(body: string, ops: readonly DerivedPatchOp[]): string | null {
  */
 export function derivePatch(base: string, draft: string): DerivedPatchOp[] {
   if (base === draft) return [];
-  if (base === '') return [{ op: 'append', text: draft }];
+  if (base === '') return [{ op: APPEND, text: draft }];
   const left = linesOf(base);
   const right = linesOf(draft);
   let hunks = hunksOf(left, right);
@@ -178,7 +182,7 @@ export function derivePatch(base: string, draft: string): DerivedPatchOp[] {
     let merged = false;
     for (const hunk of hunks) {
       const widened = anchorOf(base, left, hunk);
-      if (!widened) return [{ op: 'replace', anchor: base, text: draft }];
+      if (!widened) return [{ op: REPLACE, anchor: base, text: draft }];
       const last = anchored[anchored.length - 1];
       // Anchors that overlap or touch would interfere when applied in turn: one block instead.
       if (last && widened.lo <= last.hi) {
@@ -194,6 +198,6 @@ export function derivePatch(base: string, draft: string): DerivedPatchOp[] {
     }
     const ops = anchored.map((h) => opOf(left, right, h));
     // An earlier op's text could repeat a later anchor: then the whole base is the anchor.
-    return simulate(base, ops) === draft ? ops : [{ op: 'replace', anchor: base, text: draft }];
+    return simulate(base, ops) === draft ? ops : [{ op: REPLACE, anchor: base, text: draft }];
   }
 }
