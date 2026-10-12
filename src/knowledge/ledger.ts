@@ -9,7 +9,7 @@
 // (derive.ts). The fold needs no rule of its own: records never change, so two
 // clones' ledgers fold to their union.
 import { createHash } from 'node:crypto';
-import { sortedUnique, type RecordProblem } from '../tracker';
+import { sortedUnique } from '../tracker';
 import { formatLine, lineValue, parseLines } from '../tracker/lines';
 
 /**
@@ -160,18 +160,4 @@ export function parseLedgerRecord(id: string, bytes: Buffer): LedgerEntry | null
     at: text(values.get('at')),
     extra,
   };
-}
-
-/**
- * What `doctor` finds wrong with a stored skill ledger record: null when its
- * bytes are what grimoire writes for what it holds (known keys in order,
- * unknown keys kept after them). The store's own checks name quarantine
- * records and a name that isn't the bytes' sha256 first.
- */
-export function ledgerRecordProblem(id: string, bytes: Buffer): RecordProblem | null {
-  if (ledgerRecordId(bytes) !== id) return { kind: 'non-canonical', why: 'its file name is not the sha256 of its bytes' };
-  const entry = parseLedgerRecord(id, bytes);
-  if (!entry) return { kind: 'unparsable', why: 'it names no skill' };
-  const { id: _id, ...record } = entry;
-  return serializeLedgerRecord(record).equals(bytes) ? null : { kind: 'non-canonical', why: 'it differs from what the canonical serializer writes for it' };
 }

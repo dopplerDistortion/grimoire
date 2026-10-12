@@ -142,20 +142,10 @@ export interface WikiConflict {
 
 const SCALARS = ['title', 'kind', 'summary'] as const;
 
-/** A set-aside side's frontmatter keys, in the order its serializer writes them (the scalars only when set aside). */
-export const WIKI_CONFLICT_KEYS = ['slug', 'fields', ...SCALARS, 'sources', 'at'] as const;
-
 function serializeConflict(conflict: Omit<WikiConflict, 'id'>): Buffer {
-  const values: Record<(typeof WIKI_CONFLICT_KEYS)[number], unknown> = {
-    slug: conflict.slug,
-    fields: [...conflict.fields].sort(byCodePoint),
-    title: conflict.title,
-    kind: conflict.kind,
-    summary: conflict.summary,
-    sources: sortedUnique(conflict.sources),
-    at: conflict.at,
-  };
-  const lines = WIKI_CONFLICT_KEYS.filter((key) => values[key] !== undefined).map((key) => formatLine(key, values[key]));
+  const lines = [formatLine('slug', conflict.slug), formatLine('fields', [...conflict.fields].sort(byCodePoint))];
+  for (const key of SCALARS) if (conflict[key] !== undefined) lines.push(formatLine(key, conflict[key]));
+  lines.push(formatLine('sources', sortedUnique(conflict.sources)), formatLine('at', conflict.at));
   return Buffer.from(`---\n${lines.join('\n')}\n---\n${conflict.body ?? ''}`, 'utf8');
 }
 
@@ -188,22 +178,19 @@ export interface WikiEdit {
 
 export type NewWikiEdit = Omit<WikiEdit, 'id' | 'at'>;
 
-/** A human wiki edit's frontmatter keys, in the order its serializer writes them. */
-export const WIKI_EDIT_KEYS = ['record', 'slug', 'action', 'from', 'to', 'resolved', 'actor', 'surface', 'at'] as const;
-
 function serializeEdit(edit: Omit<WikiEdit, 'id'>): Buffer {
-  const values: Record<(typeof WIKI_EDIT_KEYS)[number], unknown> = {
-    record: 'wiki-edit',
-    slug: edit.slug,
-    action: edit.action,
-    from: edit.from,
-    to: edit.to,
-    resolved: sortedUnique(edit.resolved),
-    actor: edit.actor,
-    surface: edit.surface,
-    at: edit.at,
-  };
-  return Buffer.from(`---\n${WIKI_EDIT_KEYS.map((key) => formatLine(key, values[key])).join('\n')}\n---\n`, 'utf8');
+  const lines = [
+    formatLine('record', 'wiki-edit'),
+    formatLine('slug', edit.slug),
+    formatLine('action', edit.action),
+    formatLine('from', edit.from),
+    formatLine('to', edit.to),
+    formatLine('resolved', sortedUnique(edit.resolved)),
+    formatLine('actor', edit.actor),
+    formatLine('surface', edit.surface),
+    formatLine('at', edit.at),
+  ];
+  return Buffer.from(`---\n${lines.join('\n')}\n---\n`, 'utf8');
 }
 
 function parseEdit(id: string, bytes: Buffer): WikiEdit {

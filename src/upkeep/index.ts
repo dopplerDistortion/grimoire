@@ -21,4 +21,4 @@ export {
 export { UPKEEP_EVERY_MS, startUpkeep, type UpkeepLoop, type UpkeepLoopOptions } from './loop';
 export { operationInProgress, upgradeInProgress, upgradeSkipNotice, worktreeKey, type GitOperation } from './checkout';
 export { UPKEEP_PARTS, pendingSync, pointerRefresh, pruneCopiesPart } from './parts';
-export { POINTER_REFRESH_RECORDS, noteRefreshed, refreshNotice, refreshedPointerFiles, type PointerRefreshRecord } from './refreshed';
+export { POINTER_REFRESH_RECORDS, refreshNotice, refreshedPointerFiles, type PointerRefreshRecord } from './refreshed';

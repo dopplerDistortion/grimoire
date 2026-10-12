@@ -14,7 +14,6 @@ export {
 } from './skill-text';
 export {
   ledgerRecordId,
-  ledgerRecordProblem,
   parseLedgerRecord,
   serializeLedgerRecord,
   type LedgerEntry,
