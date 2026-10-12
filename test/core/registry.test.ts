@@ -31,10 +31,13 @@ describe('the op registry', () => {
         'settings_get',
         'settings_set',
         'show',
+        'skill_discard',
         'skill_edit',
         'skill_list',
         'skill_read',
+        'skill_record',
         'skill_show',
+        'skill_strays',
         'sync',
         'sync_status',
         'unquarantine',
@@ -81,6 +84,10 @@ describe('the op registry', () => {
       });
       expect(byName.skill_edit).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
       expect(byName.skill_show).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      // Stray edits (spec §15): listed for people, recorded or discarded by a human only.
+      expect(byName.skill_strays).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      expect(byName.skill_record).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false, inputSchema: { required: ['stray'] } });
+      expect(byName.skill_discard).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
       expect(byName.create).toMatchObject({
         kind: 'write',
         policy: 'agent',

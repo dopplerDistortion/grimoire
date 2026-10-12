@@ -86,6 +86,14 @@ _Avoid_: Skill mirror, skill copy, skill shim
 The evolved-skill copies and skill stubs grimoire writes into every worktree that pins a release, byte for byte from what is served, each in a folder that ignores itself; it exists only where a pin is, nobody commits it, and a path git tracks is never written over.
 _Avoid_: Generated files, build output, cache
 
+**Served set**:
+The evolved skills agents get in a clone right now, each at its served version, derived from the skill ledger in the merged tracker view and the delivery switch; each machine caches it, keyed by the tracker tip pair.
+_Avoid_: Active skills, current skills, skill list
+
+**SessionStart fast path**:
+The SessionStart hook's own pass over its worktree's generated output: before the client lists skills, it writes whatever differs from the served set, under the worktree's lease, and never removes or moves anything.
+_Avoid_: Hook reconcile, quick refresh
+
 ### Tracking
 
 **Issue**:

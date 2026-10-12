@@ -65,6 +65,22 @@ const quarantineTarget: Confirmation = async (input) => {
 };
 const QUARANTINE_HELP = 'a person runs it at an interactive terminal, with no agent marker set, and types the page’s slug (or the trace’s attempt handle) to confirm';
 
+/**
+ * Stray edits (spec §15) are a skill's: the person types the skill's name
+ * (`all` to discard every one). A stray edit this lookup can't find asks for
+ * its id instead; the core then refuses it.
+ */
+const strayEditSkill: Confirmation = async (input, ctx, core) => {
+  if (input.all === true) return 'all';
+  if (typeof input.skill === 'string' && input.skill.trim() !== '') return input.skill.trim();
+  if (typeof input.stray !== 'string' || input.stray.trim() === '') return 'stray edit';
+  const id = input.stray.trim();
+  const listed = await core.call('skill_strays', {}, ctx);
+  const edits = listed.ok ? ((listed.result as { stray_edits?: { id: string; skill: string }[] }).stray_edits ?? []) : [];
+  return edits.find((edit) => edit.id === id)?.skill ?? id;
+};
+const STRAY_HELP = 'a person runs it at an interactive terminal, with no agent marker set, and types the skill’s name to confirm (`all` with all: true)';
+
 /** Ops whose confirmation isn't the human-only default. */
 const CONFIRMATIONS = new Map<string, CustomConfirmation>([
   [
@@ -76,6 +92,8 @@ const CONFIRMATIONS = new Map<string, CustomConfirmation>([
   ],
   ['quarantine', { confirm: quarantineTarget, help: QUARANTINE_HELP }],
   ['unquarantine', { confirm: quarantineTarget, help: QUARANTINE_HELP }],
+  ['skill_record', { confirm: strayEditSkill, help: STRAY_HELP }],
+  ['skill_discard', { confirm: strayEditSkill, help: STRAY_HELP }],
 ]);
 
 /** Registers how a later slice's verb confirms. */

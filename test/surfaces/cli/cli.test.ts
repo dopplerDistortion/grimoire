@@ -20,6 +20,7 @@ import {
   trackerTip,
 } from '../../core/support';
 import { buildGrimoire, cli, cliAtTerminal, fakeEditor, humanEnv, lastJsonOnScreen } from './support';
+import { setAsideStrayEdit } from '../../../src/generated';
 
 let bin: string;
 let cleanup: () => Promise<void>;
@@ -344,6 +345,26 @@ describe('the human-only gate', () => {
     expect(agent.code, agent.screen).toBe(1);
     expect(agent.screen).not.toMatch(/to confirm/);
     expect(lastJsonOnScreen(agent.screen)).toMatchObject({ error: { code: 'HUMAN_ONLY' } });
+  });
+
+  cliTest('skill record and skill discard confirm with the stray edit’s skill name', async ({ a }) => {
+    // Upkeep found it (seam 1 covers how); the CLI only gates it.
+    const stray = await setAsideStrayEdit(machineOf(a), {
+      skill: 'release-notes',
+      worktree: a.dir,
+      path: '.grimoire/skills/release-notes/SKILL.md',
+      text: '---\nname: release-notes\ndescription: Use when noting a change.\n---\n# Notes\n\nEdited by hand.\n',
+      base: null,
+      served: null,
+    });
+
+    expect((await cli(bin, ['skill', 'record', '--help'], { cwd: a.dir })).json).toMatchObject({ positionals: ['stray'], confirmation: expect.stringMatching(/types the skill’s name to confirm/) });
+    expect((await cli(bin, ['skill', 'discard', stray!.id], { cwd: a.dir })).json).toMatchObject({ error: { code: 'HUMAN_ONLY' } });
+
+    const run = await cliAtTerminal(bin, ['skill', 'discard', stray!.id], { cwd: a.dir, answers: [{ when: /Type release-notes to confirm/, type: 'release-notes' }] });
+
+    expect(run.code, run.screen).toBe(0);
+    expect(lastJsonOnScreen(run.screen)).toEqual({ discarded: [stray!.id] });
   });
 
   cliTest('settings set confirms with the setting’s key', async ({ grimoire, a }) => {

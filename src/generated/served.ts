@@ -10,9 +10,11 @@ import path from 'node:path';
 import { readSkills, type ServedSkill } from '../knowledge';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { runGit } from '../git/run';
-import { openTracker, TRACKER_REF, type TrackerView } from '../tracker';
+import { namedTrackerRoot, openTracker, TRACKER_REF, type TrackerStore, type TrackerTips, type TrackerView } from '../tracker';
 import { LEDGER_DIR } from '../tracker/layout';
 import { storeSetting } from '../core/settings';
+import type { MachineLocalStore } from '../machine-local';
+import { VERSION } from '../version';
 
 export interface ServedSet {
   /** The store's delivery switch (`skills.delivery`). */
@@ -94,4 +96,89 @@ export async function readServedSet(root: string, scanner?: SecretScanner): Prom
   } finally {
     await tracker.close();
   }
+}
+
+/** The served-set cache (spec §6 Caches): clone-wide, one entry, valid only for the tracker tip pair it was read at. */
+export const SERVED_SET_CACHE = 'served-set';
+const SERVED_SET_CACHE_VERSION = 1;
+
+/** The served-set cache as stored. */
+interface CachedServedSet {
+  /** The tip pair it was read at: `<local>:<remote>`, `-` for a missing ref. */
+  readonly tips: string;
+  /** The tracker root the checkout's `config.yml` names (null: none): under another, a read may say NOT_SYNCED. */
+  readonly root: string | null;
+  /** The release that read it: another release may derive another served set from the same tips. */
+  readonly release: string;
+  readonly delivery: boolean;
+  readonly skills: readonly ServedSkill[];
+  readonly known: Readonly<Record<string, readonly string[]>>;
+}
+
+/** The cache key of a tip pair. */
+export function tipPairKey(tips: TrackerTips): string {
+  return `${tips.local ?? '-'}:${tips.remote ?? '-'}`;
+}
+
+function fromCache(cached: CachedServedSet): ServedSet | null {
+  if (typeof cached.delivery !== 'boolean' || !Array.isArray(cached.skills) || typeof cached.known !== 'object' || cached.known === null) return null;
+  const known = new Map(Object.entries(cached.known).map(([name, versions]) => [name, new Set(Array.isArray(versions) ? versions : [])] as const));
+  return { delivery: cached.delivery, skills: cached.skills, known };
+}
+
+function toCache(tips: string, root: string | null, served: ServedSet): CachedServedSet {
+  return {
+    tips,
+    root,
+    release: VERSION,
+    delivery: served.delivery,
+    skills: served.skills.map(({ name, version, description, text }) => ({ name, version, description, text })),
+    known: Object.fromEntries([...served.known].map(([name, versions]) => [name, [...versions].sort()])),
+  };
+}
+
+/** A tracker holding no ledger: nothing is served (the delivery switch can't matter). */
+const NOTHING_SERVED: ServedSet = { delivery: true, skills: [], known: new Map() };
+
+/** The tracker root the checkout at `root` names in `.grimoire/config.yml`, or null. */
+async function namedRootOf(root: string): Promise<string | null> {
+  return namedTrackerRoot(await readFile(path.join(root, '.grimoire', 'config.yml'), 'utf8').catch(() => ''));
+}
+
+/**
+ * The served set of the clone `root` is in, through the machine-local
+ * served-set cache: read from the tracker (the whole ledger, every version
+ * judged) only when the tip pair, or the tracker root `config.yml` names,
+ * moved since the cache was written. What is read is cached only when the tip
+ * pair stayed put meanwhile. Throws when the tracker can't be read, NOT_SYNCED
+ * without one (spec §4 Missing tracker): never an empty served set in its
+ * place, which would have upkeep remove every copy as unwanted.
+ */
+export async function cachedServedSet(store: MachineLocalStore, root: string, scanner?: SecretScanner): Promise<ServedSet> {
+  const tracker = await openTracker(root);
+  try {
+    return await cachedServedSetOf(store, tracker, scanner);
+  } finally {
+    await tracker.close();
+  }
+}
+
+async function cachedServedSetOf(store: MachineLocalStore, tracker: TrackerStore, scanner?: SecretScanner): Promise<ServedSet> {
+  const tips = await tracker.tips();
+  const key = tipPairKey(tips);
+  const named = await namedRootOf(tracker.location.root);
+  const cached = await store.caches.read<CachedServedSet>(SERVED_SET_CACHE, SERVED_SET_CACHE_VERSION).catch(() => undefined);
+  // Only what passed the tracker's checks is cached, and the same tips under the same root pass them again.
+  if (cached && cached.tips === key && cached.root === named && cached.release === VERSION) {
+    const served = fromCache(cached);
+    if (served) return served;
+  }
+  // The checks a read makes, even where no ledger means no read.
+  await tracker.check();
+  const served = (await ledgerMayExist(tracker.location.root, tracker.location.commonDir)) ? await servedSetOf(await tracker.read(), scanner) : NOTHING_SERVED;
+  if (tipPairKey(await tracker.tips()) === key) {
+    // A cache: one that can't be written is read again next time.
+    await store.caches.put(SERVED_SET_CACHE, SERVED_SET_CACHE_VERSION, toCache(key, named, served)).catch(() => {});
+  }
+  return served;
 }

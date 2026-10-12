@@ -37,6 +37,8 @@ const POSITIONALS: Readonly<Record<string, readonly string[]>> = {
   // A page by its slug; a trace goes by `--trace <handle>`.
   quarantine: ['page', 'reason'],
   unquarantine: ['page'],
+  // One stray edit by its id; `--skill <name>` or `--all true` for many.
+  skill_discard: ['stray'],
 };
 
 /**

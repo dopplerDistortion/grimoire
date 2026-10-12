@@ -5,6 +5,9 @@
 // slices add theirs (the pending proposal, what is due, the runner, stray
 // edits) the same way.
 import { derivations } from '../core/derive';
+import { showStrayEdits } from '../core/stray-edits';
+import { listStrayEdits, sharedScanner } from '../generated';
+import { readSkills } from '../knowledge';
 import { readSyncStatus, autoSyncOn, type SyncStatusResult } from '../core/sync';
 import { storeExcerptMode } from '../core/settings';
 import { DEFAULT_STALE_AFTER_MS, staleCutoff } from '../core/stale';
@@ -165,8 +168,35 @@ const codexFact: StatusFact = {
   },
 };
 
+/**
+ * Stray edits (spec §15): "stray edit to <skill> in <worktree>: Record or
+ * Discard", each with the agent attempts open on this machine when it
+ * appeared. Their text stays out of status (`skill strays` shows it).
+ */
+const strayFact: StatusFact = {
+  key: 'stray_edits',
+  async read({ store, root, view }) {
+    const edits = await listStrayEdits(store);
+    if (edits.length === 0) return { value: [], lines: [] };
+    let tracker: TrackerView | null = null;
+    let currentOf = (_skill: string): string | null => null;
+    try {
+      tracker = await view();
+      const book = await readSkills(tracker, sharedScanner());
+      currentOf = (skill) => book.skills.get(skill)?.version ?? null;
+    } catch {
+      // Without the tracker: no open attempts or current versions, but the edits still show.
+    }
+    const shown = await showStrayEdits(edits, tracker, currentOf, root);
+    return {
+      value: shown.map(({ text: _text, ...edit }) => ({ ...edit })),
+      lines: shown.map((edit) => `${edit.notice} (${edit.id}${edit.open_attempts.length > 0 ? `; agent attempts open then: ${edit.open_attempts.join(', ')}` : ''})`),
+    };
+  },
+};
+
 /** Every fact this release reports, in order. */
-export const STATUS_FACTS: readonly StatusFact[] = [syncFact, refreshedFact, nodeFact, staleFact, excerptFact, codexFact];
+export const STATUS_FACTS: readonly StatusFact[] = [syncFact, refreshedFact, strayFact, nodeFact, staleFact, excerptFact, codexFact];
 
 /** Reads every fact of `root`. Writes nothing. */
 export async function readStatus(options: StatusOptions): Promise<{ report: StatusReport; lines: string[] }> {
