@@ -65,10 +65,10 @@ describe('the live evidence flag', () => {
 
     const tip = await trackerTip(world.a);
     const refused = await p.core.call('proposal_accept', { id: proposal }, cli);
-    expect(refused).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { acks: expect.stringContaining('evidence') } } } });
+    expect(refused).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { ack: expect.stringContaining('evidence') } } } });
     expect(await trackerTip(world.a)).toBe(tip);
 
-    const accepted = ok(await p.core.call('proposal_accept', { id: proposal, acks: ['evidence'] }, cli));
+    const accepted = ok(await p.core.call('proposal_accept', { id: proposal, ack: ['evidence'] }, cli));
     expect(accepted).toMatchObject({ id: proposal, status: 'accepted', skill: SKILL, version: shown.version, from: p.base });
 
     const accept = (await ledgerRecords(world.a)).find((record) => record.kind === 'accept');

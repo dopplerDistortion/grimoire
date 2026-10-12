@@ -446,20 +446,20 @@ export interface ProposalAcceptResult {
 export const proposalAccept = define({
   name: 'proposal_accept',
   description:
-    'Accept a pending skill proposal: the checks run again first (a failure makes it lapsed, freeing the slot), every red flag must be acknowledged in `acks`, then one commit records the decision and the version text and the copies and stubs refresh. With then_edit, also names the `skill edit` command. Human-only.',
+    'Accept a pending skill proposal: the checks run again first (a failure makes it lapsed, freeing the slot), every red flag must be acknowledged in `ack` (one item per flag; `--ack <flag>` repeats at the CLI), then one commit records the decision and the version text and the copies and stubs refresh. With then_edit, also names the `skill edit` command. Human-only.',
   kind: 'write',
   policy: 'human-only',
   replay: 'none',
   input: s.object({
     id: idInput,
-    acks: s.optional(s.array(s.string(oneLine), 'the red flags acknowledged, by flag (proposal show lists them); each red flag needs its own')),
+    ack: s.optional(s.array(s.string(oneLine), 'the red flags acknowledged, by flag (proposal show lists them); each red flag needs its own')),
     then_edit: s.optional(s.boolean('true: accept, then edit the accepted version with `grimoire skill edit <name>`')),
   }),
   async run(input, env): Promise<ProposalAcceptResult> {
     const { tracker, scanner, ctx, requestSync, servedChanged } = env;
     const author = await authorOf(env);
     const checkout = checkoutFacts(ctx.repo.root, await handwrittenTexts(ctx.repo.root));
-    const acks = new Set((input.acks ?? []).map((ack) => ack.trim()));
+    const acks = new Set((input.ack ?? []).map((flag) => flag.trim()));
     const write = await tracker.transact<ProposalAcceptResult>({ op: 'accept', author: { name: author.name, email: author.email }, actor: env.actor }, async (draft) => {
       const proposal = await proposalIn(draft, input.id);
       const book = await readSkills(draft, scanner);
@@ -482,7 +482,7 @@ export const proposalAccept = define({
         throw new GrimoireError(
           'INVALID',
           `accepting ${proposal.id} needs each red flag acknowledged first: ${missing.map((flag) => flag.flag).join(', ')}`,
-          { fields: { acks: `acknowledge each red flag (proposal show lists them): ${missing.map((flag) => `${flag.flag} (${flag.detail})`).join('; ')}` }, red_flags: missing },
+          { fields: { ack: `acknowledge each red flag (proposal show lists them): ${missing.map((flag) => `${flag.flag} (${flag.detail})`).join('; ')}` }, red_flags: missing },
         );
       }
       const acknowledged = flags.map((flag) => flag.flag).filter((flag) => acks.has(flag));

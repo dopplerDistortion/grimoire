@@ -417,6 +417,8 @@ describe('the human-only gate', () => {
       expect((await cli(bin, ['proposal', verb, '--help'], { cwd: a.dir })).json.confirmation, verb).toMatch(/types the id to confirm/);
     }
     expect((await cli(bin, ['proposal', 'reject', '--help'], { cwd: a.dir })).json).toMatchObject({ positionals: ['id', 'reason'] });
+    // Spec §10: `proposal accept --ack <flag>…`, one per red flag.
+    expect((await cli(bin, ['proposal', 'accept', '--help'], { cwd: a.dir })).json.flags).toContainEqual(expect.objectContaining({ flag: '--ack <value>', field: 'ack', repeatable: true }));
     // Showing needs no terminal, only no agent marker.
     expect((await cli(bin, ['proposal', 'show', proposal!], { cwd: a.dir })).json).toMatchObject({ id: proposal, status: 'pending' });
 
