@@ -88,3 +88,21 @@ export {
   type NewChoreRun,
   type ServedRef,
 } from './chore-runs';
+export {
+  parseProposal,
+  PROPOSAL_PATTERN,
+  PROPOSALS_DIR,
+  proposalFile,
+  randomProposalId,
+  serializeProposal,
+  type CitedItem,
+  type CitedTrace,
+  type NewProposal,
+  type ProposalClaims,
+  type ProposalDraft,
+  type ProposalOp,
+  type ProposalRecord,
+  type ProposalView,
+  type RiskFlag,
+  type TokenOrigin,
+} from './proposals';

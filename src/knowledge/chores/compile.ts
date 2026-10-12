@@ -93,7 +93,8 @@ interface MapEntry {
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === 'string';
 
-class Problems {
+/** Reason codes and problems as a check collects them. */
+export class Problems {
   readonly reasons = new Set<string>();
   readonly problems: Record<string, string> = {};
   readonly rules = new Set<string>();
