@@ -19,6 +19,15 @@
 //  8. The report: what was written, the next steps, machine checks.
 //
 // Every refusal comes before step 4, so a refused init changes nothing.
+//
+// `init --upgrade` (spec §21) runs the same steps to move the pin to this
+// release: step 0 refuses a git operation in progress and checks every marker
+// against this release's J..K (./upgrade.ts); the plan adds the move, the
+// markers, the hooks, the other worktrees and live old-pin processes; the
+// upgrade-in-progress record is written before the worktree lease and removed
+// once config.yml pins this release; the report names exactly the paths to
+// commit. Re-running the same command resumes an interrupted upgrade. A plain
+// `init` at another pin than an upgrade in progress names skips the worktree.
 import { spawnSync } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
