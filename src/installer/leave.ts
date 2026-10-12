@@ -444,7 +444,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     if (left > 0) {
       // Their seen-here rows go with the store, and no later sweep would cut them.
       const them = left === 1 ? 'it' : 'them';
-      say(`${plural(left, 'bound context')} ${left === 1 ? 'wasn’t' : 'weren’t'} cut in time; leaving now loses ${left === 1 ? 'its' : 'their'} session records.`);
+      say(`${plural(left, 'bound context')} ${left === 1 ? 'wasn’t' : 'weren’t'} cut (over the cut’s time budget, or the cut failed); leaving now loses ${left === 1 ? 'its' : 'their'} session records.`);
       const answer = await prompter.ask(`Stop now, so you can run leave again to cut ${them}? [Y/n] `);
       if (answer === null || yes(answer, true)) {
         say('Nothing was removed. What leave committed stays in the local tracker ref; run leave again to cut the rest and push.');
