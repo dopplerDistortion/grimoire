@@ -87,7 +87,10 @@ describe('a clone joined from the packed tarball', () => {
     const pruning = await store.leases.acquire(partLeaseName('prune-copies'), { ttlMs: 120_000 });
     expect(pruning.status).toBe('acquired');
     const client = new Client({ name: 'claude-code', version: '2.1.296' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
-    await client.connect(new StdioClientTransport({ command: process.execPath, args: [...MCP_ENTRY_ARGS], cwd: world.a.dir, stderr: 'pipe' }));
+    const transport = new StdioClientTransport({ command: process.execPath, args: [...MCP_ENTRY_ARGS], cwd: world.a.dir, stderr: 'pipe' });
+    await client.connect(transport);
+    const server = transport.pid;
+    expect(server).toEqual(expect.any(Number));
     let duringServe: Awaited<ReturnType<typeof pruneCopies>>;
     try {
       await expect.poll(async () => (await store.processes.live({ role: 'mcp' })).map((r) => [r.pin, r.worktree]), { timeout: 10_000 }).toEqual([[PIN, world.a.dir]]);
@@ -97,9 +100,13 @@ describe('a clone joined from the packed tarball', () => {
       await writeConfig(world.a.dir, '1.0.0');
       duringServe = await pruneCopies(store);
     } finally {
+      // Ends stdin and resolves once the server process is gone; one still running after 2 s is killed, and a killed server leaves its record.
       await client.close();
     }
-    await expect.poll(async () => (await store.processes.list()).length, { timeout: 10_000 }).toBe(0);
+    // So the server removed its own record on its way out, with no waiting. The SDK's version-negotiation
+    // probe sibling is killed outright (TerminateProcess on Windows) and may leave a record, stale by its pid: only live records count.
+    expect((await store.processes.list()).filter(({ record }) => record.pid === server)).toEqual([]);
+    expect(await store.processes.live()).toEqual([]);
     const afterServe = await pruneCopies(store);
     if (pruning.status === 'acquired') await pruning.lease.release();
 
