@@ -8,7 +8,7 @@
 // from the merged view and the core's derivations.
 import { fieldConflict, findCycle, namedIn, openAttemptsOf, relatedIssue } from '../core/derive';
 import { readSyncStatus } from '../core/sync';
-import { aheadBehind, checkHistory, directoryFileConflicts, staleRefLocks, type StoreFinding, type TrackerTips, type TrackerView } from '../tracker';
+import { aheadBehind, checkHistory, directoryFileConflicts, staleRefLocks, type StoreFinding, type TrackerRefTips, type TrackerView } from '../tracker';
 import type { CheckOutcome, DoctorCheck, DoctorInput } from './doctor';
 import { messageOf, type CheckFinding } from './health';
 
@@ -194,7 +194,7 @@ const storeRefLocks: DoctorCheck = {
 };
 
 /** The remote sync uses (spec §4, Remote choice): grimoire.remote, else one with a tracker, else origin. */
-function syncRemote(tips: TrackerTips): string | null {
+function syncRemote(tips: TrackerRefTips): string | null {
   if (tips.remotes.has('origin')) return 'origin';
   return [...tips.remotes.keys()][0] ?? null;
 }

@@ -181,7 +181,7 @@ describe('content pointer-file refresh', () => {
     await mkdir(store.dir, { recursive: true });
     await writeFile(path.join(store.dir, 'format'), 'format: 2\ncompat: 2\nrequires: "2.0.0"\n');
 
-    const outcome = await pointerRefresh.run({ store, root, worktree: root, own: true, version: VERSION, context: () => Promise.reject(new Error('unused')) });
+    const outcome = await pointerRefresh.run({ store, root, worktree: root, own: true, version: VERSION, context: () => Promise.reject(new Error('unused')), once: (_key, make) => make() });
 
     expect(await read(root, '.claude/rules/grimoire.md')).toBe(instructionRulesText());
     expect(outcome.notices).toEqual(['grimoire refreshed 1 pointer file: commit it']);

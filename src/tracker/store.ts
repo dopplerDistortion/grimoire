@@ -77,6 +77,12 @@ export interface TrackerStore {
    * when its `format` marker is outside this release's range.
    */
   read(): Promise<TrackerView>;
+  /**
+   * The tip pair a read would show, resolved fresh, without reading the view:
+   * the local tracker ref and the chosen remote's remote-tracking tracker ref
+   * (null where a ref is missing). The dashboard's live events poll it.
+   */
+  tips(): Promise<TrackerTips>;
   /** The store's clock: the instant reads judge staleness by. */
   now(): Date;
   /**
@@ -150,6 +156,12 @@ const STALL_FLOOR_MS = 1_000;
 interface Tips {
   local: string | null;
   remote: string | null;
+}
+
+/** The local tracker tip and the chosen remote's remote-tracking tip. */
+export interface TrackerTips {
+  readonly local: string | null;
+  readonly remote: string | null;
 }
 
 /** What the clone's config says about remotes. */
@@ -291,6 +303,10 @@ class GitTrackerStore implements TrackerStore {
 
   now(): Date {
     return this.clock();
+  }
+
+  async tips(): Promise<TrackerTips> {
+    return this.resolveTips();
   }
 
   async read(): Promise<TrackerView> {

@@ -20,5 +20,7 @@ export {
 } from './run';
 export { UPKEEP_EVERY_MS, startUpkeep, type UpkeepLoop, type UpkeepLoopOptions } from './loop';
 export { operationInProgress, upgradeInProgress, upgradeSkipNotice, worktreeKey, type GitOperation } from './checkout';
-export { UPKEEP_PARTS, pendingSync, pointerRefresh, pruneCopiesPart } from './parts';
+export { UPKEEP_PARTS, generatedRemoval, pendingSync, pointerRefresh, pruneCopiesPart, skillReconcile } from './parts';
+export { refreshGeneratedOutput, type RefreshOptions } from './refresh';
 export { POINTER_REFRESH_RECORDS, noteRefreshed, refreshNotice, refreshedPointerFiles, type PointerRefreshRecord } from './refreshed';
+export { WORKTREE_WATCH_MS, watchNewWorktrees, type WorktreeWatcher } from './watch';

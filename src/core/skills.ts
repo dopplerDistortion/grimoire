@@ -385,7 +385,7 @@ export const skillEdit = define({
       ),
     ),
   }),
-  async run(input, { ctx, tracker, actor, scanner, requestSync }): Promise<SkillEditResult> {
+  async run(input, { ctx, tracker, actor, scanner, requestSync, servedChanged }): Promise<SkillEditResult> {
     const problem = skillNameProblem(input.name);
     if (problem) throw invalid({ name: problem });
     const author = writer(ctx);
@@ -431,8 +431,11 @@ export const skillEdit = define({
       await writeSkillChange(draft, scanner, { kind: 'edit', skill: input.name, text, saw }, { actor, by: author.email, surface: ctx.surface, clone });
       return { result: { name: input.name, version, from: current, created: current === null, changed: true } };
     });
-    // A human knowledge edit reaches other clones by the automatic sync (spec §4).
-    if (write.commit) requestSync(write.commit);
+    // A human knowledge edit reaches other clones by the automatic sync (spec §4), and this clone's worktrees at once (§15).
+    if (write.commit) {
+      requestSync(write.commit);
+      servedChanged();
+    }
     return write.result;
   },
 });

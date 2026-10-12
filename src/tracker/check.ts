@@ -48,14 +48,14 @@ export interface StoreFinding {
 }
 
 /** The tracker tips this clone holds: the local ref and each remote-tracking one. */
-export interface TrackerTips {
+export interface TrackerRefTips {
   readonly local: string | null;
   /** By remote name. */
   readonly remotes: ReadonlyMap<string, string>;
 }
 
 /** The tracker refs as `git for-each-ref` lists them. */
-export async function trackerTips(root: string): Promise<TrackerTips> {
+export async function trackerTips(root: string): Promise<TrackerRefTips> {
   const run = await runGit(root, ['for-each-ref', '--format=%(objectname) %(refname)', TRACKER_REF, 'refs/remotes/']);
   let local: string | null = null;
   const remotes = new Map<string, string>();
@@ -356,7 +356,7 @@ export interface TreeInspection {
  * ref and each remote-tracking one). A file is reported once however many
  * tips hold it.
  */
-export async function inspectTrees(root: string, tips: TrackerTips, formats: RecordFormats = {}): Promise<TreeInspection> {
+export async function inspectTrees(root: string, tips: TrackerRefTips, formats: RecordFormats = {}): Promise<TreeInspection> {
   const heads = [...new Set([tips.local, ...tips.remotes.values()].filter((tip): tip is string => tip !== null))];
   const seen = new Set<string>();
   const files: TreeFile[] = [];
@@ -470,7 +470,7 @@ async function logCommits(root: string, heads: readonly string[]): Promise<Logge
 }
 
 /** Write-once edits, foreign commits and knowledge records without grimoire's trailers, over every tracker tip's history. */
-export async function checkHistory(root: string, tips: TrackerTips): Promise<StoreFinding[]> {
+export async function checkHistory(root: string, tips: TrackerRefTips): Promise<StoreFinding[]> {
   const heads = [...new Set([tips.local, ...tips.remotes.values()].filter((tip): tip is string => tip !== null))];
   if (heads.length === 0) return [];
   const findings: StoreFinding[] = [];

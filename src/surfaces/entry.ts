@@ -50,6 +50,11 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
     const start = from ?? options.startDir;
     return runHealthVerb(rest[0], rest.slice(1), start === undefined ? {} : { startDir: start });
   }
+  if (rest[0] === 'start' || rest[0] === 'open') {
+    const { runOpenVerb, runStartVerb } = await import('./start/run');
+    const run = rest[0] === 'start' ? runStartVerb : runOpenVerb;
+    return run(withFrom(rest.slice(1)), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
+  }
   const { runCli } = await import('./cli/run');
   return runCli(withFrom(rest), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
 }

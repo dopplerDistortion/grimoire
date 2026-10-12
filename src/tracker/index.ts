@@ -5,6 +5,7 @@ export {
   DEFAULT_BUDGET_MS,
   STALE_REF_LOCK_MS,
   type TrackerStore,
+  type TrackerTips,
   type TrackerOptions,
   type WriteSpec,
   type WriteOutcome,
@@ -65,6 +66,7 @@ export {
   type RefLock,
   type StoreFinding,
   type StoreSeverity,
-  type TrackerTips,
+  type TrackerRefTips,
   type TreeInspection,
 } from './check';
+export { isKnownOp, opEffect, type OpEffect } from './ops';

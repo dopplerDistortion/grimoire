@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { MachineLocalStore } from '../machine-local';
 import { openTracker, type SyncOutcome } from '../tracker';
 import { VERSION } from '../version';
+import { readServedFingerprint } from '../generated/served';
 import { actorOf, type CallContext } from './context';
 import { autoSync, syncRequestOf, type AutoSyncRequest, type SyncSkip } from './sync';
 
@@ -63,7 +64,14 @@ export async function runBackgroundSync(
     })
     .catch(() => null);
   try {
-    return await autoSync(tracker, syncRequestOf(ctx, actor));
+    const before = await readServedFingerprint(tracker);
+    const outcome = await autoSync(tracker, syncRequestOf(ctx, actor));
+    // A fold that changed what agents are served: this process refreshes this pin's worktrees (spec §15 Refresh scope).
+    if ('fetched' in outcome && outcome.fetched && (await readServedFingerprint(tracker)) !== before) {
+      const { refreshGeneratedOutput } = await import('../upkeep/refresh');
+      await refreshGeneratedOutput({ root: ctx.repo.root, surface: ctx.surface, nonce: ctx.nonce }).catch(() => {});
+    }
+    return outcome;
   } finally {
     await registration?.unregister().catch(() => {});
     await tracker.close();

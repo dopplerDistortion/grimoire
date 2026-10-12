@@ -1,7 +1,8 @@
 // `local_link` (spec §3 Links, §20): the dashboard URL of an issue on this
-// machine. Never committed. The port comes from a live `start` lock, else the
+// machine. Never committed. The port comes from a live, non-stale `start`
+// lock (its pid alive and its port echoing its nonce), else the
 // `dashboard.port` machine setting, else the clone's hashed default.
-import { defaultDashboardPort, MachineLocalStore, START_LOCK } from '../machine-local';
+import { defaultDashboardPort, MachineLocalStore, runningStart } from '../machine-local';
 
 function asPort(value: unknown): number | null {
   const port = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
@@ -15,9 +16,8 @@ function asPort(value: unknown): number | null {
  */
 export async function dashboardPort(commonDir: string): Promise<number> {
   const store = new MachineLocalStore(commonDir);
-  const start = await store.locks.inspect(START_LOCK);
-  const running = start.status === 'held' ? asPort(start.holder.data?.port) : null;
-  if (running !== null) return running;
+  const running = await runningStart(store);
+  if (running !== null) return running.port;
   const setting = asPort(await store.records.read('machine-settings', 'dashboard.port'));
   return setting ?? (await defaultDashboardPort(commonDir));
 }

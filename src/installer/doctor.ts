@@ -7,7 +7,7 @@ import { sessionRecordProblem } from '../capture';
 import { GrimoireError } from '../errors';
 import { ledgerRecordProblem } from '../knowledge';
 import { findGitDirs, MachineLocalStore, type GitDirs, type Lease } from '../machine-local';
-import { inspectTrees, openTracker, removeStaleRefLocks, trackerTips, type TrackerStore, type TrackerTips, type TrackerView, type TreeInspection } from '../tracker';
+import { inspectTrees, openTracker, removeStaleRefLocks, trackerTips, type TrackerStore, type TrackerRefTips, type TrackerView, type TreeInspection } from '../tracker';
 import { holdWorktreeLease, noteRefreshed, operationInProgress, refreshNotice, upgradeInProgress, upgradeSkipNotice } from '../upkeep';
 import { VERSION } from '../version';
 import { readInstallConfig, type CheckoutInstall } from './config';
@@ -28,7 +28,7 @@ export interface DoctorInput {
   readonly config: CheckoutInstall | null;
   readonly env: NodeJS.ProcessEnv;
   /** The tracker tips this clone holds. */
-  readonly tips: () => Promise<TrackerTips>;
+  readonly tips: () => Promise<TrackerRefTips>;
   /** What the tracker trees hold, file by file. */
   readonly trees: () => Promise<TreeInspection>;
   /** The merged view every read shows; throws when it can't be read (NOT_SYNCED, an unparsable record). */
@@ -88,7 +88,7 @@ export interface FixReport {
 
 /** Runs the checks once over a fresh input; costly reads are shared between them. */
 async function runChecks(options: DoctorOptions, dirs: GitDirs, config: CheckoutInstall | null, version: string): Promise<{ input: DoctorInput; findings: Finding[]; checks: CheckRun[] }> {
-  let tips: Promise<TrackerTips> | null = null;
+  let tips: Promise<TrackerRefTips> | null = null;
   let trees: Promise<TreeInspection> | null = null;
   let tracker: Promise<TrackerStore> | null = null;
   let view: Promise<TrackerView> | null = null;
