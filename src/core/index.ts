@@ -19,6 +19,7 @@ import { settingsGet, settingsSet } from './settings';
 import { skillEdit, skillList, skillRead, skillShow } from './skills';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
+import { purgeSession, purgeTrace } from './purge';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
 import { choreSubmit } from './chore-submit';
 import { checkSurface } from './op';
@@ -57,6 +58,7 @@ export type { SettingsResult, SettingsSetResult, ShownSetting, SettingScope } fr
 export type { SkillListResult, SkillReadResult, SkillEditResult, SkillShowResult, ShownSkill, ShownChange, SkillProvenance, SkillOrigin } from './skills';
 export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, ShownSide } from './wiki';
 export type { QuarantineResult } from './quarantine';
+export type { PurgeHistory, PurgeSessionResult, PurgeTraceResult, CitingPage } from './purge';
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
 export type { ChoreSubmitResult } from './chore-submit';
 export { choreThresholds, dueChores } from './chores';
@@ -87,6 +89,8 @@ export interface CoreOptions {
   readonly clock?: () => Date;
   /** Draws an issue id suffix of the given length (default: crypto-random Crockford). */
   readonly randomIdSuffix?: (length: number) => string;
+  /** Draws an attempt handle (default: crypto-random); tests pin it. */
+  readonly randomAttemptHandle?: () => string;
   /** How long one write may keep retrying before BUSY (default ~10 s). */
   readonly writeBudgetMs?: number;
   /** The secret scanner for debriefs (default: the bundled rules). */
@@ -174,6 +178,8 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   wikiEdit,
   quarantine,
   unquarantine,
+  purgeTrace,
+  purgeSession,
   choreStart,
   choreRead,
   choreSubmit,
@@ -337,6 +343,7 @@ export function createCore(options: CoreOptions = {}): Core {
       tracker = openTracker(root, {
         ...(options.clock ? { clock: options.clock } : {}),
         ...(options.randomIdSuffix ? { randomIdSuffix: options.randomIdSuffix } : {}),
+        ...(options.randomAttemptHandle ? { randomAttemptHandle: options.randomAttemptHandle } : {}),
         ...(options.writeBudgetMs !== undefined ? { budgetMs: options.writeBudgetMs } : {}),
       });
       tracker.catch(() => trackers.delete(root));

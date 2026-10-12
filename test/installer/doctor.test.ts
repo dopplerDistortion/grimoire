@@ -288,6 +288,24 @@ describe('store checks', SLOW, () => {
     const report = await runDoctor({ root: world.a.dir });
 
     expect(found(report, 'purged-present')).toEqual([expect.objectContaining({ subject: attempt, severity: 'error' })]);
+    // The remedy: running the purge again removes what it left, keeping the tombstone.
+    const again = await ok(core.call('purge_trace', { attempt, reason: 'again' }, terminal(ctx)));
+    expect(again).toMatchObject({ attempt, changed: false, reason: 'secret' });
+    expect(found(await runDoctor({ root: world.a.dir }), 'purged-present')).toEqual([]);
+  });
+
+  test('a purge tombstone that isn’t what the canonical serializer writes is reported', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const { id } = await ok(core.call('create', { title: 'Purged' }, ctx));
+    const { attempt } = await ok(core.call('claim', { id }, ctx));
+    await ok(core.call('close', { id, reason: 'done', attempt, debrief: { asked: 'a', tried: 't', failed: 'none', worked: 'w', next: 'none' } }, ctx));
+    await ok(core.call('purge_trace', { attempt, reason: 'secret' }, terminal(ctx)));
+    expect(found(await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS }), 'non-canonical')).toEqual([]);
+    await commitToTracker(world.a, { [`purges/${attempt}.md`]: `---\nreason: "secret"\nby: "alice@example.com"\n---\n` });
+
+    const report = await runDoctor({ root: world.a.dir, checks: RECORD_CHECKS });
+
+    expect(found(report, 'non-canonical')).toEqual([expect.objectContaining({ subject: `purges/${attempt}.md` })]);
   });
 
   test('a ref lock older than ~30 s is reported as stale and fixable; a fresh one is not', async ({ world }) => {
