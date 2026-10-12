@@ -21,6 +21,13 @@ describe('the op registry', () => {
         'labels',
         'list',
         'outcome_set',
+        'proposal_accept',
+        'proposal_dismiss',
+        'proposal_list',
+        'proposal_purge',
+        'proposal_reconsider',
+        'proposal_reject',
+        'proposal_show',
         'purge_session',
         'purge_trace',
         'quarantine',
@@ -74,6 +81,11 @@ describe('the op registry', () => {
         inputSchema: { type: 'object', required: ['ref'], additionalProperties: false },
       });
       expect(byName.labels).toMatchObject({ kind: 'read', annotations: { readOnlyHint: true } });
+      // The gate (spec §18): people show proposals and decide them; no decision is ever offered to agents.
+      for (const name of ['proposal_accept', 'proposal_reject', 'proposal_dismiss', 'proposal_reconsider', 'proposal_purge']) {
+        expect(byName[name], name).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
+      }
+      for (const name of ['proposal_show', 'proposal_list']) expect(byName[name], name).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
       expect(byName.skill_list).toMatchObject({ kind: 'read', policy: 'agent', mcp: true, annotations: { readOnlyHint: true } });
       expect(byName.skill_read).toMatchObject({
         kind: 'read',
