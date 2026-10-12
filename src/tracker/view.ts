@@ -51,8 +51,10 @@ import {
   OUTCOMES_DIR,
   SESSION_KEY_PATTERN,
   sessionFile,
+  sessionPurgeFile,
   SESSIONS_DIR,
   PURGES_DIR,
+  tracePurgeFile,
   SETTINGS_FILE,
   skillVersionFile,
 } from './layout';
@@ -65,6 +67,7 @@ import { parseSetting, serializeSettings, settingLine, settingLines, type StoreS
 import { WikiDraftState, WikiReader, type WikiDraft, type WikiView } from './wiki';
 import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type QuarantineView } from './quarantine';
 import { ChoreRunDraftState, ChoreRunReader, type ChoreRunDraft, type ChoreRunView } from './chore-runs';
+import { NO_PURGES, parsePurge, serializePurge, type PurgedFacts, type PurgeIndex, type PurgeTombstone } from './purge';
 
 /** What every read sees: the tracker at one tip. */
 export interface TrackerView {
@@ -125,6 +128,18 @@ export interface TrackerView {
   sessionRecord(handle: string, key: string): Promise<Buffer | null>;
   /** The session keys of `handle` whose records a tombstone (`purges/<handle>/<key>.md`) purged: no write may recreate them (spec §3). */
   purgedSessions(handle: string): Promise<ReadonlySet<string>>;
+  /** The tombstone of one purged session record of `handle`, or undefined. */
+  sessionPurge(handle: string, key: string): PurgeTombstone | undefined;
+  /** The tombstone of a purged trace (`purges/<handle>.md`), or undefined. A purged attempt is gone from every other read. */
+  tracePurge(handle: string): PurgeTombstone | undefined;
+  /** Every purged trace's tombstone, by attempt handle. */
+  purgedTraces(): ReadonlyMap<string, PurgeTombstone>;
+  /**
+   * Files a purge tombstone says are gone that this tree still holds (a hand
+   * edit, or a writer that ignored the tombstone), by the handle whose
+   * tombstone names them: what running the purge again removes.
+   */
+  purgeLeftovers(handle: string): readonly string[];
   /** The wiki (spec §17): pages, their set-aside sides and the human wiki edits, read on first use. */
   readonly wiki: WikiView;
   /** Quarantine marks and clears (spec §17, §18), read on first use. */
@@ -157,6 +172,11 @@ export type NewAttempt = Omit<AttemptStart, 'at' | 'start_commit' | 'extra'>;
 export type NewEnd = Omit<AttemptEnd, 'at' | 'extra'>;
 /** A verdict a write records; the draft adds its time. */
 export type NewOutcome = Omit<AttemptOutcome, 'at' | 'extra'>;
+/** A purge tombstone a write records; the draft adds its time. */
+export interface NewPurge {
+  readonly by: string;
+  readonly reason: string;
+}
 
 /** A view a write round edits; its edits become that round's one commit. */
 export interface TrackerDraft extends TrackerView {
@@ -213,6 +233,19 @@ export interface TrackerDraft extends TrackerView {
    * tombstone purged (`purgedSessions`).
    */
   putSessionRecord(handle: string, key: string, bytes: Buffer): void;
+  /**
+   * Purges a trace (spec §3): removes the attempt's directory and its outcome
+   * file, and writes `purges/<handle>.md`. For a trace purged already, it
+   * removes only what the tree still holds of it, keeping the tombstone. The
+   * attempt is gone from this draft from here on.
+   */
+  purgeTrace(handle: string, tombstone: NewPurge): void;
+  /**
+   * Purges one session record of an open attempt (spec §14): removes
+   * `sessions/<key>.md` and writes `purges/<handle>/<key>.md`, holding the
+   * kept facts when `facts` is `kept`.
+   */
+  purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): void;
   /** The wiki as this round changes it; page writes regenerate the derived index and log. */
   readonly wiki: WikiDraft;
   /** Quarantine as this round changes it. */
@@ -272,6 +305,10 @@ export interface SnapshotParts {
   readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>;
   /** Each issue's conflict records, oldest first. */
   readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
+  /** The purge tombstones the tree holds. */
+  readonly purges?: PurgeIndex;
+  /** Files a tombstone says are gone that the tree still holds, by the purged handle. */
+  readonly leftovers?: ReadonlyMap<string, readonly string[]>;
 }
 
 export class Snapshot implements TrackerView {
@@ -294,6 +331,8 @@ export class Snapshot implements TrackerView {
   private readonly commentFiles: ReadonlyMap<string, readonly StoredComment[]>;
   private readonly attemptLists: ReadonlyMap<string, readonly AttemptRecord[]>;
   private readonly conflictLists: ReadonlyMap<string, readonly ConflictRecord[]>;
+  readonly purges: PurgeIndex;
+  private readonly leftovers: ReadonlyMap<string, readonly string[]>;
   private readonly ordered: readonly IssueRecord[];
   private readonly attemptsById = new Map<string, AttemptRecord>();
   readonly wiki: WikiReader;
@@ -317,6 +356,8 @@ export class Snapshot implements TrackerView {
     this.commentFiles = parts.commentFiles;
     this.attemptLists = parts.attemptLists;
     this.conflictLists = parts.conflictLists;
+    this.purges = parts.purges ?? NO_PURGES;
+    this.leftovers = parts.leftovers ?? new Map();
     this.ordered = [...parts.records.values()].sort(byOrder);
     this.ids = new Set(parts.records.keys());
     for (const list of parts.attemptLists.values()) for (const attempt of list) this.attemptsById.set(attempt.id, attempt);
@@ -423,9 +464,23 @@ export class Snapshot implements TrackerView {
   }
 
   async purgedSessions(handle: string): Promise<ReadonlySet<string>> {
-    if (!ATTEMPT_PATTERN.test(handle)) return new Set();
-    const entries = await this.source.dirAt(this.rootTree, `${PURGES_DIR}/${handle}`);
-    return new Set(entries.filter((e) => e.mode !== TREE_MODE && e.name.endsWith('.md')).map((e) => e.name.slice(0, -3)));
+    return new Set(this.purges.sessions.get(handle)?.keys() ?? []);
+  }
+
+  sessionPurge(handle: string, key: string): PurgeTombstone | undefined {
+    return this.purges.sessions.get(handle)?.get(key);
+  }
+
+  tracePurge(handle: string): PurgeTombstone | undefined {
+    return this.purges.traces.get(handle);
+  }
+
+  purgedTraces(): ReadonlyMap<string, PurgeTombstone> {
+    return this.purges.traces;
+  }
+
+  purgeLeftovers(handle: string): readonly string[] {
+    return this.leftovers.get(handle) ?? [];
   }
 }
 
@@ -469,6 +524,12 @@ export class Draft implements TrackerDraft {
   private readonly versionsHere = new Map<string, Buffer>();
   /** Session records this round writes, by attempt handle, then session key. */
   private readonly sessionsHere = new Map<string, Map<string, Buffer>>();
+  /** Traces this round purges, by handle, with the tombstone it writes (the stored one for a trace purged already). */
+  private readonly tracePurgesHere = new Map<string, PurgeTombstone>();
+  /** Session records this round purges, by handle, then key. */
+  private readonly sessionPurgesHere = new Map<string, Map<string, PurgeTombstone>>();
+  /** What this round's purges remove, and the tombstones they write (null: one stored already stays). */
+  private readonly purgeEdits = new Map<string, Buffer | null>();
   private commentMs: number | null = null;
   private commentN = 0;
   readonly wiki: WikiDraftState;
@@ -568,7 +629,10 @@ export class Draft implements TrackerDraft {
   }
 
   attempts(issue: string): readonly AttemptRecord[] {
-    const records = this.base.attempts(issue).map((record) => this.withEdits(record));
+    const records = this.base
+      .attempts(issue)
+      .filter((record) => !this.tracePurgesHere.has(record.id))
+      .map((record) => this.withEdits(record));
     for (const [id, opened] of this.opened) {
       if (opened.issue === issue) {
         records.push(
@@ -582,12 +646,18 @@ export class Draft implements TrackerDraft {
   attempt(handle: string): AttemptRecord | undefined {
     const opened = this.opened.get(handle);
     if (opened) return this.attempts(opened.issue).find((a) => a.id === handle);
-    const record = this.base.attempt(handle);
+    const record = this.tracePurgesHere.has(handle) ? undefined : this.base.attempt(handle);
     return record ? this.withEdits(record) : undefined;
   }
 
   allAttempts(): readonly AttemptRecord[] {
-    return [...this.base.allAttempts().map((record) => this.withEdits(record)), ...[...this.opened.keys()].map((handle) => this.attempt(handle)!)];
+    return [
+      ...this.base
+        .allAttempts()
+        .filter((record) => !this.tracePurgesHere.has(record.id))
+        .map((record) => this.withEdits(record)),
+      ...[...this.opened.keys()].map((handle) => this.attempt(handle)!),
+    ];
   }
 
   traceFile(handle: string, file: string): Promise<Buffer | null> {
@@ -635,16 +705,79 @@ export class Draft implements TrackerDraft {
   }
 
   async sessionRecord(handle: string, key: string): Promise<Buffer | null> {
+    if (!this.attempt(handle) || this.sessionPurgesHere.get(handle)?.has(key)) return null;
     return this.sessionsHere.get(handle)?.get(key) ?? this.base.sessionRecord(handle, key);
   }
 
-  purgedSessions(handle: string): Promise<ReadonlySet<string>> {
-    return this.base.purgedSessions(handle);
+  async purgedSessions(handle: string): Promise<ReadonlySet<string>> {
+    const here = this.sessionPurgesHere.get(handle);
+    const base = await this.base.purgedSessions(handle);
+    return here ? new Set([...base, ...here.keys()]) : base;
+  }
+
+  sessionPurge(handle: string, key: string): PurgeTombstone | undefined {
+    return this.sessionPurgesHere.get(handle)?.get(key) ?? this.base.sessionPurge(handle, key);
+  }
+
+  tracePurge(handle: string): PurgeTombstone | undefined {
+    return this.tracePurgesHere.get(handle) ?? this.base.tracePurge(handle);
+  }
+
+  purgedTraces(): ReadonlyMap<string, PurgeTombstone> {
+    if (this.tracePurgesHere.size === 0) return this.base.purgedTraces();
+    return new Map([...this.base.purgedTraces(), ...this.tracePurgesHere]);
+  }
+
+  purgeLeftovers(handle: string): readonly string[] {
+    const removed = (file: string) => this.purgeEdits.has(file) && this.purgeEdits.get(file) === null;
+    return this.base.purgeLeftovers(handle).filter((file) => !removed(file));
+  }
+
+  purgeTrace(handle: string, tombstone: NewPurge): void {
+    const record = this.attempt(handle);
+    const stored = this.tracePurge(handle);
+    if (!record && !stored) throw notFound('attempt', handle);
+    // A trace purged already keeps its tombstone; what the tree still holds of it goes.
+    const kept: PurgeTombstone = stored ?? { by: tombstone.by, at: this.now.toISOString(), reason: tombstone.reason, kept: null, extra: {} };
+    for (const file of this.base.purgeLeftovers(handle)) this.purgeEdits.set(file, null);
+    if (record) {
+      this.purgeEdits.set(attemptDir(record.issue, handle), null);
+      this.purgeEdits.set(outcomeFile(record.issue, handle), null);
+    }
+    if (!stored) this.purgeEdits.set(tracePurgeFile(handle), serializePurge(kept));
+    this.tracePurgesHere.set(handle, kept);
+    // Nothing this round wrote under the attempt survives it.
+    for (const pending of [this.sealed, this.outcomes, this.activity, this.sessionsHere]) pending.delete(handle);
+  }
+
+  purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): void {
+    const record = this.attempt(handle);
+    if (!record) throw notFound('attempt', handle);
+    if (!SESSION_KEY_PATTERN.test(key)) throw new Error(`a session key is a hex hash, not ${JSON.stringify(key)}`);
+    const stored = this.sessionPurge(handle, key);
+    const written: PurgeTombstone = stored ?? {
+      by: tombstone.by,
+      at: this.now.toISOString(),
+      reason: tombstone.reason,
+      facts: tombstone.facts,
+      kept: tombstone.facts === 'kept' ? tombstone.kept : null,
+      extra: {},
+    };
+    const file = sessionFile(record.issue, handle, key);
+    for (const left of this.base.purgeLeftovers(handle)) if (left === file) this.purgeEdits.set(left, null);
+    this.purgeEdits.set(file, null);
+    if (!stored) this.purgeEdits.set(sessionPurgeFile(handle, key), serializePurge(written));
+    let keys = this.sessionPurgesHere.get(handle);
+    if (!keys) this.sessionPurgesHere.set(handle, (keys = new Map()));
+    keys.set(key, written);
+    this.sessionsHere.get(handle)?.delete(key);
   }
 
   putSessionRecord(handle: string, key: string, bytes: Buffer): void {
     if (!this.attempt(handle)) throw new Error(`no attempt ${handle}`);
     if (!SESSION_KEY_PATTERN.test(key)) throw new Error(`a session key is a hex hash, not ${JSON.stringify(key)}`);
+    // A purge tombstone dominates every write path (spec §3).
+    if (this.sessionPurge(handle, key)) throw new Error(`the session record ${handle}/${key} was purged`);
     let records = this.sessionsHere.get(handle);
     if (!records) this.sessionsHere.set(handle, (records = new Map()));
     records.set(key, bytes);
@@ -830,6 +963,8 @@ export class Draft implements TrackerDraft {
     for (const [file, edit] of this.wiki.fileEdits()) edits.set(file, edit);
     for (const [file, edit] of this.quarantine.fileEdits()) edits.set(file, edit);
     for (const [file, edit] of this.choreRuns.fileEdits()) edits.set(file, edit);
+    // Last: a purge's removals win over anything else this round wrote.
+    for (const [file, edit] of this.purgeEdits) edits.set(file, edit);
     return edits;
   }
 }
@@ -858,6 +993,7 @@ class LoaderMemos {
   readonly attemptsByTree = new BoundedMap<string, readonly LoadedAttempt[]>(8_192);
   readonly outcomesByTree = new BoundedMap<string, readonly LoadedOutcome[]>(8_192);
   readonly tombstonesByTree = new BoundedMap<string, ReadonlyMap<string, Tombstone>>(64);
+  readonly purgesByTree = new BoundedMap<string, PurgeIndex>(64);
 }
 
 /** Builds snapshots from tracker trees, memoizing every subtree by oid. */
@@ -902,7 +1038,7 @@ export class SnapshotLoader {
       const entry = find(name);
       return entry?.mode === TREE_MODE ? entry.oid : null;
     };
-    const [issues, markerBytes, settingsBytes, deleted, forwards, attempts, outcomes] = await Promise.all([
+    const [issues, markerBytes, settingsBytes, deleted, forwards, attempts, outcomes, purges] = await Promise.all([
       this.issuesUnder(subtree(ISSUES_DIR), 0),
       this.blobOf(find(FORMAT_FILE)),
       this.blobOf(find(SETTINGS_FILE)),
@@ -910,10 +1046,31 @@ export class SnapshotLoader {
       this.forwardsIn(tree),
       this.sharded(subtree(ATTEMPTS_DIR), 0, this.attemptsByTree, (issue, oid) => this.attemptsOf(issue, oid)),
       this.sharded(subtree(OUTCOMES_DIR), 0, this.outcomesByTree, (issue, oid) => this.outcomesOf(issue, oid)),
+      this.purgesIn(subtree(PURGES_DIR)),
     ]);
-    const verdicts = new Map(outcomes.map((o) => [`${o.issue}/${o.attempt}`, o.outcome]));
+    // A purge tombstone dominates (spec §3): what it names is gone from every read, even where the tree still holds it.
+    const leftovers = new Map<string, string[]>();
+    const leftover = (handle: string, file: string) => {
+      const list = leftovers.get(handle);
+      if (list) list.push(file);
+      else leftovers.set(handle, [file]);
+    };
+    const verdicts = new Map<string, AttemptOutcome>();
+    for (const o of outcomes) {
+      if (purges.traces.has(o.attempt)) leftover(o.attempt, outcomeFile(o.issue, o.attempt));
+      else verdicts.set(`${o.issue}/${o.attempt}`, o.outcome);
+    }
     const attemptLists = new Map<string, AttemptRecord[]>();
-    for (const loaded of attempts) {
+    for (let loaded of attempts) {
+      if (purges.traces.has(loaded.id)) {
+        leftover(loaded.id, attemptDir(loaded.issue, loaded.id));
+        continue;
+      }
+      const purgedKeys = purges.sessions.get(loaded.id);
+      if (purgedKeys && [...loaded.sessions.keys()].some((key) => purgedKeys.has(key))) {
+        for (const key of loaded.sessions.keys()) if (purgedKeys.has(key)) leftover(loaded.id, sessionFile(loaded.issue, loaded.id, key));
+        loaded = { ...loaded, sessions: new Map([...loaded.sessions].filter(([key]) => !purgedKeys.has(key))) };
+      }
       let list = attemptLists.get(loaded.issue);
       if (!list) attemptLists.set(loaded.issue, (list = []));
       list.push({ ...loaded, outcome: verdicts.get(`${loaded.issue}/${loaded.id}`) ?? null });
@@ -934,7 +1091,35 @@ export class SnapshotLoader {
       commentFiles: new Map(issues.map(({ record, comments }) => [record.id, comments])),
       attemptLists,
       conflictLists: new Map(issues.map(({ record, conflicts }) => [record.id, conflicts])),
+      purges,
+      leftovers,
     });
+  }
+
+  /** The purge tombstones under `purges/` (memoized by the directory's oid). */
+  private async purgesIn(dir: string | null): Promise<PurgeIndex> {
+    if (dir === null) return NO_PURGES;
+    let index = this.memos.purgesByTree.get(dir);
+    if (!index) {
+      const traces = new Map<string, PurgeTombstone>();
+      const sessions = new Map<string, Map<string, PurgeTombstone>>();
+      for (const entry of await this.objects.tree(dir)) {
+        if (entry.mode !== TREE_MODE) {
+          const handle = entry.name.slice(0, -3);
+          if (entry.name.endsWith('.md') && ATTEMPT_PATTERN.test(handle)) traces.set(handle, parsePurge(await this.objects.blob(entry.oid)));
+          continue;
+        }
+        if (!ATTEMPT_PATTERN.test(entry.name)) continue;
+        const keys = new Map<string, PurgeTombstone>();
+        for (const file of await this.objects.tree(entry.oid)) {
+          if (file.mode !== TREE_MODE && file.name.endsWith('.md')) keys.set(file.name.slice(0, -3), parsePurge(await this.objects.blob(file.oid)));
+        }
+        if (keys.size > 0) sessions.set(entry.name, keys);
+      }
+      index = { traces, sessions };
+      this.memos.purgesByTree.set(dir, index);
+    }
+    return index;
   }
 
   /** Every id a tip holds, live or retired, from tree names alone. */

@@ -127,8 +127,28 @@ export interface TrackerStore {
    * UPGRADE_REQUIRED, BUSY) throw.
    */
   sync(spec: SyncSpec): Promise<SyncOutcome>;
+  /**
+   * Drops `paths` from the unpushed segment (spec §3 Unpushed content, a
+   * purge): every local commit that no remote-tracking tracker holds is
+   * written again without them, oldest first, with the same author, committer
+   * and message, and the ref moves by compare-and-set. The tracker reflog's
+   * entries for the rewritten commits are expired; grimoire never runs gc.
+   * Pushed history is never rewritten: `pushed` says whether it holds any of
+   * `paths`, which it keeps.
+   */
+  dropUnpushed(paths: readonly string[]): Promise<UnpushedDrop>;
   /** Stops the store's git process. */
   close(): Promise<void>;
+}
+
+/** What dropping paths from the unpushed segment did. */
+export interface UnpushedDrop {
+  /** How many unpushed commits were written again. */
+  readonly rewritten: number;
+  /** The local tracker tip after it. */
+  readonly tip: string | null;
+  /** Whether pushed history (what a remote-tracking tracker holds) has any of the paths: it keeps them. */
+  readonly pushed: boolean;
 }
 
 export interface InitializeOptions {
@@ -400,24 +420,71 @@ class GitTrackerStore implements TrackerStore {
    * tip's mode allows text or nothing carried any.
    */
   private async stripUnpushed(pushed: string | null, policy: TextPolicy): Promise<string | null> {
+    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
+    return this.rewriteUnpushed(async (local) => {
+      if (local === pushed) return null;
+      if (!policy.forbidsText(await this.snapshotAt(local))) return null;
+      return { excluded: pushed ? [pushed] : [], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
+    }).then((done) => (done && done.rewritten > 0 ? done.tip : null));
+  }
+
+  async dropUnpushed(paths: readonly string[]): Promise<UnpushedDrop> {
+    let remotes: string[] = [];
+    const done = await this.rewriteUnpushed(async (_local, refs) => {
+      remotes = [...new Set(refs.remotes.values())];
+      return { excluded: remotes, transform: (tree) => this.dropPaths(tree, paths) };
+    });
+    const tip = done?.tip ?? (await this.trackerRefs()).local;
+    return { rewritten: done?.rewritten ?? 0, tip, pushed: await this.pushedHolds(remotes, paths) };
+  }
+
+  /** Whether the history of any of `tips` (pushed history) ever held one of `paths`. */
+  private async pushedHolds(tips: readonly string[], paths: readonly string[]): Promise<boolean> {
+    if (tips.length === 0 || paths.length === 0) return false;
+    const run = await this.git(['rev-list', '-1', ...tips, '--', ...paths]);
+    // Unsure (git failed): say pushed history may keep it, never that it doesn't.
+    return run.code !== 0 || run.stdout.toString('utf8').trim() !== '';
+  }
+
+  /** `tree` without `paths` (the same tree when it holds none of them). */
+  private async dropPaths(tree: string, paths: readonly string[]): Promise<string> {
+    const held = await Promise.all(paths.map((path) => this.objects.entryAt(tree, path)));
+    if (held.every((entry) => entry === null)) return tree;
+    const edits = new Map<string, null>(paths.map((path) => [path, null]));
+    return (await this.objects.editTree(tree, edits)) ?? (await this.objects.emptyTree());
+  }
+
+  /**
+   * Rewrites the unpushed segment as `plan` says for the local tip: which
+   * commits count as pushed (excluded with their history) and how each tree
+   * changes. Runs like a write (one at a time in this process, under the
+   * fairness lock) and moves the ref with a compare-and-set, then expires the
+   * reflog entries of the commits it rewrote. Null when there is no local
+   * tracker or `plan` says there is nothing to do.
+   */
+  private async rewriteUnpushed(
+    plan: (local: string, refs: TrackerRefs) => Promise<{ excluded: readonly string[]; transform: (tree: string) => Promise<string> } | null>,
+  ): Promise<{ tip: string; rewritten: number } | null> {
     const deadline = Date.now() + this.budgetMs;
     const turn = await this.turnstile.run(deadline, async () => {
       const lock = await this.fairness.acquire(deadline);
       if (!lock) throw busy('another grimoire write held the tracker for the whole write budget');
       try {
         for (;;) {
-          const local = (await this.trackerRefs()).local;
-          if (local === null || local === pushed) return null;
-          if (!policy.forbidsText(await this.snapshotAt(local))) return null;
-          const rewritten = await this.rewriteSegment(local, pushed, policy);
-          if (rewritten === local) return null;
-          const move = await this.moveRef(local, rewritten);
+          const refs = await this.trackerRefs();
+          const local = refs.local;
+          if (local === null) return null;
+          const planned = await plan(local, refs);
+          if (!planned) return null;
+          const { tip, rewritten } = await this.rewriteSegment(local, planned.excluded, planned.transform);
+          if (tip === local) return { tip, rewritten: 0 };
+          const move = await this.moveRef(local, tip);
           if (move.moved) {
             await this.git(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', TRACKER_REF]).catch(() => {});
-            return rewritten;
+            return { tip, rewritten };
           }
           if (move.staleLock) throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
-          if (Date.now() >= deadline) throw busy('the tracker kept moving while sync rewrote its unpushed commits');
+          if (Date.now() >= deadline) throw busy('the tracker kept moving while its unpushed commits were rewritten');
         }
       } finally {
         await lock.release();
@@ -427,20 +494,28 @@ class GitTrackerStore implements TrackerStore {
     return turn.value;
   }
 
-  /** The segment `local` holds beyond `pushed`, written again with its records' text stripped: the new tip (`local` when nothing changed). */
-  private async rewriteSegment(local: string, pushed: string | null, policy: TextPolicy): Promise<string> {
-    const listed = await this.git(['rev-list', '--reverse', '--topo-order', '--parents', local, ...(pushed ? [`^${pushed}`] : [])]);
+  /**
+   * The segment `local` holds beyond the `excluded` commits, each tree changed
+   * by `transform` and each commit written again over its rewritten parents:
+   * the new tip (`local` when nothing changed) and how many commits changed.
+   */
+  private async rewriteSegment(
+    local: string,
+    excluded: readonly string[],
+    transform: (tree: string) => Promise<string>,
+  ): Promise<{ tip: string; rewritten: number }> {
+    const listed = await this.git(['rev-list', '--reverse', '--topo-order', '--parents', local, ...excluded.map((commit) => `^${commit}`)]);
     if (listed.code !== 0) throw new Error(`git rev-list failed: ${listed.stderr.toString().trim()}`);
-    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
     const trees = new Map<string, string>();
     const mapped = new Map<string, string>();
+    let rewritten = 0;
     for (const line of listed.stdout.toString('utf8').split(/\r?\n/)) {
       if (line === '') continue;
       const [commit, ...parents] = line.split(' ') as [string, ...string[]];
       const { tree } = await this.objects.commit(commit);
       let stripped = trees.get(tree);
       if (stripped === undefined) {
-        stripped = await this.stripTree(tree, pushedTree, policy);
+        stripped = await transform(tree);
         trees.set(tree, stripped);
       }
       const newParents = parents.map((parent) => mapped.get(parent) ?? parent);
@@ -460,8 +535,9 @@ class GitTrackerStore implements TrackerStore {
       const rest = split < 0 ? '' : raw.slice(split);
       const bytes = [`tree ${stripped}`, ...newParents.map((parent) => `parent ${parent}`), ...header].join('\n') + rest;
       mapped.set(commit, await this.objects.write('commit', Buffer.from(bytes, 'utf8')));
+      rewritten++;
     }
-    return mapped.get(local) ?? local;
+    return { tip: mapped.get(local) ?? local, rewritten };
   }
 
   /** `tree` with the text stripped from each session record that `pushedTree` doesn't hold at the same path. */

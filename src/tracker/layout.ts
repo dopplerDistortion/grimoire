@@ -115,6 +115,11 @@ export function sessionFile(issue: string, attempt: string, key: string): string
   return `${attemptDir(issue, attempt)}/${SESSIONS_DIR}/${key}.md`;
 }
 
+/** `purges/<attempt-id>.md`: the tombstone of a purged trace (spec §3). */
+export function tracePurgeFile(attempt: string): string {
+  return `${PURGES_DIR}/${attempt}.md`;
+}
+
 /** `purges/<attempt-id>/<session-key>.md`: the tombstone of one purged session record (spec §3, §14). */
 export function sessionPurgeFile(attempt: string, key: string): string {
   return `${PURGES_DIR}/${attempt}/${key}.md`;
