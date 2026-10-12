@@ -14,7 +14,7 @@ export {
   TRACKER_ROOT_KEY,
   namedTrackerRoot,
 } from './store';
-export type { SyncOutcome, SyncSpec, SyncFailure } from './sync';
+export type { SyncOutcome, SyncSpec, SyncFailure, TextPolicy } from './sync';
 export { stripUserinfo, type SyncFailureClass } from './remote';
 export type { TrackerView, TrackerDraft, NewComment, NewAttempt, NewEnd, NewOutcome } from './view';
 export type { IssueComment, CommentEntry } from './comment';

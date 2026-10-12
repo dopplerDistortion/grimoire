@@ -6,7 +6,7 @@
 import { describe, expect } from 'vitest';
 import type { CallContext } from '../../src/core';
 import { sessionKey } from '../../src/capture/seen-here';
-import { commitToTracker, trackerTip, TRACKER_REF } from './support';
+import { agentContext, commitToTracker, fetchTracker, pushTracker, trackerTip, TRACKER_REF } from './support';
 import { attemptDir, CLAUDE_SESSION, claimed, created, DEBRIEF, claudeCall, sessionRecords, setExcerptMode, test } from './capture-support';
 
 function terminal(ctx: CallContext): CallContext {
@@ -110,6 +110,47 @@ describe('settings set excerpts', () => {
     expect(bad).toMatchObject({ ok: false, error: { code: 'INVALID' } });
     expect(agent).toMatchObject({ ok: false, error: { code: 'HUMAN_ONLY' } });
     expect(await trackerTip(world.a)).toBe(before);
+  });
+
+  test('a push after tightening on another clone rewrites the unpushed segment: no pushed record carries text, and the text pushed before stays', async ({
+    world,
+    grimoire,
+    capture,
+  }) => {
+    const { core } = capture;
+    // A sealed trace with text, pushed while the store was in excerpts mode.
+    const doneId = await created(core, grimoire.ctx, 'Pushed with text');
+    const done = await claimed(core, grimoire.ctx, doneId);
+    capture.at('2026-10-11T03:27:30.000Z');
+    expect(await core.call('close', { id: doneId, reason: 'done', attempt: done, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'))).toMatchObject({ ok: true });
+    const openId = await created(core, grimoire.ctx, 'Open on a');
+    const open = await claimed(core, grimoire.ctx, openId);
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    // Clone a attaches a pending record with text and doesn't push it; clone b tightens to facts and pushes.
+    const pending = pendingRecord();
+    const recordPath = `${attemptDir(openId, open)}/sessions/${pending.key}.md`;
+    await commitToTracker(world.a, { [recordPath]: pending.bytes });
+    await commitToTracker(world.a, { 'unknown-later-file.txt': 'kept\n' });
+    const bob = terminal(agentContext(world.b));
+    expect(await core.call('settings_set', { key: 'excerpts', value: 'facts' }, bob)).toMatchObject({ ok: true, result: { changed: true } });
+    await pushTracker(world.b);
+
+    const synced = await core.call('sync', {}, terminal(grimoire.ctx));
+
+    expect(synced).toMatchObject({ ok: true, result: { state: 'pushed' } });
+    const remote = (await world.a.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]!;
+    // Every commit the remote holds: none carries the record with text.
+    for (const commit of (await world.a.git(['rev-list', remote])).split('\n')) {
+      const shown = await world.a.gitResult(['show', `${commit}:${recordPath}`]);
+      if (shown.code === 0) expect(shown.stdout.slice(shown.stdout.indexOf('\n---\n') + 5), commit).toBe('');
+    }
+    // The record itself, and the rest of the rewritten segment, arrived.
+    expect(await world.a.git(['show', `${remote}:${recordPath}`])).toContain('excerpt: "off"');
+    expect(await world.a.git(['show', `${remote}:unknown-later-file.txt`])).toBe('kept');
+    expect(await trackerTip(world.a)).toBe(remote);
+    // Pushed text stays.
+    expect((await sessionRecords(world.a, doneId, done))[0]!.body).not.toBe('');
   });
 
   test('settings_get shows the mode, and a tracker without it reads facts', async ({ grimoire }) => {

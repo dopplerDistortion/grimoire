@@ -12,9 +12,12 @@ import {
   type SyncFailureClass,
   type SyncOutcome,
   type SyncSpec,
+  type TextPolicy,
   type TrackerStore,
   type TrackerView,
 } from '../tracker';
+import { stripExcerptText } from '../capture/session-record';
+import { storeExcerptMode } from './settings';
 import type { Actor, CallContext } from './context';
 import { define, writer } from './op';
 import { s } from './schema';
@@ -190,6 +193,12 @@ async function readStatus(machine: MachineLocalStore): Promise<SyncStatusRecord 
   return machine.records.read<SyncStatusRecord>(STATUS, STATUS_KEY);
 }
 
+/** Before every push (spec §4): a merged mode other than `excerpts` keeps text out of the unpushed segment. */
+const PUSH_TEXT: TextPolicy = {
+  forbidsText: (view) => storeExcerptMode(view) !== 'excerpts',
+  stripText: stripExcerptText,
+};
+
 /** One sync: the tracker's fetch → fold → push, then its record and the markers settled. */
 async function syncOnce(tracker: TrackerStore, machine: MachineLocalStore, request: SyncRequest, spec: SyncSpec): Promise<SyncOutcome> {
   const outcome = await tracker.sync(spec);
@@ -223,6 +232,7 @@ async function syncRounds(
     actor: request.actor,
     timeoutMs: options.timeoutMs,
     ...(deadline !== undefined ? { deadline } : {}),
+    text: PUSH_TEXT,
   };
   let outcome: SyncOutcome | null = null;
   for (let round = 0; round < DRAIN_ROUNDS; round++) {
