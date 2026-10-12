@@ -7,7 +7,8 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, onTestFinished } from 'vitest';
-import { gitTest, makeTempDir, removeDir, runCommand, type GitWorld } from '#harness';
+import { fixturePath, gitTest, makeTempDir, removeDir, runCommand, type GitWorld } from '#harness';
+import { putMachineSetting } from '../../src/core/settings';
 import { MachineLocalStore } from '../../src/machine-local';
 import { commitToTracker, issuePath } from '../core/support';
 import { humanEnv, oneJsonObject } from '../surfaces/cli/support';
@@ -144,9 +145,57 @@ describe('doctor', () => {
     const usage = await shim(root, ['doctor', '--frobnicate']);
     const statusHelp = await shim(root, ['status', '--help']);
 
-    expect(help).toMatchObject({ code: 0, json: { verb: 'doctor', flags: { '--fix': expect.any(String) } } });
+    expect(help).toMatchObject({ code: 0, json: { verb: 'doctor', flags: { '--fix': expect.any(String), '--readers': expect.any(String) } } });
     expect(usage).toMatchObject({ code: 2, json: { usage_error: { help: 'grimoire doctor --help' } } });
     expect(statusHelp).toMatchObject({ code: 0, json: { verb: 'status', flags: { '--json': expect.any(String) } } });
+  }, LONG);
+
+  gitTest('plain doctor shows the capture statistics only; --readers adds the readers’ structure statistics, and is skipped in none mode', async ({ world }) => {
+    const root = await installed(world);
+    const claudeDir = await makeTempDir('grimoire-claude-config-');
+    const codexHome = await makeTempDir('grimoire-codex-home-');
+    onTestFinished(async () => {
+      await removeDir(claudeDir);
+      await removeDir(codexHome);
+    });
+    // A session of this repo, where Claude Code keeps it: the subagent-commit fixture, moved to run in this repo.
+    const session = 'ff9eace1-0645-4dd9-bf34-f61ffa87b3c2';
+    const project = path.join(claudeDir, 'projects', path.resolve(root).replace(/[^a-zA-Z0-9]/g, '-'));
+    await mkdir(project, { recursive: true });
+    const escaped = (p: string) => JSON.stringify(p).slice(1, -1);
+    const text = await readFile(fixturePath(`claude-code/transcripts/subagent-commit/${session}.jsonl`), 'utf8');
+    await writeFile(path.join(project, `${session}.jsonl`), text.split(escaped('C:\\Users\\user\\AppData\\Local\\Temp\\grimoire-gok156\\proj')).join(escaped(root)));
+    const env = humanEnv({ CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexHome });
+
+    const plain = await shim(root, ['doctor', '--json'], env);
+    const readers = await shim(root, ['doctor', '--readers'], env);
+
+    expect(plain.code, plain.stderr).toBe(0);
+    const ran = (report: Record<string, any>) => (report.checks as { check: string; status: string }[]).filter((run) => run.check.startsWith('capture.')).map((run) => [run.check, run.status]);
+    expect(ran(plain.json)).toEqual([['capture.stats', 'ok']]);
+    expect(readers.code, readers.stderr).toBe(0);
+    expect(ran(readers.json)).toEqual([
+      ['capture.stats', 'ok'],
+      ['capture.readers', 'findings'],
+    ]);
+    const stats = (readers.json.findings as { kind: string; details: Record<string, any> }[]).filter((finding) => finding.kind === 'reader-stats').map((finding) => finding.details);
+    expect(stats.map((entry) => [entry.client, entry.transcripts])).toEqual([
+      ['claude-code', 1],
+      ['codex', 0],
+    ]);
+    expect(readers.stderr).toMatch(/Capture:\n {2}info {4}claude-code reader 1: 1 transcript, \d+ lines \(\d+ unknown, 0 malformed\), 0 unreadable; steps: /);
+    // Structure only: nothing the transcript says.
+    for (const said of ['Add sub', 'git log', 'dba2f59']) expect(JSON.stringify(readers.json) + readers.stderr).not.toContain(said);
+
+    // A machine that commits no transcript text at all never opens one, even when asked.
+    await putMachineSetting(path.join(root, '.git'), 'capture.excerpts_max', 'none');
+    const none = await shim(root, ['doctor', '--readers', '--json'], env);
+
+    expect(none.code, none.stderr).toBe(0);
+    expect(ran(none.json)).toEqual([
+      ['capture.stats', 'ok'],
+      ['capture.readers', 'skipped'],
+    ]);
   }, LONG);
 
   gitTest('--from names the repo through the shim too, in either spelling; no repo there is an error object and exit 1', async ({ world }) => {

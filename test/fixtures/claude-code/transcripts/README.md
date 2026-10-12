@@ -49,3 +49,13 @@ sanitizing are in `../README.md`.
 | `subagent/` | `0e195270….jsonl`, `0e195270…/subagents/agent-aa0434c9616245e9e.jsonl` and `.meta.json` | The main thread launches a `general-purpose` subagent (`Agent` tool), which calls `mcp__grimoire__show` and Bash. Subagent lines carry the parent `sessionId`, `isSidechain: true` and `agentId`. The parent holds only the `Agent` call and its result (`toolUseResult.agentId`). `.meta.json` maps the subagent to the launching tool-use id. |
 | `spill/` | `38eff1c4….jsonl`, `38eff1c4…/tool-results/b1w38gq52.txt` | A 198 KB Bash output. The transcript's `tool_result` holds a `<persisted-output>` preview naming the spill file. The spill file is cut to its first 40 lines, plus an elision marker. |
 | `resume/` | `bd89d1c0….jsonl` | The `clear/` "after" file, then resumed with `--resume` (no fork). The same file and session id gain a `SessionStart:resume` hook record and a new turn. The first 39 lines are identical to `clear/bd89d1c0….jsonl`. |
+
+## Subagent commit (GOK-156)
+
+- **Client:** Claude Code 2.1.296, `claude -p --model sonnet --permission-mode bypassPermissions` (headless; the subagent ran on Haiku). Windows 11 (native). Captured 2026-10-12, in the probe repo `C:\Users\user\AppData\Local\Temp\grimoire-gok156\proj` (one `init` commit, `6448984`).
+- **Sanitized** as spike C's files: every line parsed and re-serialized; the Windows user name became `user` and the account e-mail `user@example.com`; the organization UUID became all zeros; in the client-noise attachments (`skill_listing`, `deferred_tools_delta`, `mcp_instructions_delta`, `agent_listing_delta`, `prompt_snapshot`, `session_context`, `remote_session_change`) the personal MCP servers' entries and the skill names were removed and every string over 600 characters was cut to its first 300 with a `…[fixture sanitizer: shortened from N chars]` marker. Conversation lines are untouched apart from the user name.
+
+| File | What it shows |
+| -- | -- |
+| `subagent-commit/ff9eace1-….jsonl` | The main line launches one `general-purpose` subagent (`Agent`, `toolu_01UTXByWB7vpCJEQ9XQtSwdv`, 12:39:08.800Z, result 12:39:25.836Z), whose hand-back quotes the commit line; then a Bash `git log --oneline` whose result lists `dba2f59 Add sub` and `6448984 init`. |
+| `subagent-commit/ff9eace1-…/subagents/agent-ae1c0b7534f14a681.jsonl` (+ `.meta.json`) | The subagent: `Write sub.txt`, then a Bash `cd … && git add sub.txt && git commit -m "Add sub"` (12:39:13.793Z, result 12:39:25.004Z) whose result holds `[main dba2f59] Add sub`. The probe repo's HEAD reflog timed that commit at 12:39:24Z. |

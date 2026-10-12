@@ -84,7 +84,7 @@ export const reassign = define({
       const { id, ending } = reassignable(draft, ref);
       if (ending.id === checked.ending.id) sealed = { handle: ending.id, keys: await sealCaptures(draft, ending.id, capture) };
       // An ending call binds (spec §14 Binding): the commit names the attempt it ended, never the one it opens.
-      sealOpenAttempt(draft, ending.id, { ended: 'reassign', by, binds: true });
+      sealOpenAttempt(draft, ending.id, { ended: 'reassign', by, binds: true, ...(ending.id === checked.ending.id ? { referenced: capture.referenced } : {}) });
       checkClaimable(draft, id, author.email);
       const attempt = draft.openAttempt(id, { assignee, actor: by, opened: 'assign', wiki_exposed: false });
       return {
@@ -179,7 +179,7 @@ export const reopen = define({
       for (const open of openAttemptsOf(draft, id)) {
         const capture = captures.get(open.record.id);
         if (capture) sealed.push({ handle: open.record.id, keys: await sealCaptures(draft, open.record.id, capture) });
-        sealOpenAttempt(draft, open.record.id, { ended: 'superseded', by, binds: false });
+        sealOpenAttempt(draft, open.record.id, { ended: 'superseded', by, binds: false, ...(capture ? { referenced: capture.referenced } : {}) });
       }
       const closing = closingAttempt(draft, id);
       let outcome: ReopenResult['outcome'] = null;

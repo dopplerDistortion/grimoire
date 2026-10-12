@@ -184,6 +184,18 @@ _Avoid_: Scan, crawl, harvest
 A session record that reaches an attempt through a fold after another clone ended it: admitted when it was cut before that end, dropped and counted when cut after it.
 _Avoid_: Stray record, orphan record
 
+**Observed commit**:
+A commit a bound context was seen making: git's creation line in the result of its own commit, cherry-pick or revert command (or a subagent's it launched), or a creating entry in its worktree's HEAD reflog timed inside one of its tool calls; recorded in that context's session record, never inferred from hashes a log or show printed.
+_Avoid_: Attempt commit, session commit, detected commit
+
+**Referenced commit**:
+A commit on any branch of the clone whose `Refs:` trailer names the issue, made while the attempt was open; recorded in the trace's `end.md` beside the observed commits of its session records.
+_Avoid_: Linked commit, mentioned commit
+
+**Agent skill edit**:
+A commit that changes the generated evolved-skill copies (`.grimoire/skills/**`) made by an agent: an observed commit of an agent context, or a referenced commit carrying a known agent co-author trailer (marked agent-assisted in a human attempt); a merge counts only when a merged copy matches neither parent.
+_Avoid_: Skill commit, stray commit
+
 **Excerpt mode**:
 The store setting (`excerpts`, `facts` or `none`) that decides what capture ever commits: excerpt text and facts, facts only, or nothing read from a transcript at all; a machine may only lower it for its own sessions.
 _Avoid_: Capture level, privacy mode, trace mode

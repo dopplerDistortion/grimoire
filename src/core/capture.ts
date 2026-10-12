@@ -4,7 +4,8 @@
 // its one compare-and-set round, before `end.md`. A replay never gets here, so
 // it never cuts again. Capture never fails the ending: a capture problem is a
 // record's status.
-import { captureAtEnd, CUT_BUDGET_MS, sealSessionRecords, type CaptureMode, type ContextCapture, type SkillReadEvent } from '../capture/end';
+import type { ReferencedCommit } from '../capture/commit-facts';
+import { captureAtEnd, CUT_BUDGET_MS, referencedAtEnd, sealSessionRecords, type CaptureMode, type ContextCapture, type SkillReadEvent } from '../capture/end';
 import { observedEvidence } from '../capture/evidence';
 import {
   cutSucceeded,
@@ -57,13 +58,14 @@ export function cutDeadline(env: Pick<OpEnv, 'capture'>): number {
   return Date.now() + (env.capture?.budgetMs ?? CUT_BUDGET_MS);
 }
 
-/** What an ending carries into its commit: the captures, and the mode they were cut under. */
+/** What an ending carries into its commit: the captures, the mode they were cut under, and the referenced commits for `end.md`. */
 export interface EndingCapture {
   readonly captures: readonly ContextCapture[];
   readonly mode: CaptureMode;
+  readonly referenced: readonly ReferencedCommit[];
 }
 
-const NOTHING: EndingCapture = { captures: [], mode: 'none' };
+const NOTHING: EndingCapture = { captures: [], mode: 'none', referenced: [] };
 
 /**
  * Step 2 (spec §14): cancels the sweeps running in this process, then cuts the
@@ -82,6 +84,9 @@ export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending
       .list<SkillReadEvent>(SKILL_READS)
       .then((entries) => entries.map((entry) => entry.value))
       .catch(() => []);
+    const at = env.tracker.now().toISOString();
+    // Referenced commits come from git alone, never a transcript: in every mode, beside the cut, within its budget.
+    const referenced = referencedAtEnd({ repoRoot: env.ctx.repo.root, issue: ending.issue, attempt: ending.attempt, at, deadline }).catch(() => []);
     const captures = await captureAtEnd({
       repoRoot: root,
       worktree: env.ctx.repo.root,
@@ -96,7 +101,7 @@ export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending
         pendingHint,
         ...(agentType !== undefined ? { agentType } : {}),
         binds: ending.binds,
-        at: env.tracker.now().toISOString(),
+        at,
       },
       mode,
       capped,
@@ -105,7 +110,7 @@ export async function cutForEnding(env: OpEnv, view: TrackerView, ending: Ending
       ...(env.capture ? { options: env.capture } : {}),
       deadline,
     });
-    return { captures, mode };
+    return { captures, mode, referenced: await referenced };
   } catch {
     return NOTHING;
   }
@@ -167,6 +172,8 @@ export interface TraceCapture {
   contexts: CaptureEntry[];
   /** True only when every bound context's facts were `scanned`; scorecards read false as "read unknown". */
   facts_complete: boolean;
+  /** The referenced commits `end.md` records (the observed ones are each context's `commits`); empty while the attempt is open. */
+  referenced: unknown[];
 }
 
 /** One stored session record as a trace's capture shows it. */
@@ -191,7 +198,7 @@ function entryOf(key: string, stored: SessionRecord): CaptureEntry {
 /** The capture of attempt `handle`, read from its session records and their purge tombstones. */
 export async function traceCapture(view: TrackerView, handle: string): Promise<TraceCapture> {
   const record = view.attempt(handle);
-  if (!record) return { contexts: [], facts_complete: false };
+  if (!record) return { contexts: [], facts_complete: false, referenced: [] };
   const purged = await view.purgedSessions(handle);
   const contexts: CaptureEntry[] = [];
   for (const key of [...record.sessions.keys()].sort()) {
@@ -222,5 +229,5 @@ export async function traceCapture(view: TrackerView, handle: string): Promise<T
       commits: [],
     });
   }
-  return { contexts, facts_complete: contexts.length > 0 && contexts.every((entry) => entry.facts === 'scanned') };
+  return { contexts, facts_complete: contexts.length > 0 && contexts.every((entry) => entry.facts === 'scanned'), referenced: [...(record.end?.commits ?? [])] };
 }

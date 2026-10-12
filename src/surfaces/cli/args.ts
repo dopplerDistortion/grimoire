@@ -333,7 +333,7 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
 const RUNTIME_VERBS = [
   { verb: 'init', kind: 'write', policy: 'human-only', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
   { verb: 'status', kind: 'read', policy: 'agent', description: 'What to know about this checkout now: sync, refreshed pointer files, Node, stale claims, the excerpt mode, the Codex hook. Writes nothing.' },
-  { verb: 'doctor', kind: 'read', policy: 'agent', description: 'A report on the store and the install; --fix makes the single-answer repairs (content pointer files, stale locks).' },
+  { verb: 'doctor', kind: 'read', policy: 'agent', description: 'A report on the store, the install and capture statistics; --fix makes the single-answer repairs (content pointer files, stale locks); --readers adds the transcript readers’ structure statistics.' },
 ] as const;
 
 /** `grimoire --help`: every verb, the input and output rules and the exit codes. */

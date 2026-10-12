@@ -13,6 +13,7 @@ import {
   type TrackerView,
   type Verdict,
 } from '../tracker';
+import { referencedFacts, type ReferencedCommit } from '../capture/commit-facts';
 import { afterSeal, cutForEnding, sealCaptures } from './capture';
 import { openingSkillFacts } from './skills';
 import { humanSurface, type Actor } from './context';
@@ -409,6 +410,7 @@ async function endAttempt(request: EndRequest, env: OpEnv): Promise<EndResult> {
       debrief,
       fields: closes ? ['status'] : [],
       ...(superseded ? { requested: ending } : {}),
+      referenced: capture.referenced,
     });
     const parentNoops = issue
       ? (parentEdit?.noops ?? []).map((op) => ({
@@ -442,6 +444,8 @@ export interface Seal {
   readonly fields?: readonly string[];
   /** For a superseded seal: the ending the call asked for. */
   readonly requested?: string;
+  /** The referenced commits the ending found (spec §14 Facts: Commits), for `end.md`. */
+  readonly referenced?: readonly ReferencedCommit[];
 }
 
 /**
@@ -457,13 +461,15 @@ export function sealOpenAttempt(draft: TrackerDraft, handle: string, seal: Seal)
   for (const field of seal.fields ?? []) fieldChanges.add(field);
   const binding = [...bindingActors(sealing), ...(seal.binds ? [seal.by] : [])];
   const assignee = sealing.start.assignee;
+  const workerKind = binding.some((a) => a.person === assignee && a.kind === 'agent') ? 'agent' : 'human';
   draft.sealAttempt(handle, {
     ended: seal.ended,
     ended_by: seal.by,
     debrief: seal.debrief ?? null,
-    worker_kind: binding.some((a) => a.person === assignee && a.kind === 'agent') ? 'agent' : 'human',
+    worker_kind: workerKind,
     wiki_exposed: sealing.start.wiki_exposed || binding.some((a) => a.chore_exposure !== undefined),
     field_changes: [...fieldChanges].sort(),
+    commits: referencedFacts(seal.referenced ?? [], workerKind),
     ...(seal.requested !== undefined ? { requested: seal.requested } : {}),
   });
   const verdict = VERDICT[seal.ended]!;
