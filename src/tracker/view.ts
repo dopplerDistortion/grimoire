@@ -531,6 +531,10 @@ export class Draft implements TrackerDraft {
   private readonly sessionPurgesHere = new Map<string, Map<string, PurgeTombstone>>();
   /** What this round's purges remove, and the tombstones they write (null: one stored already stays). */
   private readonly purgeEdits = new Map<string, Buffer | null>();
+  /** Paths this round's purges drop from the unpushed segment too. */
+  private readonly droppedPaths = new Set<string>();
+  /** Traces purged before that this round purges again: their paths come from history (the tree no longer names their issue). */
+  private readonly droppedTraces = new Set<string>();
   private commentMs: number | null = null;
   private commentN = 0;
   readonly wiki: WikiDraftState;
@@ -745,7 +749,12 @@ export class Draft implements TrackerDraft {
       removed.add(attemptDir(record.issue, handle));
       removed.add(outcomeFile(record.issue, handle));
     }
-    for (const file of removed) this.purgeEdits.set(file, null);
+    for (const file of removed) {
+      this.purgeEdits.set(file, null);
+      this.droppedPaths.add(file);
+    }
+    // Purged before: the tree no longer says which issue held it, so history does.
+    if (!record) this.droppedTraces.add(handle);
     if (!stored) this.purgeEdits.set(tracePurgeFile(handle), serializePurge(kept));
     this.tracePurgesHere.set(handle, kept);
     // Nothing this round wrote under the attempt survives it.
@@ -753,22 +762,40 @@ export class Draft implements TrackerDraft {
     return [...removed];
   }
 
+  /**
+   * What this round's purges drop from the unpushed segment: paths, and the
+   * handles of traces purged before whose paths only history still names.
+   */
+  historyDrops(): { readonly paths: readonly string[]; readonly traces: readonly string[] } {
+    return { paths: [...this.droppedPaths], traces: [...this.droppedTraces] };
+  }
+
   purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): readonly string[] {
     const record = this.attempt(handle);
     if (!record) throw notFound('attempt', handle);
     if (!SESSION_KEY_PATTERN.test(key)) throw new Error(`a session key is a hex hash, not ${JSON.stringify(key)}`);
     const stored = this.sessionPurge(handle, key);
-    const written: PurgeTombstone = stored ?? {
-      by: tombstone.by,
-      at: this.now.toISOString(),
-      reason: tombstone.reason,
-      facts: tombstone.facts,
-      kept: tombstone.facts === 'kept' ? tombstone.kept : null,
-      extra: {},
-    };
+    // A stronger purge (the facts too, over the excerpt alone) writes the tombstone again, without the facts.
+    const stronger = stored !== undefined && stored.facts === 'kept' && tombstone.facts === 'purged';
+    const written: PurgeTombstone =
+      stored && !stronger
+        ? stored
+        : {
+            by: tombstone.by,
+            at: this.now.toISOString(),
+            reason: tombstone.reason,
+            facts: tombstone.facts,
+            kept: tombstone.facts === 'kept' ? tombstone.kept : null,
+            extra: {},
+          };
     const file = sessionFile(record.issue, handle, key);
-    this.purgeEdits.set(file, null);
-    if (!stored) this.purgeEdits.set(sessionPurgeFile(handle, key), serializePurge(written));
+    const tombstoneFile = sessionPurgeFile(handle, key);
+    // Purged before: the record goes again only where the tree still holds it.
+    if (!stored || this.base.purgeLeftovers(handle).includes(file)) this.purgeEdits.set(file, null);
+    this.droppedPaths.add(file);
+    if (written !== stored) this.purgeEdits.set(tombstoneFile, serializePurge(written));
+    // The earlier tombstone held the facts: the unpushed segment loses it too.
+    if (stronger) this.droppedPaths.add(tombstoneFile);
     let keys = this.sessionPurgesHere.get(handle);
     if (!keys) this.sessionPurgesHere.set(handle, (keys = new Map()));
     keys.set(key, written);
@@ -886,7 +913,9 @@ export class Draft implements TrackerDraft {
   openAttempt(issue: string, start: NewAttempt): AttemptRecord {
     if (!this.issue(issue)) throw notFound('id', issue);
     let handle = this.randomHandle();
-    for (let tries = 0; this.base.attempt(handle) || this.opened.has(handle); tries++) {
+    // A purged handle stays taken: the tombstone would hide an attempt minted under it.
+    const taken = (h: string) => this.base.attempt(h) || this.opened.has(h) || this.tracePurge(h) || this.base.purges.sessions.has(h) || this.sessionPurgesHere.has(h);
+    for (let tries = 0; taken(handle); tries++) {
       if (tries > 16) throw new Error('could not mint a free attempt handle: the random source keeps repeating');
       handle = this.randomHandle();
     }

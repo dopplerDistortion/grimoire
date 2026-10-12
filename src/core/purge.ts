@@ -9,7 +9,7 @@
 // rewritten, and every purge says so. Both ops are human-only.
 import { GrimoireError, invalid } from '../errors';
 import { parseSessionRecord, serializeSessionRecord } from '../capture/session-record';
-import { type PurgedFacts, type PurgeTombstone, type TrackerStore, type TrackerView } from '../tracker';
+import { type PurgedFacts, type PurgeTombstone, type TrackerView, type UnpushedDrop } from '../tracker';
 import { parseHandle } from './attempts';
 import { define, oneLine, writer } from './op';
 import { s } from './schema';
@@ -61,20 +61,22 @@ export interface PurgeSessionResult {
 }
 
 /** The words every purge says about history (spec §3: pushed history is never rewritten). */
-function historyNote(pushed: boolean, rewritten: number): string {
+function historyNote({ pushed, rewritten, reflogExpired }: UnpushedDrop): string {
+  const reflog = reflogExpired
+    ? 'and their reflog entries expired.'
+    : 'but their reflog entries could not be expired, so the old commits may stay reachable through the tracker reflog until it expires them.';
   const unpushed =
-    rewritten > 0
-      ? `${rewritten} unpushed tracker commit${rewritten === 1 ? ' was' : 's were'} rewritten without it, and their reflog entries expired.`
-      : 'No unpushed tracker commit held it.';
+    rewritten > 0 ? `${rewritten} unpushed tracker commit${rewritten === 1 ? ' was' : 's were'} rewritten without it, ${reflog}` : 'No unpushed tracker commit held it.';
   const kept = pushed
     ? 'Pushed history still holds it: grimoire never rewrites pushed history or runs gc, so the remote and every clone that fetched it keep it.'
     : 'It was never pushed; grimoire never rewrites pushed history or runs gc.';
   return `${unpushed} ${kept}`;
 }
 
-async function dropFromHistory(tracker: TrackerStore, paths: readonly string[]): Promise<PurgeHistory> {
-  const drop = await tracker.dropUnpushed(paths);
-  return { unpushed_rewritten: drop.rewritten, pushed: drop.pushed, note: historyNote(drop.pushed, drop.rewritten) };
+/** What the purge's write did to history (the store drops the content from the unpushed segment in the same compare-and-set). */
+function historyOf(drop: UnpushedDrop | undefined): PurgeHistory {
+  const done = drop ?? { rewritten: 0, reflogExpired: true, pushed: false };
+  return { unpushed_rewritten: done.rewritten, pushed: done.pushed, note: historyNote(done) };
 }
 
 /** The wiki pages whose sources cite the trace `handle`. */
@@ -100,7 +102,6 @@ export const purgeTrace = define({
     const author = writer(ctx);
     const handle = parseHandle(input.attempt);
     const reason = input.reason.trim();
-    let paths: string[] = [];
     const write = await tracker.transact<Omit<PurgeTraceResult, 'cited_by' | 'history'>>({ op: 'purge', author, actor }, (draft) => {
       const record = draft.attempt(handle);
       const stored = draft.tracePurge(handle);
@@ -110,12 +111,12 @@ export const purgeTrace = define({
           attempt: handle,
         });
       }
-      paths = [...draft.purgeTrace(handle, { by: author.email, reason })];
+      draft.purgeTrace(handle, { by: author.email, reason });
       const tombstone = draft.tracePurge(handle)!;
       const result = { attempt: handle, issue: record?.issue ?? null, purged: true as const, changed: !stored, ...tombstoneFields(tombstone) };
       return record ? { result, issue: record.issue } : { result };
     });
-    const history = await dropFromHistory(tracker, paths);
+    const history = historyOf(write.history);
     const view = await tracker.read();
     // Skill proposals come with the gate-decisions slice: none cite a trace before it.
     return { ...write.result, cited_by: { pages: await citingPages(view, handle), proposals: [] }, history };
@@ -142,7 +143,6 @@ export const purgeSession = define({
     if (!/^[0-9a-f]{16,64}$/.test(key)) throw invalid({ key: `"${input.key}" is not a session key (hex)` });
     const reason = input.reason.trim();
     const facts: PurgedFacts = input.with_facts === true ? 'purged' : 'kept';
-    let paths: string[] = [];
     const write = await tracker.transact<Omit<PurgeSessionResult, 'history'>>({ op: 'purge', author, actor }, async (draft) => {
       const record = draft.attempt(handle);
       if (!record) {
@@ -155,8 +155,10 @@ export const purgeSession = define({
       if (!bytes && !stored) throw new GrimoireError('NOT_FOUND', `${handle} has no session record ${key}`, { field: 'key', ref: key });
       // The excerpt alone: the facts stay, on the tombstone, as the record stood without its text.
       const kept = facts === 'kept' && bytes ? serializeSessionRecord({ ...parseSessionRecord(bytes), text: null, excerpt: 'purged', excerpt_notes: [], steps_kept: 0, characters: 0 }) : null;
-      paths = [...draft.purgeSession(handle, key, { by: author.email, reason, facts, kept })];
+      draft.purgeSession(handle, key, { by: author.email, reason, facts, kept });
       const tombstone = draft.sessionPurge(handle, key)!;
+      // Purged with the excerpt alone before, and now with its facts: the stronger purge writes it again.
+      const stronger = stored?.facts === 'kept' && facts === 'purged';
       return {
         result: {
           attempt: handle,
@@ -164,12 +166,12 @@ export const purgeSession = define({
           key,
           purged: true as const,
           facts: tombstone.facts ?? 'purged',
-          changed: !stored,
+          changed: !stored || stronger,
           ...tombstoneFields(tombstone),
         },
         issue: record.issue,
       };
     });
-    return { ...write.result, history: await dropFromHistory(tracker, paths) };
+    return { ...write.result, history: historyOf(write.history) };
   },
 });

@@ -8,7 +8,7 @@ import { packedRefsStamp, RefUpdater, type RefUpdate } from '../git/refs';
 import { GIT_STALL_MS, GitStalledError, runGit } from '../git/run';
 import { bareId, randomIdSuffix } from './ids';
 import { lookupKey, keyEdits, type Idempotency } from './keys';
-import { ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, remoteTrackerRef, SESSIONS_DIR, SETTINGS_FILE, TRACKER_REF } from './layout';
+import { attemptDir, ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FILE, isAttemptEnd, outcomeFile, OUTCOMES_DIR, remoteTrackerRef, SESSIONS_DIR, SETTINGS_FILE, TRACKER_REF } from './layout';
 import { FairnessLock, sleep, Turnstile } from './locks';
 import { countLateDrops } from './capture-stats';
 import { foldCommits, type FoldReport } from './fold';
@@ -56,6 +56,8 @@ export interface WriteResult<R> {
   readonly issue?: string;
   /** The commit's `Grimoire-Attempt` (the handle it binds), when it made one that names a handle. */
   readonly attempt?: string;
+  /** A purge's: what dropping its content from the unpushed segment did, in the same compare-and-set as its commit. */
+  readonly history?: UnpushedDrop;
 }
 
 export interface TrackerOptions {
@@ -127,26 +129,23 @@ export interface TrackerStore {
    * UPGRADE_REQUIRED, BUSY) throw.
    */
   sync(spec: SyncSpec): Promise<SyncOutcome>;
-  /**
-   * Drops `paths` from the unpushed segment (spec §3 Unpushed content, a
-   * purge): every local commit that no remote-tracking tracker holds is
-   * written again without them, oldest first, with the same author, committer
-   * and message, and the ref moves by compare-and-set. The tracker reflog's
-   * entries for the rewritten commits are expired; grimoire never runs gc.
-   * Pushed history is never rewritten: `pushed` says whether it holds any of
-   * `paths`, which it keeps.
-   */
-  dropUnpushed(paths: readonly string[]): Promise<UnpushedDrop>;
   /** Stops the store's git process. */
   close(): Promise<void>;
 }
 
-/** What dropping paths from the unpushed segment did. */
+/**
+ * What a purge's write did to history (spec §3 Unpushed content). In the
+ * same round, under the same locks, every local commit no remote-tracking
+ * tracker holds was written again without the purged paths, oldest first,
+ * with the same author, committer and message; the purge commit went on top,
+ * and the ref moved once, by compare-and-set. Pushed history is never
+ * rewritten, and grimoire never runs gc.
+ */
 export interface UnpushedDrop {
   /** How many unpushed commits were written again. */
   readonly rewritten: number;
-  /** The local tracker tip after it. */
-  readonly tip: string | null;
+  /** Whether the tracker reflog's entries for the rewritten commits were expired (true when nothing was rewritten). */
+  readonly reflogExpired: boolean;
   /** Whether pushed history (what a remote-tracking tracker holds) has any of the paths: it keeps them. */
   readonly pushed: boolean;
 }
@@ -428,14 +427,60 @@ class GitTrackerStore implements TrackerStore {
     }).then((done) => (done && done.rewritten > 0 ? done.tip : null));
   }
 
-  async dropUnpushed(paths: readonly string[]): Promise<UnpushedDrop> {
-    let remotes: string[] = [];
-    const done = await this.rewriteUnpushed(async (_local, refs) => {
-      remotes = [...new Set(refs.remotes.values())];
-      return { excluded: remotes, transform: (tree) => this.dropPaths(tree, paths) };
-    });
-    const tip = done?.tip ?? (await this.trackerRefs()).local;
-    return { rewritten: done?.rewritten ?? 0, tip, pushed: await this.pushedHolds(remotes, paths) };
+  /**
+   * A purge's unpushed segment, written again without the paths it drops
+   * (`traces`: handles purged before, whose paths come from history), ready
+   * for the purge commit to go on top: the new local tip, how many commits
+   * changed, and what pushed history is checked against. Runs inside the
+   * write's round, so the purge commit and the rewrite move the ref once.
+   * Null for a write that purges nothing.
+   */
+  private async dropUnpushed(
+    local: string | null,
+    drops: { readonly paths: readonly string[]; readonly traces: readonly string[] },
+  ): Promise<{ tip: string | null; rewritten: number; remotes: string[]; paths: string[] } | null> {
+    if (drops.paths.length === 0 && drops.traces.length === 0) return null;
+    const remotes = [...new Set((await this.trackerRefs()).remotes.values())];
+    const found = await this.tracePathsInHistory(drops.traces, [...(local ? [local] : []), ...remotes]);
+    const paths = [...new Set([...drops.paths, ...found])];
+    if (local === null || paths.length === 0) return { tip: local, rewritten: 0, remotes, paths };
+    const { tip, rewritten } = await this.rewriteSegment(local, remotes, (tree) => this.dropPaths(tree, paths));
+    return { tip, rewritten, remotes, paths };
+  }
+
+  /** After the purge commit's ref move: the rewritten commits' reflog entries expired, and whether pushed history keeps the content. */
+  private async droppedHistory(drop: { rewritten: number; remotes: string[]; paths: string[] }): Promise<UnpushedDrop> {
+    const reflogExpired = drop.rewritten === 0 || (await this.expireReflog());
+    return { rewritten: drop.rewritten, reflogExpired, pushed: await this.pushedHolds(drop.remotes, drop.paths) };
+  }
+
+  /**
+   * The paths of traces purged before (the attempt gone from the tree, and
+   * with it the issue that names its paths): every attempt directory and
+   * outcome file of those handles that the history of `tips` ever held.
+   */
+  private async tracePathsInHistory(handles: readonly string[], tips: readonly string[]): Promise<string[]> {
+    if (handles.length === 0 || tips.length === 0) return [];
+    const specs = handles.flatMap((handle) => [`:(glob)${ATTEMPTS_DIR}/*/*/*/${handle}/**`, `:(glob)${OUTCOMES_DIR}/*/*/*/${handle}.md`]);
+    const run = await this.git(['log', '--format=', '--name-only', '-m', ...tips, '--', ...specs]);
+    if (run.code !== 0) throw new Error(`git log failed: ${run.stderr.toString().trim()}`);
+    const paths = new Set<string>();
+    for (const line of run.stdout.toString('utf8').split(/\r?\n/)) {
+      const [top, , , issue, name] = line.split('/');
+      if (issue === undefined || name === undefined) continue;
+      if (top === ATTEMPTS_DIR) paths.add(attemptDir(issue, name));
+      else if (top === OUTCOMES_DIR && name.endsWith('.md')) {
+        paths.add(attemptDir(issue, name.slice(0, -3)));
+        paths.add(outcomeFile(issue, name.slice(0, -3)));
+      }
+    }
+    return [...paths];
+  }
+
+  /** Expires the tracker reflog's entries for commits no longer reachable (rewritten ones); grimoire never runs gc. Whether git did. */
+  private async expireReflog(): Promise<boolean> {
+    const run = await this.git(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', TRACKER_REF]).catch(() => null);
+    return run !== null && run.code === 0;
   }
 
   /** Whether the history of any of `tips` (pushed history) ever held one of `paths`. */
@@ -480,7 +525,7 @@ class GitTrackerStore implements TrackerStore {
           if (tip === local) return { tip, rewritten: 0 };
           const move = await this.moveRef(local, tip);
           if (move.moved) {
-            await this.git(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', TRACKER_REF]).catch(() => {});
+            await this.expireReflog();
             return { tip, rewritten };
           }
           if (move.staleLock) throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });
@@ -615,7 +660,20 @@ class GitTrackerStore implements TrackerStore {
       for (const [file, content] of recorded) edits.set(file, content);
     }
     const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
-    if (edits.size === 0 && !commitsFold) return { result: outcome.result, commit: null, replayed: false, sealed: false };
+    // A purge drops its content from the unpushed segment under its commit, in this same compare-and-set (spec §3).
+    const drop = await this.dropUnpushed(tips.local, draft.historyDrops());
+    if (edits.size === 0 && !commitsFold) {
+      if (!drop) return { result: outcome.result, commit: null, replayed: false, sealed: false };
+      // A purge done already whose content history still held: the rewrite alone moves the ref.
+      if (drop.tip !== tips.local) {
+        const moved = await this.moveRef(tips.local, drop.tip!);
+        if (!moved.moved) {
+          if (moved.staleLock) throw busy(`a stale lock blocks the tracker ref: ${moved.staleLock.path}`, { stale_lock: moved.staleLock });
+          return null;
+        }
+      }
+      return { result: outcome.result, commit: null, replayed: false, sealed: false, history: await this.droppedHistory(drop) };
+    }
 
     // The fold's merged tree becomes real only now, in the write that commits it.
     if (snapshot.virtual) await snapshot.virtual.persist(snapshot.rootTree);
@@ -623,7 +681,7 @@ class GitTrackerStore implements TrackerStore {
     const message = this.message(spec, outcome.issue, outcome.attempt);
     const commit = await this.objects.writeCommit({
       tree,
-      parents: snapshot.parents,
+      parents: drop ? snapshot.parents.map((parent) => (parent === tips.local ? drop.tip! : parent)) : snapshot.parents,
       author: { ...spec.author, when: now },
       committer: { ...spec.author, when: now },
       message,
@@ -634,6 +692,7 @@ class GitTrackerStore implements TrackerStore {
       // The fold this write committed dropped late session records: counted in this machine's doctor stats.
       const drops = snapshot.virtual ? this.foldReports.get(snapshot)?.lateDrops : undefined;
       if (drops && drops.length > 0) await countLateDrops(this.location.commonDir, drops, now).catch(() => {});
+      const history = drop ? await this.droppedHistory(drop) : undefined;
       return {
         result: outcome.result,
         commit,
@@ -641,6 +700,7 @@ class GitTrackerStore implements TrackerStore {
         sealed: [...edits.keys()].some(isAttemptEnd),
         ...(outcome.issue ? { issue: outcome.issue } : {}),
         ...(outcome.attempt ? { attempt: outcome.attempt } : {}),
+        ...(history ? { history } : {}),
       };
     }
     if (move.staleLock) {

@@ -227,7 +227,6 @@ function watched(tracker: TrackerStore, requestSync: (commit: string) => void, b
     initialize: (spec, options) => tracker.initialize(spec, options),
     fold: (spec) => tracker.fold(spec),
     sync: (spec) => tracker.sync(spec),
-    dropUnpushed: (paths) => tracker.dropUnpushed(paths),
     close: () => tracker.close(),
   };
 }

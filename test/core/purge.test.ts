@@ -139,7 +139,9 @@ describe('purging a trace', () => {
     expect(purged.history).toMatchObject({ pushed: false, unpushed_rewritten: expect.any(Number) });
     expect(purged.history.unpushed_rewritten).toBeGreaterThan(0);
     expect(await world.a.git(['rev-list', TRACKER_REF, '--', attemptPath(id, attempt), outcomePath(id, attempt)])).toBe('');
-    for (const commit of await reflogCommits(world.a)) {
+    const reflog = await reflogCommits(world.a);
+    expect(reflog.length).toBeGreaterThan(1);
+    for (const commit of reflog) {
       expect((await treeAt(world.a, commit)).some((file) => file.startsWith(`${attemptPath(id, attempt)}/`))).toBe(false);
     }
     // The rest of history is intact: same messages, same authors, the issue and its comment still there.
@@ -157,8 +159,8 @@ describe('purging a trace', () => {
 
     const purged = await ok(core.call('purge_trace', { attempt, reason: 'secret' }, terminal(ctx)));
 
-    // The unpushed comment, and the purge commit over it.
-    expect(purged.history).toMatchObject({ pushed: true, unpushed_rewritten: 2 });
+    // The unpushed comment, written again under the purge commit.
+    expect(purged.history).toMatchObject({ pushed: true, unpushed_rewritten: 1 });
     expect(purged.history.note).toMatch(/Pushed history still holds it/);
     expect(await world.a.git(['rev-parse', REMOTE_TRACKER])).toBe(pushedTip);
     expect(await world.a.git(['rev-list', REMOTE_TRACKER, '--', attemptPath(id, attempt)])).not.toBe('');
@@ -166,6 +168,20 @@ describe('purging a trace', () => {
       expect((await treeAt(world.a, commit)).some((file) => file.startsWith(`${attemptPath(id, attempt)}/`))).toBe(false);
     }
     expect(await world.a.git(['merge-base', '--is-ancestor', pushedTip, TRACKER_REF]).then(() => true)).toBe(true);
+  });
+
+  coreTest('purging a pushed trace again still says pushed history keeps it', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const { id, attempt } = await endedAttempt(core, ctx);
+    await pushTracker(world.a);
+    await fetchTracker(world.a);
+    await ok(core.call('purge_trace', { attempt, reason: 'secret' }, terminal(ctx)));
+
+    const again = await expectRefUnmoved(world.a, () => ok(core.call('purge_trace', { attempt, reason: 'again' }, terminal(ctx))));
+
+    expect(again).toMatchObject({ changed: false, issue: null, history: { pushed: true, unpushed_rewritten: 0 } });
+    expect(again.history.note).toMatch(/Pushed history still holds it/);
+    expect(await world.a.git(['rev-list', REMOTE_TRACKER, '--', attemptPath(id, attempt)])).not.toBe('');
   });
 
   coreTest('lists the wiki pages that cite the trace and offers a human wiki edit; the pages stay as written, their sources showing it purged', async ({
@@ -315,6 +331,32 @@ describe('purging one session record', () => {
     const tombstone = await trackerFile(world.a, (await trackerTip(world.a))!, `purges/${attempt}/${key}.md`);
     expect(tombstone).toMatch(/^---\nby: "alice@example.com"\nat: "[^"]+"\nreason: "all of it"\nfacts: "purged"\n---\n$/);
     expect((await captureOf(world.a, attempt)).contexts).toEqual([expect.objectContaining({ key, excerpt: { status: 'purged', notes: [] }, facts: 'purged', skills_read: [] })]);
+  });
+
+  captureTest('purged with the excerpt alone, then with its facts: the facts go from the tombstone and from the unpushed segment', async ({ world, grimoire, capture }) => {
+    const { core } = capture;
+    const id = await created(core, grimoire.ctx, 'Purged twice');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    await sweepNow(world.a.dir, { capture: capture.options, clock: () => IDLE, sync: false });
+    const key = (await sessionRecords(world.a, id, attempt))[0]!.name.replace(/\.md$/, '');
+    await ok(core.call('purge_session', { attempt, key, reason: 'the excerpt' }, terminal(grimoire.ctx)));
+    const tombstonePath = `purges/${attempt}/${key}.md`;
+    const keptFacts = await trackerFile(world.a, (await trackerTip(world.a))!, tombstonePath);
+    expect(keptFacts).toMatch(/facts: "kept"\n---\n---\n/);
+
+    const stronger = await ok(core.call('purge_session', { attempt, key, reason: 'the facts too', with_facts: true }, terminal(grimoire.ctx)));
+    const repeated = await expectRefUnmoved(world.a, () => ok(core.call('purge_session', { attempt, key, reason: 'once more' }, terminal(grimoire.ctx))));
+
+    expect(stronger).toMatchObject({ key, facts: 'purged', changed: true, reason: 'the facts too', history: { pushed: false } });
+    expect(stronger.history.unpushed_rewritten).toBeGreaterThan(0);
+    expect(repeated).toMatchObject({ facts: 'purged', changed: false, reason: 'the facts too' });
+    const tombstone = await trackerFile(world.a, (await trackerTip(world.a))!, tombstonePath);
+    expect(tombstone).toMatch(/^---\nby: "alice@example.com"\nat: "[^"]+"\nreason: "the facts too"\nfacts: "purged"\n---\n$/);
+    // No commit the ref reaches still holds the tombstone that kept the facts.
+    for (const commit of (await world.a.git(['rev-list', TRACKER_REF, '--', tombstonePath])).split('\n').filter(Boolean)) {
+      expect(await trackerFile(world.a, commit, tombstonePath)).not.toBe(keptFacts);
+    }
+    expect((await captureOf(world.a, attempt)).contexts).toEqual([expect.objectContaining({ key, excerpt: { status: 'purged', notes: [] }, facts: 'purged' })]);
   });
 
   captureTest('an ended attempt’s record is part of its trace: purge the trace instead; an unknown key is NOT_FOUND', async ({ world, grimoire, capture }) => {
