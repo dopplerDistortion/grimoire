@@ -32,7 +32,7 @@ import { MCP_ENTRY_ARGS, joinCommand } from './bootstrap';
 import { CONFIG_PATH, INSTALL_FORMAT, readInstallConfig, sameInstall, serializeInstallConfig, type AdapterDecision, type InstallConfig } from './config';
 import { installCopy, listCopies, type CopySource } from './copies';
 import { inspectLauncher, installLauncher, LAUNCHER_VERSION } from './launcher';
-import { CLIENTS, normalizedText, readManifest, type ClientName } from './manifest';
+import { CLIENTS, MANIFEST_PATH, normalizedText, readManifest, type ClientName } from './manifest';
 import { codexHookHash, desiredEntries, type PointerOptions } from './pointers';
 import {
   dropStaleRemoteTracker,
@@ -51,7 +51,23 @@ import {
 } from './preflight';
 import { readJoinRecord, writeJoinRecord, type JoinRecord } from './records';
 import { existingAdapterPlacement } from './refresh';
-import { holdWorktreeLease, runUpkeep, type UpkeepReport } from '../upkeep';
+import { holdWorktreeLease, operationInProgress, runUpkeep, upgradeInProgress, upgradeSkipNotice, worktreeKey, type UpkeepReport } from '../upkeep';
+import { nodeMajor, readClientRuntimes } from './client-runtime';
+import { codexHookState } from './codex-trust';
+import { compareSemver } from './semver';
+import { worktreePins } from './worktrees';
+import {
+  clearUpgradeRecord,
+  commitCommand,
+  describeMarker,
+  pathsToCommit,
+  planMarker,
+  readStoreMarker,
+  RELEASE_FORMATS,
+  writeUpgradeRecord,
+  type MarkerPlan,
+  type ReleaseFormats,
+} from './upgrade';
 import { ADAPTER_DOC, ADAPTER_MARKER, markdownMarkers } from './texts';
 import { applyFiles, planFiles, tomlMarkers, writePlanned, type FilePlan, type PlannedEntry } from './writer';
 
@@ -66,7 +82,12 @@ export interface InitFlags {
   readonly newTracker: boolean;
   /** `--adapter`: ask about the adapter doc again after a decline. */
   readonly adapter: boolean;
+  /** `--upgrade`: move this checkout's pin to the running version (spec §21). */
+  readonly upgrade?: boolean;
 }
+
+/** An upgrade step done (spec §21): 2 after the copy, launcher and join record; 5 after the checkout files. */
+export type UpgradeStep = 2 | 5;
 
 /** The person at an interactive terminal. */
 export interface Prompter {
@@ -91,6 +112,31 @@ export interface InitOptions {
   readonly say: (text: string) => void;
   /** Stop after the plan (--json without --yes): ask nothing, write nothing. */
   readonly dryRun?: boolean;
+  /** The J..K this release declares per marker (default: this build's); a test stands in for a later release with it. */
+  readonly formats?: ReleaseFormats;
+  /** Called as each upgrade step is done; what it throws stops the upgrade there, as a crash would. */
+  readonly onUpgradeStep?: (step: UpgradeStep) => Promise<void> | void;
+  /** The environment the Codex hook check reads `CODEX_HOME` from (default: this process's). */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+export interface UpgradeReport {
+  /** The pin being left (the one an interrupted upgrade left, when resuming). */
+  from: string;
+  to: string;
+  direction: 'upgrade' | 'downgrade' | 'same';
+  /** Whether an upgrade to this version was already in progress here: this run resumes it. */
+  resumed: boolean;
+  /** An upgrade to another version that was in progress here, which this one replaces. */
+  replaces?: string;
+  markers: MarkerPlan[];
+  /** Grimoire's Codex hook group: whether its definition changes, which means approving it again in `/hooks`. */
+  codex_hook: 'unchanged' | 'changed' | 'added' | null;
+  other_worktrees: { worktree: string; pin: string | null }[];
+  /** Processes running the old pin: never killed; they carry on with the restart notice. */
+  live_on_old_pin: { pid: number; role: string; client: string | null; worktree: string | null }[];
+  /** Step 7: exactly the paths to commit, and the command. For a plan only: the paths it would write. */
+  commit: { paths: string[]; command: string | null };
 }
 
 export type TrackerAction = 'minted' | 'replaced' | 'adopted' | 'present' | 'missing';
@@ -139,6 +185,8 @@ export interface InitReport {
   /** For any other MCP client: the stdio server command, run from the repo root. */
   generic_mcp: { command: string; args: string[] };
   docs: string[];
+  /** For `init --upgrade`: the move, the markers, and what to commit. */
+  upgrade?: UpgradeReport;
   /** Set when init finished everything it could but the tracker isn't here (NOT_SYNCED). */
   error?: ErrorBody;
 }
@@ -330,6 +378,35 @@ function trackerLine(plan: TrackerPlan, remote: string | null, listing: RemoteLi
   }
 }
 
+/** Step 1 of an upgrade: what the plan adds to init's (spec §21). */
+function upgradeLines(upgrade: UpgradeReport, formats: ReleaseFormats): string[] {
+  const lines = [
+    `Upgrade: grimoire ${upgrade.from} → ${upgrade.to}${upgrade.direction === 'downgrade' ? ' (a downgrade)' : upgrade.direction === 'same' ? ' (the current pin: only migrations, and v1 has none)' : ''}${upgrade.resumed ? '; resuming the upgrade that was interrupted here' : ''}`,
+    ...(upgrade.replaces ? [`  It replaces the upgrade to ${upgrade.replaces} that was started here and not finished.`] : []),
+    'Markers:',
+    ...upgrade.markers.map((marker) => `  ${describeMarker(marker, formats[marker.marker])}`),
+  ];
+  if (upgrade.codex_hook === 'changed') {
+    lines.push('Hooks: grimoire’s Codex hook group changes, so Codex skips it until you approve it again in `/hooks`, once per clone of this repo.');
+  } else if (upgrade.codex_hook === 'added') {
+    lines.push('Hooks: grimoire’s Codex hook group is added; approve it in Codex’s `/hooks`, once per clone of this repo.');
+  } else if (upgrade.codex_hook === 'unchanged') {
+    lines.push('Hooks: grimoire’s hook definitions stay as they are; no Codex re-approval.');
+  }
+  lines.push(
+    upgrade.other_worktrees.length === 0
+      ? 'Other worktrees: none.'
+      : `Other worktrees keep their own pins until they take this upgrade by merge or rebase: ${upgrade.other_worktrees.map((entry) => `${entry.worktree} (${entry.pin ?? 'not installed'})`).join(', ')}.`,
+  );
+  if (upgrade.live_on_old_pin.length > 0) {
+    lines.push(
+      `Running on ${upgrade.from}, never stopped: ${upgrade.live_on_old_pin.map((record) => `${record.role}${record.client ? ` (${record.client})` : ''} pid ${record.pid}`).join(', ')}; they carry on, ask for a restart, and leave this worktree’s upkeep alone.`,
+    );
+  }
+  lines.push('Reverting the upgrade’s commit undoes it; the launcher never moves back.');
+  return lines;
+}
+
 /** Runs init; refusals throw before anything is written. */
 export async function runInit(o: InitOptions): Promise<InitReport> {
   const { root, flags, version, prompter, say } = o;
@@ -337,9 +414,35 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   if (!dirs) throw new GrimoireError('NO_REPO', `no git repository at ${root}`, { root });
   const store = new MachineLocalStore(dirs.commonDir);
   const existing = await readInstallConfig(root);
+  const upgrading = flags.upgrade === true;
+  const inProgress = await upgradeInProgress(store, root).catch(() => null);
+
+  if (upgrading) {
+    // Step 0's refusals (spec §21); agent markers are the CLI's gate.
+    const operation = await operationInProgress(root);
+    if (operation) {
+      throw new GrimoireError('INVALID', `init --upgrade doesn't run while a ${operation} is in progress in ${root}: finish or abort it first; nothing changed`, { operation });
+    }
+    if (existing === null || existing.version === null) {
+      const command = `npx @goksening/grimoire@${version} init`;
+      throw new GrimoireError('INVALID', `grimoire isn't installed in this checkout, so there is nothing to upgrade: run \`${command}\`; nothing changed`, { command });
+    }
+  } else if (inProgress && inProgress.to !== version) {
+    // Another release is moving this worktree: only it finishes the upgrade (spec §21 step 2).
+    throw new GrimoireError('INVALID', `${upgradeSkipNotice(root, inProgress.to)}; nothing changed`, {
+      upgrade: { from: inProgress.from, to: inProgress.to },
+      command: `${joinCommand(inProgress.to)} --upgrade`,
+    });
+  } else if (inProgress && existing?.version !== version) {
+    const command = `${joinCommand(version)} --upgrade`;
+    throw new GrimoireError('INVALID', `an upgrade to ${version} is in progress in ${root}: finish it with \`${command}\`; nothing changed`, {
+      upgrade: { from: inProgress.from, to: inProgress.to },
+      command,
+    });
+  }
 
   // A checkout pinned to another version: that version's init is the one to run.
-  if (existing !== null && existing.version !== null && existing.version !== version) {
+  if (!upgrading && existing !== null && existing.version !== null && existing.version !== version) {
     const command = joinCommand(existing.version);
     throw new GrimoireError(
       'INVALID',
@@ -434,6 +537,66 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     warn('NO_GIT_IDENTITY', `git user.email is not set in ${root}: grimoire's writes will fail until it is`);
   }
 
+  // Step 0 of an upgrade: every marker against what this release declares.
+  let upgrade: UpgradeReport | null = null;
+  if (upgrading) {
+    const formats = o.formats ?? RELEASE_FORMATS;
+    const from = inProgress && inProgress.to === version ? inProgress.from : existing!.version!;
+    const markers = [
+      planMarker('store', await readStoreMarker(root, [tips.local, tips.remote]), formats.store, version, existing!.version),
+      planMarker('machine', (await store.marker.read()) ?? null, formats.machine, version, existing!.version),
+      planMarker(
+        'install',
+        existing!.install_format === null ? { format: null, compat: null, requires: null } : { format: existing!.install_format, compat: existing!.install_format, requires: null },
+        formats.install,
+        version,
+        existing!.version,
+      ),
+    ];
+    const raises = markers.filter((marker) => marker.verdict === 'compat-raise');
+    if (raises.length > 0) {
+      const which = raises.map((marker) => describeMarker(marker, formats[marker.marker])).join('; ');
+      if (!prompter) {
+        throw new GrimoireError('INVALID', `init --upgrade to ${version} needs a compat raise (${which}), and --yes never raises compat: run it at an interactive terminal; nothing changed`, {
+          markers: raises,
+        });
+      }
+      // Steps 3 and 4 are empty slots in v1: no release of this line ships the migration a compat raise runs.
+      throw new GrimoireError('UPGRADE_REQUIRED', `grimoire ${version} ships no migration for ${which}; nothing changed`, {
+        marker: raises[0]!.marker,
+        why: 'older',
+        running: version,
+        pin: existing!.version,
+        requires: null,
+        remedies: [],
+      });
+    }
+    const own = await worktreeKey(root);
+    const { pins } = await worktreePins(dirs.commonDir).catch(() => ({ pins: [] as { worktree: string; pin: string | null }[] }));
+    const others: UpgradeReport['other_worktrees'] = [];
+    for (const entry of pins) if ((await worktreeKey(entry.worktree)) !== own) others.push({ worktree: entry.worktree, pin: entry.pin });
+    const live = (await store.processes.live().catch(() => []))
+      .filter((record) => record.pin === from && record.pid !== process.pid)
+      .map((record) => ({ pid: record.pid, role: record.role, client: record.client, worktree: record.worktree }));
+    const order = compareSemver(version, from);
+    upgrade = {
+      from,
+      to: version,
+      direction: order > 0 ? 'upgrade' : order < 0 ? 'downgrade' : 'same',
+      resumed: inProgress !== null && inProgress.to === version,
+      ...(inProgress && inProgress.to !== version ? { replaces: inProgress.to } : {}),
+      markers,
+      codex_hook: null,
+      other_worktrees: others,
+      live_on_old_pin: live,
+      commit: { paths: [], command: null },
+    };
+    // Rule 8: the Node floor of this release against the Node versions agent clients ran grimoire with.
+    for (const runtime of await readClientRuntimes(store).catch(() => [])) {
+      if (nodeMajor(runtime.node) < 22) warn('NODE_FLOOR', `${runtime.client} last ran grimoire on Node ${runtime.node}; grimoire ${version} needs Node 22 or newer where it finds node`);
+    }
+  }
+
   // The questions, then the plan.
   const clients = await chooseClients(root, flags, prompter);
   let mode: ExcerptMode | null;
@@ -477,14 +640,22 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   const codexHash = clients.includes('codex') ? codexHookHash() : (join?.codex_hook_hash ?? null);
   const joinRecord: JoinRecord = { excerpt_mode: mode ?? 'unknown', codex_hook_hash: codexHash, joined_at: join?.joined_at ?? Date.now() };
   const joinAction: MachinePlan['join_record'] = !join ? 'write' : join.excerpt_mode !== joinRecord.excerpt_mode || join.codex_hook_hash !== codexHash ? 'update' : 'unchanged';
-  const announceCodex = clients.includes('codex') && join?.codex_hook_hash !== codexHash;
+  // The hash last announced on this machine: this pin's join record, else (an upgrade) the old pin's.
+  const fromJoin = upgrade && !join ? await readJoinRecord(store, upgrade.from).catch(() => undefined) : undefined;
+  const lastAnnounced = join ? join.codex_hook_hash : fromJoin ? fromJoin.codex_hook_hash : undefined;
+  const announceCodex = clients.includes('codex') && lastAnnounced !== codexHash;
+  if (upgrade && clients.includes('codex')) {
+    // Whether the upgrade changes grimoire's hook group as Codex hashes it (meaning approval again in `/hooks`).
+    const declared = (await codexHookState(root, dirs, o.env ?? process.env, null).catch(() => null))?.declared_hash ?? null;
+    upgrade.codex_hook = declared === null ? 'added' : declared === codexHookHash() ? 'unchanged' : 'changed';
+  }
   const machinePlan: MachinePlan = {
     copy: copyPresent ? 'present' : 'install',
     launcher: launcher.status === 'intact' && launcher.version >= LAUNCHER_VERSION ? 'keep' : launcher.status === 'missing' ? 'write' : 'replace',
     join_record: joinAction,
   };
   let excerptsMax: ExcerptMode | undefined;
-  if (mode === 'excerpts' && !join && prompter) {
+  if (mode === 'excerpts' && !join && !fromJoin && prompter) {
     const answer = await choose(prompter, 'The tracker captures excerpts. The most this machine’s sessions may capture?', ['excerpts', 'facts', 'none'] as const, 'excerpts');
     if (answer !== 'excerpts') excerptsMax = answer;
   }
@@ -533,10 +704,15 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     machinePlan.copy === 'install' ||
     machinePlan.launcher !== 'keep' ||
     joinAction !== 'unchanged' ||
-    excerptsMax !== undefined;
+    excerptsMax !== undefined ||
+    (upgrade !== null && inProgress !== null);
+  if (upgrade) upgrade.commit = { paths: [...new Set(plannedFiles)].sort(), command: commitCommand([...new Set(plannedFiles)].sort(), version) };
   const nextSteps = (written: readonly string[]): string[] => {
     const steps: string[] = [];
-    if (written.length > 0) steps.push(`Commit what init wrote: ${written.join(', ')}.`);
+    if (upgrade) {
+      const command = commitCommand(written, version);
+      if (command) steps.push(`Commit the upgrade, exactly these paths: ${command}`);
+    } else if (written.length > 0) steps.push(`Commit what init wrote: ${written.join(', ')}.`);
     if (clients.includes('claude-code')) {
       steps.push(
         'Claude Code: trust this workspace once (start `claude` here and accept the trust prompt). Headless runs (`claude -p`, the SDK) ignore .claude/settings.json’s allow list in a folder never trusted: pass `--allowedTools mcp__grimoire`, add a user-level allow rule, or trust the folder once interactively.',
@@ -576,11 +752,13 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     machine_checks: { node: { running, on_path: onPath } },
     generic_mcp: { command: 'node', args: [...MCP_ENTRY_ARGS] },
     docs: DOCS,
+    ...(upgrade ? { upgrade } : {}),
   });
 
   say(
     [
-      `grimoire ${version} init in ${root}`,
+      `grimoire ${version} init${upgrade ? ' --upgrade' : ''} in ${root}`,
+      ...(upgrade ? upgradeLines(upgrade, o.formats ?? RELEASE_FORMATS) : []),
       `Tracker: ${trackerLine(trackerPlan, remote.name, listing)}`,
       `This machine: ${machinePlan.copy === 'install' ? `install version copy ${version}` : `version copy ${version} is installed`}; launcher ${machinePlan.launcher}; join record ${joinAction}`,
       'Files:',
@@ -661,16 +839,21 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       !join ? 'written' : join.excerpt_mode !== record.excerpt_mode || join.codex_hook_hash !== record.codex_hook_hash ? 'updated' : 'unchanged';
     if (joinWrite !== 'unchanged') await writeJoinRecord(store, version, record);
     if (excerptsMax !== undefined) await putMachineSetting(dirs.commonDir, 'capture.excerpts_max', excerptsMax);
+    // An upgrade's steps 3 and 4 (machine-local and store migrations) are empty slots in v1.
+    if (upgrade) await o.onUpgradeStep?.(2);
 
     // 6. The files, the manifest, then config.yml last.
     const applied = await applyFiles(filePlan);
     const written = [...applied.written];
     const skipped = [...applied.skipped];
+    if (upgrade) await o.onUpgradeStep?.(5);
     if (!sameInstall(existing, finalConfig)) {
       const why = await writePlanned(root, { path: CONFIG_PATH, before: existing?.text ?? null, after: serializeInstallConfig(finalConfig) });
       if (why === null) written.push(CONFIG_PATH);
       else skipped.push({ path: CONFIG_PATH, why });
     }
+    // config.yml pins the new version: the upgrade is done, and other pins may touch this worktree again.
+    if (upgrade && (await readInstallConfig(root))?.version === version) await clearUpgradeRecord(store, root);
     return { copy, launched, joinWrite, written, skipped };
   };
   // From before its copy is installed until config.yml pins it, this process
@@ -680,9 +863,16 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   let wrote: Awaited<ReturnType<typeof writeAll>>;
   let upkeep: UpkeepReport;
   try {
+    // Step 2 of an upgrade: the upgrade-in-progress record, before the lease, so every other pin leaves this worktree alone from here.
+    if (upgrade) await writeUpgradeRecord(store, root, upgrade.from, version);
     // The (live store, worktree) lease upkeep's per-worktree part and doctor --fix share: held through step 6.
     const worktreeLease = await holdWorktreeLease(store, root);
     if (!worktreeLease) {
+      // Nothing was done: an upgrade that wasn't in progress before isn't now.
+      if (upgrade && !upgrade.resumed) {
+        if (inProgress) await writeUpgradeRecord(store, root, inProgress.from, inProgress.to);
+        else await clearUpgradeRecord(store, root);
+      }
       throw new GrimoireError('BUSY', `another grimoire process keeps working on ${root} (upkeep, doctor --fix or init); nothing changed, so run init again in a moment`, {});
     }
     try {
@@ -700,7 +890,11 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
   const removed = (pruneRun?.result as { removed?: unknown } | undefined)?.removed;
   const pruned = Array.isArray(removed) ? removed.filter((version): version is string => typeof version === 'string') : [];
 
-  // 8. The report.
+  // 8. The report; for an upgrade, step 7: exactly the paths to commit, as git sees them now.
+  if (upgrade) {
+    const paths = await pathsToCommit(root, [...new Set([...filePlan.entries.map((entry) => entry.path), MANIFEST_PATH, CONFIG_PATH])]);
+    upgrade.commit = { paths, command: commitCommand(paths, version) };
+  }
   const done = report({
     written,
     skipped,
@@ -711,7 +905,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       ...(excerptsMax !== undefined ? { excerpts_max: excerptsMax } : {}),
       pruned,
     },
-    next_steps: nextSteps(written),
+    next_steps: nextSteps(upgrade ? upgrade.commit.paths : written),
   });
   done.upkeep = upkeep;
   if (tracker.action === 'missing') {
