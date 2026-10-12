@@ -256,7 +256,7 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
     const leaveAlone = async (): Promise<boolean> => {
       const gate = await worktreeGate(store, worktree, version);
       if (gate === null) return false;
-      if (gate.skip === 'upgrade') notices.push(upgradeSkipNotice(worktree, gate.to));
+      if (gate.skip === 'upgrade') notices.push(upgradeSkipNotice(worktree, gate));
       if (gate.skip !== 'pin-less') each('skipped', gate.skip);
       return true;
     };
@@ -305,7 +305,7 @@ export async function runUpkeep(options: UpkeepOptions): Promise<UpkeepReport> {
 }
 
 /** Why the per-worktree part leaves a worktree alone, before and again under its lease. */
-type WorktreeGate = { readonly skip: 'pin-less' } | { readonly skip: 'pin' } | { readonly skip: 'upgrade'; readonly to: string };
+type WorktreeGate = { readonly skip: 'pin-less' } | { readonly skip: 'pin' } | { readonly skip: 'upgrade'; readonly to: string; readonly from: string };
 
 /** Null when the per-worktree part may work on `worktree` in a process running `version`. */
 async function worktreeGate(store: MachineLocalStore, worktree: string, version: string): Promise<WorktreeGate | null> {
@@ -314,7 +314,7 @@ async function worktreeGate(store: MachineLocalStore, worktree: string, version:
   if (!config?.pin) return { skip: 'pin-less' };
   if (config.pin !== version) return { skip: 'pin' };
   const upgrade = await upgradeInProgress(store, worktree).catch(() => null);
-  if (upgrade && upgrade.to !== version) return { skip: 'upgrade', to: upgrade.to };
+  if (upgrade && upgrade.to !== version) return { skip: 'upgrade', to: upgrade.to, from: upgrade.from };
   return null;
 }
 

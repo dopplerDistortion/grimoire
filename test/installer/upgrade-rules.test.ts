@@ -276,6 +276,29 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
     await expect(initAt(world.a.dir, OLD)).rejects.toMatchObject({ code: 'INVALID', details: { pin: NEW, running: OLD } });
   });
 
+  gitTest('discarding an interrupted upgrade as the skip line says frees the worktree for the old pin again', async ({ world }) => {
+    await installOld(world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const crash = new Error('the process died after step 5');
+    const interrupted = initAt(world.a.dir, NEW, { flags: { upgrade: true }, extra: { onUpgradeStep: (step) => { if (step === 5) throw crash; } } });
+    await expect(interrupted).rejects.toBe(crash);
+
+    await world.a.git(['restore', '.']);
+    const discard = `discard with \`git restore\`, then \`npx @goksening/grimoire@${OLD} init --upgrade\``;
+    await expect(initAt(world.a.dir, OLD)).rejects.toMatchObject({ code: 'INVALID', message: expect.stringContaining(discard) });
+    const oldDoctor = await runDoctor({ root: world.a.dir, version: OLD, fix: true, env: { ...process.env, CODEX_HOME: path.join(world.root, 'codex-home') } });
+    expect(oldDoctor.fix?.notices).toContainEqual(expect.stringContaining(discard));
+
+    const { report } = await initAt(world.a.dir, OLD, { flags: { upgrade: true } });
+
+    expect(report.error).toBeUndefined();
+    expect(report.upgrade).toMatchObject({ from: OLD, to: OLD, replaces: NEW, commit: { paths: [] } });
+    expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    // The old pin's init and doctor --fix work on the worktree again.
+    await expect(initAt(world.a.dir, OLD)).resolves.toMatchObject({ report: { version: OLD } });
+  });
+
   gitTest('--yes never raises compat: a release that needs the store at a newer compat refuses before anything is written', async ({ world }) => {
     await installOld(world.a);
     const store = new MachineLocalStore(path.join(world.a.dir, '.git'));

@@ -454,7 +454,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     }
   } else if (inProgress && inProgress.to !== version) {
     // Another release is moving this worktree: only it finishes the upgrade (spec §21 step 2).
-    throw new GrimoireError('INVALID', `${upgradeSkipNotice(root, inProgress.to)}; nothing changed`, {
+    throw new GrimoireError('INVALID', `${upgradeSkipNotice(root, inProgress)}; nothing changed`, {
       upgrade: { from: inProgress.from, to: inProgress.to },
       command: `${joinCommand(inProgress.to)} --upgrade`,
     });
