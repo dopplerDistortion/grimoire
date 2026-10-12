@@ -255,6 +255,88 @@ describe('chore_submit: refusals and the one fix-up', () => {
   });
 });
 
+/** A create op for `slug` with `body`. */
+const create = (slug: string, body = 'Pin the seed.\n') => ({ op: 'create', slug, title: `About ${slug}`, kind: 'failure', summary: `About ${slug}.`, body });
+/** Every pair of the brief to `slug`. */
+const allTo = (brief: ChoreBrief, slug: string) => brief.pairs.map((pair) => ({ pair: pair.pair, slugs: [slug] }));
+const store = (world: { a: { dir: string } }) => new MachineLocalStore(path.join(world.a.dir, '.git'));
+
+describe('chore_submit: the fail-closed guards', () => {
+  test('a page over 12,000 characters and a 9th page write are refused; 12,000 characters, and a shrink of exactly 25%, are not; more is', async ({
+    world,
+    grimoire,
+  }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const first = await startAndRead(d);
+    const tooLong = ok(await d.core.call('chore_submit', { run: first.run, result: { pages: [create('long', 'x'.repeat(12_001))], consumption: allTo(first, 'long') } }, d.chores));
+    expect(tooLong).toMatchObject({ result: 'invalid', reasons: ['page_too_long'], problems: { 'pages[0].body': expect.stringContaining('12,001') } });
+    const nine = Array.from({ length: 9 }, (_, i) => create(`page-${i}`));
+    const tooMany = ok(await d.core.call('chore_submit', { run: first.run, result: { pages: nine, consumption: allTo(first, 'page-0') } }, d.chores));
+    expect(tooMany).toMatchObject({ result: 'failed', reasons: ['too_many_pages'] });
+
+    // One strike: the pair is offered again, and exactly 12,000 characters fit.
+    const second = await startAndRead(d);
+    const full = 'y'.repeat(11_999) + '\n';
+    expect(ok(await d.core.call('chore_submit', { run: second.run, result: { pages: [create('long', full)], consumption: allTo(second, 'long') } }, d.chores))).toMatchObject({
+      result: 'compiled',
+      pages: 1,
+    });
+
+    // A new pair: an update may shrink the page by 25% of its 12,000 characters, no more.
+    d.clock.advance(1);
+    const another = await work(d.core, grimoire.ctx, 'fail', 'Another fail');
+    d.clock.advance(25);
+    const third = await startAndRead(d);
+    const page = ok(await d.core.call('chore_read', { run: third.run, item: 'page:long' }, d.chores)).items[0]!;
+    const update = (body: string) => ({ op: 'update', slug: 'long', base_hash: page.version, body });
+    const shrunk = ok(await d.core.call('chore_submit', { run: third.run, result: { pages: [update('z'.repeat(8_999))], consumption: allTo(third, 'long') } }, d.chores));
+    expect(shrunk).toMatchObject({ result: 'invalid', reasons: ['page_shrinks'], problems: { 'pages[0].body': expect.stringContaining('12,000') } });
+    const quarter = ok(await d.core.call('chore_submit', { run: third.run, result: { pages: [update('z'.repeat(9_000))], consumption: allTo(third, 'long') } }, d.chores));
+    expect(quarter).toMatchObject({ result: 'compiled', pages: 1 });
+    const tip = (await trackerTip(world.a))!;
+    expect(await trackerFile(world.a, tip, 'knowledge/wiki/pages/long.md')).toContain(`sources: ${JSON.stringify([another, d.fails[0]].sort())}`);
+  });
+
+  test('a secret blocks the write: the codes and rule ids are kept, the result text is not, and the error never quotes it', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const token = ['ghp', 'R7xK2mQ9vL4tB8nW3pZ6cY1hJ5sD0fG2aE9u'].join('_');
+    const before = await trackerTip(world.a);
+
+    const leaked = ok(
+      await d.core.call(
+        'chore_submit',
+        { run: brief.run, result: { pages: [create('ci-pushes', `Push with ${token} when CI fails.\n`)], consumption: allTo(brief, 'ci-pushes') } },
+        d.chores,
+      ),
+    );
+    expect(leaked).toMatchObject({ result: 'invalid', reasons: ['secret'], problems: { 'pages[0].body': expect.stringContaining('github-pat') } });
+    expect(JSON.stringify(leaked)).not.toContain(token);
+    expect(await trackerTip(world.a)).toBe(before);
+    // A secret in a no_pattern reason, kept on this machine only, is refused the same way.
+    const inReason = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: [{ pair: brief.pairs[0]!.pair, no_pattern: `see ${token}` }] } }, d.chores));
+    expect(inReason).toMatchObject({ result: 'failed', reasons: ['secret'] });
+
+    const kept = await store(world).records.list<Record<string, unknown>>('chore-results');
+    expect(kept.map((entry) => entry.value)).toEqual([
+      { run: brief.run, at: expect.any(String), reasons: ['secret'], rules: ['github-pat'] },
+      { run: brief.run, at: expect.any(String), reasons: ['secret'], rules: ['github-pat'] },
+    ]);
+    const tip = (await trackerTip(world.a))!;
+    expect(await world.a.git(['grep', '-c', token, tip]).catch(() => 'no match')).toBe('no match');
+    expect((await servedLog(store(world), brief.run)).no_pattern).toBeUndefined();
+  });
+
+  test('a refused result without a secret keeps its text on this machine only', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const result = { pages: [create('a-page', 'The body KEEP-ME-LOCAL.\n')], consumption: [] };
+    ok(await d.core.call('chore_submit', { run: brief.run, result }, d.chores));
+    const kept = await store(world).records.list<{ text?: string; reasons: string[] }>('chore-results');
+    expect(kept.map((entry) => entry.value)).toMatchObject([{ reasons: ['missing_pair'], text: JSON.stringify(result) }]);
+  });
+});
+
 function createHashOf(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
