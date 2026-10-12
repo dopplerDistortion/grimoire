@@ -53,10 +53,20 @@ describe('store settings', () => {
         },
       },
     });
-    // The store settings other parts of grimoire own (the loop pause, thresholds) come with them.
+    // The store settings other parts of grimoire own come with them.
     expect(Object.keys(shown.ok ? shown.result.store : {}).sort()).toEqual([
       'auto-sync',
+      'chores.batch_fails',
+      'chores.batch_pairs',
+      'chores.batch_passes',
+      'chores.compile_fails',
+      'chores.compile_pairs',
+      'chores.compile_wait_days',
+      'chores.propose_fails',
+      'chores.settle_hours',
+      'chores.strikes',
       'excerpts',
+      'knowledge.loop',
       'link_base',
       'skills.delivery',
       'skills.description_max',

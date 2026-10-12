@@ -19,6 +19,7 @@ import { settingsGet, settingsSet } from './settings';
 import { skillEdit, skillList, skillRead, skillShow } from './skills';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
+import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext } from './chores';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
@@ -55,6 +56,8 @@ export type { SettingsResult, SettingsSetResult, ShownSetting, SettingScope } fr
 export type { SkillListResult, SkillReadResult, SkillEditResult, SkillShowResult, ShownSkill, ShownChange, SkillProvenance, SkillOrigin } from './skills';
 export type { WikiEditResult, WikiListResult, WikiListRow, WikiShowResult, ShownSide } from './wiki';
 export type { QuarantineResult } from './quarantine';
+export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
+export { choreThresholds, dueChores } from './chores';
 export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
 export { AUTO_SYNC_SETTING, autoSync, markSyncPending, syncNow, syncRequestOf } from './sync';
 export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
@@ -169,6 +172,9 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   wikiEdit,
   quarantine,
   unquarantine,
+  choreStart,
+  choreRead,
+  choreAbandon,
   sync,
   syncStatus,
 ];
@@ -206,6 +212,7 @@ function watched(tracker: TrackerStore, requestSync: (commit: string) => void, b
   return {
     location: tracker.location,
     read: () => tracker.read(),
+    tips: () => tracker.tips(),
     now: () => tracker.now(),
     async transact(spec, body) {
       const write = await tracker.transact(spec, body);
@@ -359,8 +366,15 @@ export function createCore(options: CoreOptions = {}): Core {
         const syncTips: string[] = [];
         const requestSync = (commit: string): void => void syncTips.push(commit);
         const bindings: BindingWrite[] = [];
-        const actor = actorOf(ctx);
         let changedServed = false;
+        let actor = actorOf(ctx);
+        if (op.kind === 'write' && actor.kind === 'agent') {
+          // Chore contexts never write issues; chore-exposed sessions and processes say so on every write (spec §8, §14).
+          const store = new MachineLocalStore(opened.location.commonDir, ctx.repo.root);
+          const now = opened.now();
+          if (op.issueWrite) await refuseChoreContext(store, ctx, now);
+          actor = await exposedActor(store, ctx, actor, now);
+        }
         const result = await op.run(parsed, {
           ctx,
           tracker: watched(opened, requestSync, bindings),

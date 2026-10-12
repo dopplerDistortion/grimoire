@@ -91,6 +91,11 @@ export interface CallContext {
   readonly tty?: boolean;
   /** The raw per-call facts of an MCP call. */
   readonly mcp?: McpCallFacts;
+  /**
+   * `GRIMOIRE_CHORE_ORIGIN` as the surface's process env sets it (spec §16,
+   * Origin): `scheduled` restricts a chore run to the Wiki Maintainer.
+   */
+  readonly choreOrigin?: string;
   /** This process's nonce. */
   readonly nonce: string;
 }

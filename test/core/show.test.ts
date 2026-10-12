@@ -1,4 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
@@ -21,6 +23,19 @@ async function show(core: Core, ctx: CallContext, input: Record<string, unknown>
 
 function machineStore(dir: string): MachineLocalStore {
   return new MachineLocalStore(path.join(dir, '.git'));
+}
+
+/** A loopback server that answers the start lock's health probe the way a running `start` does. */
+async function healthServer(nonce: string): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = http.createServer((request, response) => {
+    response.writeHead(request.url === '/health' ? 200 : 404, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ service: 'grimoire-start', nonce }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    port: (server.address() as AddressInfo).port,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
 }
 
 describe('show: relations, comments and links', () => {
@@ -164,30 +179,50 @@ describe('show: local_link', () => {
     await store.records.write('machine-settings', 'dashboard.port', 47500);
 
     const fromSetting = await show(core, ctx, { ref: id });
-    const lock = await store.locks.acquire('start', { data: { port: 47321, nonce: 'n-1' } });
+    const running = await healthServer('0123456789abcdef');
+    const lock = await store.locks.acquire('start', { data: { port: running.port, nonce: '0123456789abcdef' } });
     const fromLock = await show(core, ctx, { ref: id });
     if (lock.status === 'acquired') await lock.lock.release();
+    await running.close();
 
     expect(fromSetting.local_link).toBe(`http://127.0.0.1:47500/issues/${id}`);
-    expect(fromLock.local_link).toBe(`http://127.0.0.1:47321/issues/${id}`);
+    expect(fromLock.local_link).toBe(`http://127.0.0.1:${running.port}/issues/${id}`);
+  });
+
+  test('a start lock whose port does not echo its nonce is stale, and ignored', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const id = await createIssue(core, ctx, { title: 'Linked' });
+    const store = machineStore(world.a.dir);
+    await store.records.write('machine-settings', 'dashboard.port', 47500);
+    const other = await healthServer('fedcba9876543210');
+    const lock = await store.locks.acquire('start', { data: { port: other.port, nonce: '0123456789abcdef' } });
+    const shown = await show(core, ctx, { ref: id });
+    if (lock.status === 'acquired') await lock.lock.release();
+    await other.close();
+
+    expect(shown.local_link).toBe(`http://127.0.0.1:47500/issues/${id}`);
   });
 
   test('a start lock whose process is gone is ignored', async ({ world, grimoire }) => {
     const { core, ctx } = grimoire;
     const id = await createIssue(core, ctx, { title: 'Linked' });
     await machineStore(world.a.dir).records.write('machine-settings', 'dashboard.port', 47500);
+    const running = await healthServer('0123456789abcdef');
     const holder = await startChild(child, {
       action: 'hold-lock',
       from: world.a.dir,
       name: 'start',
-      data: { port: 47321, nonce: 'n-1' },
+      data: { port: running.port, nonce: '0123456789abcdef' },
     });
     const whileLive = await show(core, ctx, { ref: id });
 
+    // Its port still echoes the nonce: only the holder's process is gone.
     await holder.kill();
+    const afterKill = await show(core, ctx, { ref: id });
+    await running.close();
 
-    expect(whileLive.local_link).toBe(`http://127.0.0.1:47321/issues/${id}`);
-    expect((await show(core, ctx, { ref: id })).local_link).toBe(`http://127.0.0.1:47500/issues/${id}`);
+    expect(whileLive.local_link).toBe(`http://127.0.0.1:${running.port}/issues/${id}`);
+    expect(afterKill.local_link).toBe(`http://127.0.0.1:47500/issues/${id}`);
   });
 });
 

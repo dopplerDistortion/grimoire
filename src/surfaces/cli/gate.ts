@@ -58,6 +58,13 @@ interface CustomConfirmation {
   readonly help: string;
 }
 
+/** Quarantine names a page or a trace: the person types the slug, or the attempt handle. */
+const quarantineTarget: Confirmation = async (input) => {
+  const subject = typeof input.trace === 'string' ? input.trace : input.page;
+  return typeof subject === 'string' && subject.trim() !== '' ? subject.trim() : 'quarantine';
+};
+const QUARANTINE_HELP = 'a person runs it at an interactive terminal, with no agent marker set, and types the page’s slug (or the trace’s attempt handle) to confirm';
+
 /** Ops whose confirmation isn't the human-only default. */
 const CONFIRMATIONS = new Map<string, CustomConfirmation>([
   [
@@ -67,6 +74,8 @@ const CONFIRMATIONS = new Map<string, CustomConfirmation>([
       help: 'with abandoned: true for another person’s attempt, a person runs it at an interactive terminal, with no agent marker set, and types the issue id to confirm',
     },
   ],
+  ['quarantine', { confirm: quarantineTarget, help: QUARANTINE_HELP }],
+  ['unquarantine', { confirm: quarantineTarget, help: QUARANTINE_HELP }],
 ]);
 
 /** Registers how a later slice's verb confirms. */

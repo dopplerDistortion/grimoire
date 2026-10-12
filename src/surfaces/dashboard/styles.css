@@ -1,4 +1,100 @@
-body {
-  margin: 2rem;
+:root {
+  color-scheme: light dark;
   font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.loading,
+.signed-out {
+  margin: 4rem auto;
+  max-width: 36rem;
+  padding: 0 1rem;
+}
+
+.signed-out .command {
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.15);
+}
+
+.signed-out .hint {
+  opacity: 0.75;
+}
+
+.signed-out .reason {
+  color: #c0392b;
+}
+
+.shell {
+  display: grid;
+  grid-template-areas:
+    'banner banner'
+    'sidebar content'
+    'footer footer';
+  grid-template-columns: 13rem 1fr;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+}
+
+.banner {
+  grid-area: banner;
+  padding: 0.5rem 1rem;
+  background: #f5c542;
+  color: #222;
+}
+
+.sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem;
+  border-right: 1px solid rgba(127, 127, 127, 0.3);
+}
+
+.sidebar .brand {
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.sidebar a {
+  color: inherit;
+  text-decoration: none;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.sidebar a.current {
+  background: rgba(127, 127, 127, 0.2);
+}
+
+.content {
+  grid-area: content;
+  padding: 1rem 1.5rem;
+}
+
+.footer {
+  grid-area: footer;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border-top: 1px solid rgba(127, 127, 127, 0.3);
+  font-size: 0.875rem;
+}
+
+.footer .live-live {
+  color: #2e7d32;
+}
+
+.footer .live-reconnecting,
+.footer .live-connecting {
+  color: #b26a00;
+}
+
+.footer button {
+  margin-left: auto;
 }
