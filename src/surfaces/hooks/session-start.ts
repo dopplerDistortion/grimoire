@@ -54,7 +54,7 @@ export interface SessionStartContext {
  * the bootstrap and the launcher print it when there is no launcher, copy or
  * join record.
  */
-async function compose(_payload: unknown, ctx: SessionStartContext): Promise<SessionStartMessage> {
+async function compose(payload: unknown, ctx: SessionStartContext): Promise<SessionStartMessage> {
   const [{ findHostRoot }, { locateMachineLocalStore }, { refreshedPointerFiles, refreshNotice }, { writeMissingOutput }] = await Promise.all([
     import('../../core/host'),
     import('../../machine-local'),
@@ -64,9 +64,24 @@ async function compose(_payload: unknown, ctx: SessionStartContext): Promise<Ses
   const root = await findHostRoot(ctx.startDir).catch(() => null);
   const store = root === null ? null : await locateMachineLocalStore(root);
   if (!store || root === null) return {};
+  await markCodexSession(store, payload).catch(() => {});
   const wrote = await writeMissingOutput(store, root).catch(() => false);
   const refreshed = await refreshedPointerFiles(store, root).catch(() => null);
   return { ...(refreshed ? { line: refreshNotice(refreshed.paths.length, null) } : {}), ...(wrote ? { reloadSkills: true } : {}) };
+}
+
+/**
+ * A Codex session's mark (spec §21, Codex re-approval; §6 revealed transcript
+ * roots): the transcript its payload reveals, keyed by its session id. Codex
+ * runs this hook only once it is approved, so a Codex-spawned server that finds
+ * no mark for its session tells the session to approve it in `/hooks`.
+ */
+async function markCodexSession(store: import('../../machine-local').MachineLocalStore, payload: unknown): Promise<void> {
+  if (sessionStartClient(payload) !== 'codex') return;
+  const { session_id, transcript_path } = payload as Record<string, unknown>;
+  if (typeof session_id !== 'string' || session_id === '' || typeof transcript_path !== 'string' || transcript_path === '') return;
+  const { recordRevealedRoot } = await import('../../capture/transcript-roots');
+  await recordRevealedRoot(store, { client: 'codex', session: session_id, transcriptPath: transcript_path });
 }
 
 /** The verb's body: the payload in, what to print out. */
