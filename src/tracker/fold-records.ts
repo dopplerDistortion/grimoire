@@ -176,18 +176,36 @@ export function foldOutcome(a: Buffer, b: Buffer, ends: readonly [Buffer, Buffer
  * time, and its ref, a Claude Code line uuid or a Codex ordinal. A facts-only
  * record writes its event count as the ref. Null when the record has none.
  */
-function reachOf(bytes: Buffer): { at: string; ordinal: bigint | null } | null {
+export function sessionReach(bytes: Buffer): Reach | null {
   const text = bytes.toString('utf8');
   const close = text.startsWith('---\n') ? text.indexOf('\n---\n', 3) : -1;
   for (const { key, raw } of close < 0 ? [] : parseLines(text.slice(4, close))) {
     if (key !== 'reach') continue;
     const value = lineValue(raw) as { at?: unknown; ref?: unknown } | null;
     if (value && typeof value === 'object' && typeof value.at === 'string') {
-      const ref = typeof value.ref === 'number' ? String(value.ref) : value.ref;
-      return { at: value.at, ordinal: typeof ref === 'string' && /^\d+$/.test(ref) ? BigInt(ref) : null };
+      const ref = typeof value.ref === 'number' ? String(value.ref) : typeof value.ref === 'string' ? value.ref : '';
+      return { at: value.at, ref };
     }
   }
   return null;
+}
+
+/** How far a cut reached: its last step's time and ref (a Claude Code line uuid, a Codex ordinal, a facts-only record's event count). */
+export interface Reach {
+  readonly at: string;
+  readonly ref: string;
+}
+
+/**
+ * Orders two reaches (spec §14): the later time, then the higher ordinal when
+ * both refs are ordinals; 0 when neither reaches further (line uuids don't
+ * order). No reach comes before any reach.
+ */
+export function compareReach(x: Reach | null, y: Reach | null): number {
+  if (!x || !y) return (x ? 1 : 0) - (y ? 1 : 0);
+  const ordinal = (ref: string) => (/^\d+$/.test(ref) ? BigInt(ref) : null);
+  const [p, q] = [ordinal(x.ref), ordinal(y.ref)];
+  return compareTimes(x.at, y.at) || (p === null || q === null || p === q ? 0 : p > q ? 1 : -1);
 }
 
 /**
@@ -196,12 +214,7 @@ function reachOf(bytes: Buffer): { at: string; ordinal: bigint | null } | null {
  * order), then the lower bytes.
  */
 export function foldSession(a: Buffer, b: Buffer): Buffer {
-  const [x, y] = [reachOf(a), reachOf(b)];
-  const ordinals = (p: bigint | null, q: bigint | null) => (p === null || q === null || p === q ? 0 : p > q ? 1 : -1);
-  const order =
-    (x ? 1 : 0) - (y ? 1 : 0) ||
-    (x && y ? compareTimes(x.at, y.at) || ordinals(x.ordinal, y.ordinal) : 0) ||
-    Buffer.compare(b, a);
+  const order = compareReach(sessionReach(a), sessionReach(b)) || Buffer.compare(b, a);
   return order >= 0 ? a : b;
 }
 

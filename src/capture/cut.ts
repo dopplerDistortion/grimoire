@@ -82,6 +82,8 @@ export interface Cut {
   readonly reader: { readonly version: number };
   readonly session: string;
   readonly context: string;
+  /** The context's own agent type, when its transcript names it: a `grimoire-chores` context is never captured (`isChoresContext`). */
+  readonly agentType: string | null;
   /** The window's first and last step. `null` when no window was found. */
   readonly window: { readonly start: StepOrigin; readonly end: StepOrigin } | null;
   /** How far the cut reached: its last step. A later cut replaces this one only if it reaches strictly further. */
@@ -113,6 +115,7 @@ export function cutTranscript(transcript: Transcript, options: CutOptions): Cut 
     reader: transcript.reader,
     session: transcript.session,
     context: transcript.context,
+    agentType: transcript.agentType,
     lines: transcript.lines,
   };
 
@@ -199,11 +202,12 @@ export function notFound(transcript: Pick<Transcript, 'client' | 'reader' | 'ses
 
 /** A cut with no window, steps or excerpt: a context whose transcript was not found or could not be trusted. */
 export function emptyCut(
-  base: Pick<Cut, 'client' | 'reader' | 'session' | 'context'> & { readonly lines?: Cut['lines'] },
+  base: Pick<Cut, 'client' | 'reader' | 'session' | 'context'> & { readonly lines?: Cut['lines']; readonly agentType?: string | null },
   status: Exclude<ExcerptStatus, 'cut' | 'unscanned'>,
 ): Cut {
   return {
     ...base,
+    agentType: base.agentType ?? null,
     lines: base.lines ?? { read: 0, unknown: 0, malformed: 0 },
     status,
     notes: [],
@@ -383,7 +387,18 @@ function excludedCallIds(window: readonly Step[], claimed: ReadonlySet<string>):
   return excluded;
 }
 
-const CHORES_AGENT = 'grimoire-chores';
+/** The agent type (Claude Code) and role (Codex) grimoire's knowledge chores run as. */
+export const CHORES_AGENT = 'grimoire-chores';
+
+/**
+ * Whether a cut is of a `grimoire-chores` context (a Claude Code chores
+ * subagent, a Codex chore thread): excluded from excerpts and fact scans
+ * (spec §14), so no session record is written for it, even when it bound
+ * with the handle.
+ */
+export function isChoresContext(cut: Pick<Cut, 'agentType'>): boolean {
+  return cut.agentType === CHORES_AGENT;
+}
 
 function origin(step: Step): StepOrigin {
   return { at: step.at, ref: step.ref };
