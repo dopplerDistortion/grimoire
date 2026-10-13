@@ -17,7 +17,7 @@ interface Harness {
   readonly tracker: TrackerStore;
   /** Why each evaluation ran, in order. */
   readonly runs: string[];
-  start(options?: { configured?: () => Promise<boolean>; everyMs?: number; run?: () => Promise<ChoreRunReport> }): RunnerTrigger;
+  start(options?: { configured?: () => Promise<boolean>; everyMs?: number; run?: (signal: AbortSignal) => Promise<ChoreRunReport> }): RunnerTrigger;
 }
 
 const REPORT = { runner: 'claude', runs: [], why: 'nothing due', summary: 'grimoire runner: nothing ran (nothing due)', caps: {} } as unknown as ChoreRunReport;
@@ -117,5 +117,25 @@ describe('the runner trigger', () => {
     await settle();
 
     expect(calls).toBe(2);
+  });
+
+  test('stop() aborts the run under way (so its child is killed before start closes the core) and waits for it to wind down', async ({ trigger }) => {
+    let signal: AbortSignal | undefined;
+    let wound = false;
+    const handle = trigger.start({
+      run: async (given) => {
+        signal = given;
+        await new Promise<void>((resolve) => given.addEventListener('abort', () => resolve(), { once: true }));
+        // Winding down (the abandon through the core) takes a moment after the abort.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        wound = true;
+        return REPORT;
+      },
+    });
+    await until(() => signal !== undefined, 'the launch run');
+    expect(signal!.aborted).toBe(false);
+    await handle.stop(10_000);
+    expect(signal!.aborted).toBe(true);
+    expect(wound).toBe(true);
   });
 });

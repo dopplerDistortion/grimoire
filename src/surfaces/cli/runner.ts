@@ -196,12 +196,19 @@ export async function runRunnerVerb(argv: readonly string[], options: { bin: str
     }
     // The chore-submit sync runs as the detached sync child, as for any CLI write (spec §4).
     const core = createCore({ autoSync: spawnedAutoSync({ command: process.execPath, args: [options.bin, 'sync', '--background'] }) });
+    // Ctrl-C kills the client's whole tree (on POSIX it leads its own process group, out of the
+    // terminal's reach) and abandons the run; a second one exits at once.
+    const stopping = new AbortController();
+    const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'];
+    const onSignal = () => (stopping.signal.aborted ? process.exit(130) : stopping.abort());
+    for (const signal of signals) process.on(signal, onSignal);
     try {
-      const report = await runChores({ root, core, env: io.env, ...(command.due ? { due: true } : { kind: command.chore! }) });
+      const report = await runChores({ root, core, env: io.env, signal: stopping.signal, ...(command.due ? { due: true } : { kind: command.chore! }) });
       printJson(io, report);
       io.stderr.write(`${report.summary}\n`);
       return 0;
     } finally {
+      for (const signal of signals) process.off(signal, onSignal);
       await core.close();
     }
   } catch (error) {

@@ -40,6 +40,12 @@ export interface RunChoresOptions {
   readonly kind?: ChoreKind;
   /** The kill timeout (default 15 min). */
   readonly timeoutMs?: number;
+  /**
+   * Stops the runner (`start` stopping): a child under way is killed with its
+   * tree at once, its run abandoned (consuming nothing), and runChores throws
+   * BUSY once it wound down. The lock is released either way.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** One run the runner made: an iteration of a spawn and, at most, its fix-up respawn. */
@@ -90,6 +96,11 @@ async function runnerContext(root: string, kind: RunnerKind, env: NodeJS.Process
   };
 }
 
+/** BUSY when `signal` fired: the runner was stopped. */
+function checkStopped(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new GrimoireError('BUSY', 'the runner was stopped: a run under way was abandoned, consuming nothing');
+}
+
 function thrown(error: ErrorBody): GrimoireError {
   return new GrimoireError(error.code, error.message, error.details);
 }
@@ -118,6 +129,7 @@ export async function runChores(options: RunChoresOptions): Promise<ChoreRunRepo
     const runs: RunnerRun[] = [];
     let why: string | undefined;
     for (let i = 0; i < RUNS_PER_DAY; i++) {
+      checkStopped(options.signal);
       if (runs.length > 0) {
         // Catch-up stops quietly at the caps; only a first run is refused by them.
         const caps = await capState(store, now());
@@ -168,7 +180,12 @@ async function oneRun(
   const work = await workDir();
   try {
     const env = childEnv(config.kind, options.env);
-    const checked = await preflight(config, work.cwd, env);
+    const checked = await preflight(config, work.cwd, env, options.signal).catch((error: unknown) => {
+      // A preflight call killed by the stop isn't a refusal.
+      checkStopped(options.signal);
+      throw error;
+    });
+    checkStopped(options.signal);
     const started = await options.core.call('chore_start', options.kind !== undefined ? { kind: options.kind, manual: true } : {}, ctx);
     if (!started.ok) {
       // Due mode: nothing due is no failure, just nothing to do.
@@ -250,7 +267,9 @@ async function iterate(
     let refusal: Refusal | null = null;
     for (let spawn = 1; spawn <= 2; spawn++) {
       await freshCwd(work);
-      const answer = await spawnChild(config, brief, served, refusal, env, checked, work, options.timeoutMs ?? SPAWN_TIMEOUT_MS, spawns);
+      const answer = await spawnChild(config, brief, served, refusal, env, checked, work, options.timeoutMs ?? SPAWN_TIMEOUT_MS, spawns, options.signal);
+      // Stopped mid-spawn: the child is gone; the catch below abandons the run.
+      checkStopped(options.signal);
       if (!answer.ok) return await abandon(answer.reason, spawn);
       const submitted = await core.call('chore_submit', { run: brief.run, result: answer.answer }, ctx);
       if (!submitted.ok) throw thrown(submitted.error);
@@ -270,8 +289,10 @@ async function iterate(
     // chore_submit ends a run at its second refusal: never reached.
     return await abandon('refused_twice', 2);
   } catch (error) {
-    // Something broke mid-run: the run consumes nothing, and counts as a failure.
+    // Something broke mid-run: the run consumes nothing, and counts as a failure,
+    // unless the runner was stopped: a stop someone asked for is no failure (spec §16 Caps).
     await core.call('chore_abandon', { run: brief.run, reason: 'runner: interrupted' }, ctx).catch(() => undefined);
+    if (options.signal?.aborted) throw error;
     await recordRun(store, now(), { at: now().toISOString(), run: brief.run, kind: brief.kind, result: 'error', reason: error instanceof GrimoireError ? error.code : 'error' }, false).catch(() => undefined);
     throw error;
   }
@@ -293,13 +314,14 @@ async function spawnChild(
   work: WorkDir,
   timeoutMs: number,
   spawns: SpawnLog[],
+  signal: AbortSignal | undefined,
 ): Promise<ChildAnswer> {
   const bundle = composeBundle(config.kind, brief, served, refusal);
   if (config.kind === 'claude') {
     const procedure = path.join(work.root, 'procedure.md');
     await writeFile(procedure, PROCEDURE);
     const args = claudeArgs(config, brief.output_schema, procedure);
-    const run = await runProcess(config.binary, args, { cwd: work.cwd, env, input: bundle, timeoutMs });
+    const run = await runProcess(config.binary, args, { cwd: work.cwd, env, input: bundle, timeoutMs, signal });
     const answer = claudeAnswer(run);
     spawns.push({ code: run.code, timed_out: run.timedOut, stdout: run.stdout, stderr: run.stderr, failure: answer.ok ? null : answer.reason });
     return answer;
@@ -309,7 +331,7 @@ async function spawnChild(
   await rm(out, { force: true });
   await writeFile(schema, JSON.stringify(strictSchema(brief.output_schema)));
   const args = codexArgs(config, { cwd: work.cwd, schema, out }, checked.mcp_servers ?? []);
-  const run = await runProcess(config.binary, args, { cwd: work.cwd, env, input: bundle, timeoutMs });
+  const run = await runProcess(config.binary, args, { cwd: work.cwd, env, input: bundle, timeoutMs, signal });
   const text = await readFile(out, 'utf8').catch(() => undefined);
   const answer = codexAnswer(run, text);
   spawns.push({ code: run.code, timed_out: run.timedOut, stdout: run.stdout, stderr: run.stderr, failure: answer.ok ? null : answer.reason });

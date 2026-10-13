@@ -39,7 +39,7 @@ import { changeLines, diffLines, linesOf, normalizedLines, similarity } from '..
 import { proposalStates } from '../proposals';
 import { undoneChanges } from '../restore';
 import { normalizeSkillText, parseSkillText, RESERVED_SKILL_NAMES, skillNameProblem, skillVersionOf, SkillTextError } from '../skill-text';
-import { Problems, type Rejection } from './compile';
+import { Problems, scanRaw, type Rejection } from './compile';
 import type { OpenRun, ServedLog } from './runs';
 
 /** A create's limits, and how far a patch may grow a skill (spec §18 Size). */
@@ -252,29 +252,6 @@ function scanText(text: string, field: string, p: Problems, scanner: SecretScann
   if (report.status !== 'checked') return p.add('hygiene', field, 'could not be checked for hygiene');
   if (report.findings.length > 0) {
     p.add('hygiene', field, `fails the hygiene checks (${sortedUnique(report.findings.map((f) => f.check)).join(', ')})`);
-  }
-}
-
-/**
- * The secret scan over every string the raw result holds, field names
- * included, before any check may return: whatever else refuses it, a secret
- * still marks the rejection, so no result text is kept (spec §16 Failures).
- */
-function scanRaw(value: unknown, field: string, p: Problems, scanner: SecretScanner): void {
-  const scan = (text: string, at: string) => {
-    const found = scanner.scan(text);
-    if (found.status !== 'scanned') return p.add('unscanned', at, 'could not be scanned for secrets');
-    if (found.hits.length === 0) return;
-    for (const hit of found.hits) p.rules.add(hit.rule);
-    p.add('secret', at, `holds what looks like a secret (${sortedUnique(found.hits.map((hit) => hit.rule)).join(', ')})`);
-  };
-  if (typeof value === 'string') return scan(value, field);
-  if (Array.isArray(value)) return value.forEach((item, i) => scanRaw(item, `${field}[${i}]`, p, scanner));
-  if (!isObject(value)) return;
-  for (const [key, item] of Object.entries(value)) {
-    const at = field === '' ? key : `${field}.${key}`;
-    scan(key, field === '' ? 'result' : field);
-    scanRaw(item, at, p, scanner);
   }
 }
 
