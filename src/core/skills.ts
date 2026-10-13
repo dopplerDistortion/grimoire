@@ -37,7 +37,7 @@ import { restorePlan, type RestorePlan } from './skill-changes';
 /** The machine-local records kind of pending `skill_read` events (spec §6). */
 export const SKILL_READS = 'skill-reads';
 
-function deliveryOn(view: TrackerView): boolean {
+export function deliveryOn(view: Pick<TrackerView, 'settings'>): boolean {
   return storeSetting(view, 'skills.delivery') !== false;
 }
 

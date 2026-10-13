@@ -27,6 +27,8 @@ import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, 
 import { choreSubmit } from './chore-submit';
 import { activity } from './activity';
 import { attention } from './attention';
+import { choreRuns } from './chore-runs';
+import { knowledgeOverview } from './knowledge-overview';
 import { attemptShow } from './attempt-show';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
@@ -82,8 +84,10 @@ export type {
 export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
 export type { ChoreSubmitResult } from './chore-submit';
 export type { ActivityEntry, ActivityResult } from './activity';
-export type { AttentionItem, AttentionResult, SyncFailureItem } from './attention';
+export type { AttentionItem, AttentionResult, ForkChoice, KnowledgeItem, SyncFailureItem } from './attention';
 export type { AttemptShowResult, ShownContext, ShownOutcome, ExposureHit } from './attempt-show';
+export type { ChoreRunsResult, ChoreRunRow, KeptResult } from './chore-runs';
+export type { KnowledgeOverviewResult, PendingProposalSummary, SetAsidePair, RecentDecision } from './knowledge-overview';
 export { choreThresholds, dueChores } from './chores';
 export type { AutoSyncRequest, SyncPosition, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
 export { AUTO_SYNC_SETTING, autoSync, autoSyncOn, markSyncPending, readSyncStatus, syncNow, syncRequestOf } from './sync';
@@ -228,6 +232,8 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   activity,
   attention,
   attemptShow,
+  knowledgeOverview,
+  choreRuns,
 ];
 
 /**

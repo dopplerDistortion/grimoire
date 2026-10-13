@@ -23,6 +23,8 @@ import type { ChoreSubmitResult } from './chore-submit';
 import type { ActivityResult } from './activity';
 import type { AttentionResult } from './attention';
 import type { AttemptShowResult } from './attempt-show';
+import type { ChoreRunsResult } from './chore-runs';
+import type { KnowledgeOverviewResult } from './knowledge-overview';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -169,4 +171,6 @@ export interface OpResults {
   activity: ActivityResult;
   attention: AttentionResult;
   attempt_show: AttemptShowResult;
+  knowledge_overview: KnowledgeOverviewResult;
+  chore_runs: ChoreRunsResult;
 }

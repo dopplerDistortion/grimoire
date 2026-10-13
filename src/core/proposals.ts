@@ -82,7 +82,7 @@ function stateOf(book: SkillBook, proposals: readonly ProposalRecord[], id: stri
 }
 
 /** The live evidence and red flags of `proposal` in `view`. */
-async function flagsOf(view: TrackerView, proposal: ProposalRecord, quarantine?: ActiveQuarantine): Promise<{ evidence: LiveEvidence; flags: RedFlag[] }> {
+export async function flagsOf(view: TrackerView, proposal: ProposalRecord, quarantine?: ActiveQuarantine): Promise<{ evidence: LiveEvidence; flags: RedFlag[] }> {
   const active = quarantine ?? (await activeQuarantine(view));
   const pages = new Set((await view.wiki.pages()).map((page) => page.slug));
   const evidence = liveEvidence(view, proposal, active, pages);

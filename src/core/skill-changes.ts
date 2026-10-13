@@ -309,7 +309,7 @@ export interface SkillAcknowledgeResult {
 }
 
 /** The versions a person may acknowledge: each side of a fork, and for a contested decision the accepted version or the one it replaced. */
-function acknowledgeable(state: SkillState): Set<string> {
+export function acknowledgeable(state: SkillState): Set<string> {
   const versions = new Set<string>();
   if (state.superseded.length > 0) {
     for (const head of [state.current!, ...state.superseded]) if (head.kind !== 'delete' && head.kind !== 'eject' && head.to !== null) versions.add(head.to);
