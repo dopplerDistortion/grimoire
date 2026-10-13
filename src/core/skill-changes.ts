@@ -410,7 +410,7 @@ export const skillEject = define({
   replay: 'none',
   input: s.object({
     name: nameInput,
-    worktree: s.optional(s.string({ ...oneLine, description: 'the worktree to write into (a path; default: this checkout)' })),
+    worktree: s.optional(s.string({ ...oneLine, description: 'the worktree of this clone to write into: a path, relative to this checkout’s root (default: this checkout)' })),
     base: baseInput,
   }),
   async run(input, env): Promise<SkillEjectResult> {
