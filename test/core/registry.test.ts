@@ -29,11 +29,11 @@ describe('the op registry', () => {
         'proposal_accept',
         'proposal_dismiss',
         'proposal_list',
-        'proposal_purge',
         'proposal_reconsider',
         'proposal_reject',
         'proposal_show',
         'purge_list',
+        'purge_proposal',
         'purge_session',
         'purge_trace',
         'quarantine',
@@ -93,7 +93,7 @@ describe('the op registry', () => {
       });
       expect(byName.labels).toMatchObject({ kind: 'read', annotations: { readOnlyHint: true } });
       // The gate (spec §18): people show proposals and decide them; no decision is ever offered to agents.
-      for (const name of ['proposal_accept', 'proposal_reject', 'proposal_dismiss', 'proposal_reconsider', 'proposal_purge']) {
+      for (const name of ['proposal_accept', 'proposal_reject', 'proposal_dismiss', 'proposal_reconsider', 'purge_proposal']) {
         expect(byName[name], name).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
       }
       for (const name of ['proposal_show', 'proposal_list']) expect(byName[name], name).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });

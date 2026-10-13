@@ -221,7 +221,7 @@ describe('purge', () => {
     const cli = human(grimoire.ctx);
     const { proposal } = ok(await submit(p, patchResult(p)));
     ok(await p.core.call('proposal_reject', { id: proposal, reason: 'one-off' }, cli));
-    ok(await p.core.call('proposal_purge', { id: proposal, reason: 'quoted a secret' }, cli));
+    ok(await p.core.call('purge_proposal', { id: proposal, reason: 'quoted a secret' }, cli));
 
     const again = await manualRun(p);
     expect(ok(await submit(again, patchResult(again)))).toMatchObject({ result: 'invalid', reasons: ['repeats_rejected'] });
@@ -236,7 +236,7 @@ describe('purge', () => {
     const purged = ok(await p.core.call('purge_trace', { attempt: p.fails[0], reason: 'a customer name' }, cli));
     expect(purged.cited_by.proposals).toEqual([proposal]);
 
-    const result = ok(await p.core.call('proposal_purge', { id: proposal, reason: 'quoted a secret' }, cli));
+    const result = ok(await p.core.call('purge_proposal', { id: proposal, reason: 'quoted a secret' }, cli));
     expect(result).toMatchObject({ id: proposal, purged: true, changed: true, reason: 'quoted a secret', history: { pushed: true } });
     const tip = (await trackerTip(world.a))!;
     expect(await trackerFile(world.a, tip, `purges/${proposal}.md`)).toContain('reason: "quoted a secret"');
@@ -263,7 +263,7 @@ describe('the human-only gate', () => {
       ['proposal_reject', { id: proposal, reason: 'incorrect' }],
       ['proposal_dismiss', { id: proposal }],
       ['proposal_reconsider', { id: proposal }],
-      ['proposal_purge', { id: proposal, reason: 'x' }],
+      ['purge_proposal', { id: proposal, reason: 'x' }],
       ['proposal_show', { id: proposal }],
       ['proposal_list', {}],
     ];

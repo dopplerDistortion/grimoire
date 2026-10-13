@@ -465,7 +465,7 @@ function purge(id: string) {
     ),
     validate: (values) => ((values.reason ?? '').trim() === '' ? 'Give a reason: a purge needs one.' : null),
     run: async (values) => {
-      await write('proposal_purge', { id, reason: values.reason!.trim() });
+      await write('purge_proposal', { id, reason: values.reason!.trim() });
       toast(`Purged ${id}.`);
       navigate('/knowledge/proposals');
     },

@@ -48,7 +48,7 @@ describe('the human-only gate', () => {
       ['proposal', 'reject', 'pp-0000000000', 'incorrect'],
       ['proposal', 'dismiss', 'pp-0000000000'],
       ['proposal', 'reconsider', 'pp-0000000000'],
-      ['proposal', 'purge', 'pp-0000000000', 'secret'],
+      ['purge', 'proposal', 'pp-0000000000', 'secret'],
     ];
     for (const args of calls) {
       const run = await expectRefUnmoved(a, () => cli(bin, args, { cwd: a.dir }));
@@ -147,9 +147,12 @@ describe('the human-only gate', () => {
   cliTest('proposal decisions confirm with the typed proposal id at an interactive terminal', async ({ world, grimoire, a }) => {
     const p = await proposer(grimoire, world);
     const { proposal } = ok(await submit(p, patchResult(p)));
-    for (const verb of ['accept', 'reject', 'dismiss', 'reconsider', 'purge']) {
+    for (const verb of ['accept', 'reject', 'dismiss', 'reconsider']) {
       expect((await cli(bin, ['proposal', verb, '--help'], { cwd: a.dir })).json.confirmation, verb).toMatch(/types the id to confirm/);
     }
+    // Spec §10 names the purge `purge proposal`, beside `purge trace` and `purge session`.
+    expect((await cli(bin, ['purge', 'proposal', '--help'], { cwd: a.dir })).json.confirmation).toMatch(/types the id to confirm/);
+    expect((await cli(bin, ['proposal', 'purge', '--help'], { cwd: a.dir })).code).toBe(2);
     expect((await cli(bin, ['proposal', 'reject', '--help'], { cwd: a.dir })).json).toMatchObject({ positionals: ['id', 'reason'] });
     // Spec §10: `proposal accept --ack <flag>…`, one per red flag.
     expect((await cli(bin, ['proposal', 'accept', '--help'], { cwd: a.dir })).json.flags).toContainEqual(expect.objectContaining({ flag: '--ack <value>', field: 'ack', repeatable: true }));

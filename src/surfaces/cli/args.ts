@@ -337,15 +337,22 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
   };
 }
 
-/** The runtime verbs that aren't core ops (spec §10 Runtime): each has its own `--help`. */
+/**
+ * The runtime verbs that aren't core ops (spec §10 Runtime): each has its own `--help`.
+ * `refuses-agent-markers` (spec §7): refused under an agent marker, but no
+ * terminal needed, so a login item or an OS scheduler can run it (`init` takes
+ * `--yes` without one).
+ */
 const RUNTIME_VERBS = [
-  { verb: 'init', kind: 'write', policy: 'human-only', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
+  { verb: 'init', kind: 'write', policy: 'refuses-agent-markers', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
+  { verb: 'start', kind: 'write', policy: 'refuses-agent-markers', description: 'Run the dashboard for this checkout on localhost (--port, --no-open): upkeep, live updates and the due-chore trigger while it runs.' },
+  { verb: 'open', kind: 'read', policy: 'refuses-agent-markers', description: 'Open a signed-in dashboard tab on the running start, landing on <ref> when given. Prints no secret.' },
   { verb: 'leave', kind: 'write', policy: 'human-only', description: 'Remove grimoire from this clone on this machine: generated output, the machine-local store, version copies and launcher, and the local tracker ref once the remote holds its tip.' },
   { verb: 'uninstall', kind: 'write', policy: 'human-only', description: 'Remove grimoire from this repo through this checkout, for you to commit: what the manifest says grimoire wrote, then .grimoire/; it also leaves the clone when no other worktree is installed. The remote tracker stays as an archive.' },
   { verb: 'status', kind: 'read', policy: 'agent', description: 'What to know about this checkout now: sync, refreshed pointer files, Node, stale claims, the excerpt mode, the Codex hook. Writes nothing.' },
   { verb: 'runner enable', kind: 'write', policy: 'human-only', description: 'Let grimoire start your own claude -p or codex exec to do due knowledge chores unattended on this machine (claude or codex; --allow-api-billing).' },
   { verb: 'runner disable', kind: 'write', policy: 'human-only', description: 'Turn the runner off on this machine.' },
-  { verb: 'chore run', kind: 'write', policy: 'human-read', description: 'Run due knowledge chores with this machine’s runner: --due for OS schedulers, or one chore by kind. Refuses agent markers.' },
+  { verb: 'chore run', kind: 'write', policy: 'refuses-agent-markers', description: 'Run due knowledge chores with this machine’s runner: --due for OS schedulers, or one chore by kind. Refuses agent markers.' },
   { verb: 'doctor', kind: 'read', policy: 'agent', description: 'A report on the store, the install and capture statistics; --fix makes the single-answer repairs (content pointer files, stale locks); --readers adds the transcript readers’ structure statistics.' },
 ] as const;
 
