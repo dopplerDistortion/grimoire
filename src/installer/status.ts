@@ -4,6 +4,7 @@
 // the Knowledge overview. Each fact is one entry of STATUS_FACTS, so later
 // slices add theirs (the pending proposal, what is due, the runner, stray
 // edits) the same way.
+import { KIND_NAMES, knowledgeFacts } from '../core/chores';
 import { derivations } from '../core/derive';
 import { showStrayEdits } from '../core/stray-edits';
 import { listStrayEdits, sharedScanner } from '../generated';
@@ -195,8 +196,33 @@ const strayFact: StatusFact = {
   },
 };
 
+/**
+ * The knowledge facts (spec §12, mirroring the Knowledge overview): what is
+ * due or why not, the loop's paused state, the pending proposals and their
+ * age, set-aside pairs, and the active skills with their attention flags.
+ * Never a proposal's text or claims, nor any wiki text.
+ */
+const knowledgeFact: StatusFact = {
+  key: 'knowledge',
+  async read({ store, view, now }) {
+    const facts = await knowledgeFacts(await view(), store, now, sharedScanner());
+    const lines: string[] = [];
+    const { 'wiki-maintainer': wiki, 'skill-proposer': proposer } = facts.chores;
+    if (facts.next !== null) lines.push(`Chores: the ${KIND_NAMES[facts.next]} is due (${facts.chores[facts.next].why})`);
+    else if (facts.loop === 'paused') lines.push('Chores: none due: the knowledge loop is paused');
+    else lines.push(`Chores: none due (Wiki Maintainer: ${wiki.why}; Skill Proposer: ${proposer.why})`);
+    for (const proposal of facts.pending_proposals) {
+      const flags = proposal.flags.length > 0 ? `; flags: ${proposal.flags.join(', ')}` : '';
+      lines.push(`Skill proposal ${proposal.id} (${proposal.action} ${proposal.skill}) awaits human review, ${proposal.age_hours} h old${flags}`);
+    }
+    for (const pair of facts.set_aside) lines.push(`Set aside after ${pair.strikes} failed compiles: ${pair.pair}`);
+    for (const skill of facts.skills) if (skill.attention.length > 0) lines.push(`Skill ${skill.name}: ${skill.attention.join(', ')}`);
+    return { value: { ...facts } as unknown as Json, lines };
+  },
+};
+
 /** Every fact this release reports, in order. */
-export const STATUS_FACTS: readonly StatusFact[] = [syncFact, refreshedFact, strayFact, nodeFact, staleFact, excerptFact, codexFact];
+export const STATUS_FACTS: readonly StatusFact[] = [syncFact, refreshedFact, knowledgeFact, strayFact, nodeFact, staleFact, excerptFact, codexFact];
 
 /** Reads every fact of `root`. Writes nothing. */
 export async function readStatus(options: StatusOptions): Promise<{ report: StatusReport; lines: string[] }> {

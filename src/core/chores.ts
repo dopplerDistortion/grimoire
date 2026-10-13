@@ -42,15 +42,16 @@ import {
   type ServedItem,
 } from '../knowledge/chores';
 import { observedEvidence } from '../capture/evidence';
-import { proposalSignals } from '../knowledge';
+import { proposalSignals, readSkills, targetedPatterns, viewProposalStates } from '../knowledge';
+import { deriveScorecards } from '../knowledge/scorecards';
 import { LockHeldError, MachineLocalStore } from '../machine-local';
 import { CHORE_KINDS, randomRunId, type ChoreKind, type TrackerStore, type TrackerView } from '../tracker';
 import type { SecretScanner } from '../scanner';
 import type { Actor, CallContext } from './context';
 import { define, oneLine } from './op';
 import { s } from './schema';
-import { storeSetting } from './settings';
-import { traceFacts } from './skills';
+import { machineSetting, storeSetting } from './settings';
+import { patternOf, traceFacts } from './skills';
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -424,3 +425,64 @@ export const choreAbandon = define({
     });
   },
 });
+
+/** A pending skill proposal, as `status` shows it: ids, its age and its risk flags, never its text or claims. */
+export interface PendingProposalFact {
+  id: string;
+  skill: string;
+  action: string;
+  at: string;
+  age_hours: number;
+  flags: string[];
+}
+
+/** An evolved skill agents get, with its attention flags (spec §18). */
+export interface ActiveSkillFact {
+  name: string;
+  version: string | null;
+  attention: string[];
+}
+
+/** The knowledge facts `status` carries (spec §12): what is due or why not, the pending proposals, the loop, set-aside pairs and the active skills. */
+export interface KnowledgeFacts {
+  loop: 'on' | 'paused';
+  pickup: string;
+  /** The chore to run next, or null. */
+  next: ChoreKind | null;
+  chores: Record<ChoreKind, { due: boolean; why: string }>;
+  pending_proposals: PendingProposalFact[];
+  set_aside: { pair: string; issue: string; strikes: number }[];
+  skills: ActiveSkillFact[];
+}
+
+/** The knowledge facts of `view` at `now` on this machine. Reads only. */
+export async function knowledgeFacts(view: TrackerView, store: MachineLocalStore, now: Date, scanner: SecretScanner): Promise<KnowledgeFacts> {
+  const due = await dueChoresIn(view, store, now);
+  const pending = (await viewProposalStates(view)).filter((state) => state.status === 'pending');
+  const book = await readSkills(view, scanner);
+  const active = [...book.skills.values()].filter((state) => state.status === 'active');
+  const traces = active.length === 0 ? [] : await traceFacts(view);
+  const skills: ActiveSkillFact[] = [];
+  for (const state of active) {
+    const cards = deriveScorecards(state.name, state.records, traces, { patternOf: patternOf(await targetedPatterns(view, state.records)) });
+    skills.push({ name: state.name, version: state.version, attention: [...(cards.find((card) => card.version === state.version)?.attention ?? [])] });
+  }
+  const wiki = due['wiki-maintainer'];
+  const proposer = due['skill-proposer'];
+  return {
+    loop: due.paused ? 'paused' : 'on',
+    pickup: String(await machineSetting(store.commonDir, 'knowledge.pickup')),
+    next: due.next,
+    chores: { 'wiki-maintainer': { due: wiki.due, why: wiki.why }, 'skill-proposer': { due: proposer.due, why: proposer.why } },
+    pending_proposals: pending.map(({ record }) => ({
+      id: record.id,
+      skill: record.skill,
+      action: record.action,
+      at: record.at,
+      age_hours: Math.max(0, Math.floor((now.getTime() - Date.parse(record.at)) / HOUR)),
+      flags: record.flags.map((flag) => flag.flag),
+    })),
+    set_aside: wiki.setAside.map((pair) => ({ pair: pair.id, issue: pair.issue, strikes: pair.strikes })),
+    skills,
+  };
+}
