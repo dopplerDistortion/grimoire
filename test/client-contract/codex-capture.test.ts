@@ -4,6 +4,8 @@
 // the binding evidence; steps, window, excerpt and status come out. Findings
 // behind the fixtures: docs/research/spikes/codex-mcp-hooks-transcripts.md.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 import * as zlib from 'node:zlib';
@@ -19,6 +21,7 @@ import {
   type Step,
   type ToolResultStep,
 } from '../../src/capture';
+import { zstdFrameGuard } from '../../src/capture/codex/zstd-frames';
 
 const TX = 'codex/transcripts';
 
@@ -694,6 +697,42 @@ describe('archived and compressed sessions', () => {
     expect(result.status).toBe('unreadable');
     expect(result.steps).toEqual([]);
     expect(await readCodexTranscript(file)).toMatchObject({ found: false, unreadable: 'zstd_corrupt' });
+  });
+
+  describe('the frame check, which needs no zstd', () => {
+    /** Feeds `bytes` through the guard in `size`-byte chunks; resolves to the bytes passed on. */
+    const guard = async (bytes: Buffer, size: number) => {
+      const chunks: Buffer[] = [];
+      for (let at = 0; at < bytes.length; at += size) chunks.push(bytes.subarray(at, at + size));
+      const out: Buffer[] = [];
+      await pipeline(Readable.from(chunks), zstdFrameGuard(), async (source: AsyncIterable<Buffer>) => {
+        for await (const chunk of source) out.push(chunk);
+      });
+      return Buffer.concat(out);
+    };
+
+    it('passes a whole file through unchanged, however it is chunked', async () => {
+      const bytes = readFixtureBytes(ARCHIVED_ZST);
+      for (const size of [1, 3, 7, 4096]) expect((await guard(bytes, size)).equals(bytes)).toBe(true);
+    });
+
+    it('fails a file that stops anywhere inside a frame', async () => {
+      const bytes = readFixtureBytes(ARCHIVED_ZST);
+      for (const end of [1, 4, 5, Math.floor(bytes.length / 2), bytes.length - 1]) {
+        await expect(guard(bytes.subarray(0, end), 64)).rejects.toThrow(/cut short/);
+      }
+    });
+
+    it('fails bytes that are not a zstd frame', async () => {
+      await expect(guard(Buffer.from('{"type":"session_meta"}\n'), 64)).rejects.toThrow(/not a zstd frame/);
+    });
+
+    it('accepts concatenated frames and a skippable frame between them', async () => {
+      const bytes = readFixtureBytes(ARCHIVED_ZST);
+      const skippable = Buffer.from([0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0, 1, 2, 3]);
+      const joined = Buffer.concat([bytes, skippable, bytes]);
+      expect((await guard(joined, 5)).equals(joined)).toBe(true);
+    });
   });
 
   it('are searched by id when the given transcript is another thread’s', async () => {

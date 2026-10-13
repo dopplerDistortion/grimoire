@@ -229,7 +229,8 @@ describe('result layout', () => {
   }) => {
     await initializeTracker(world.a, world.a);
     // A deep, non-ASCII start directory makes the launch-from-root notice long.
-    const below = path.join(world.a.dir, 'docs', '設計資料'.repeat(40));
+    // Four folders: Linux caps a path component at 255 bytes (this name is 120).
+    const below = path.join(world.a.dir, 'docs', ...Array(4).fill('設計資料'.repeat(10)));
     await mkdir(below, { recursive: true });
     const served = await serve(world.a, 'legacy', { startDir: below });
     try {

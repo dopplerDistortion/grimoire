@@ -1,5 +1,7 @@
 # Issue tracker: Linear
 
+This is the maintainer's agent workflow. The Linear workspace is private: outside contributors report bugs and ideas in [GitHub issues](https://github.com/dopplerDistortion/grimoire/issues) and send changes as pull requests (see [docs/contributing.md](../contributing.md)).
+
 Issues and specs for this repo live in **Linear**, workspace `goksening`, team **Goksening** (key `GOK`), project **grimoire**. Use the Linear MCP tools (`mcp__claude_ai_Linear__*`) for all operations. Always pass `project: "grimoire"` and `team: "GOK"` when creating.
 
 ## Conventions

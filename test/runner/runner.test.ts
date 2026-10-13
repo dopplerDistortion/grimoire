@@ -168,6 +168,9 @@ describe('the runner: a due compile through codex', () => {
     const calls = fake.calls('codex');
     const run = calls.find((call) => call.type === 'answer')!;
     const at = (flag: string) => run.argv[run.argv.indexOf(flag) + 1]!;
+    // The fake's cwd is the resolved path: on macOS the temp folder /var/… is /private/var/….
+    const unaliased = (dir: string) => dir.replace(/^\/private(?=\/(?:var|tmp)\/)/, '');
+    expect(unaliased(at('--cd'))).toBe(unaliased(run.cwd));
     expect(run.argv).toEqual([
       'exec',
       '--json',
@@ -175,7 +178,7 @@ describe('the runner: a due compile through codex', () => {
       '--ignore-rules',
       '--skip-git-repo-check',
       '--cd',
-      run.cwd,
+      at('--cd'),
       '--sandbox',
       'read-only',
       '--output-schema',
