@@ -1,3 +1,5 @@
+import { open, readdir } from 'node:fs/promises';
+import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { gitTest as test } from '#harness';
@@ -78,6 +80,24 @@ describe('locks', () => {
 
     expect((await store.locks.inspect('start')).status).toBe('stale');
     expect((await store.locks.acquire('start')).status).toBe('acquired');
+  });
+
+  test('a holder lets go and renews while a waiter is reading its generation file', async ({ world }) => {
+    // 39 waiters polling one lock keep its file open nearly all the time; on Windows no file
+    // can be renamed over while it is open, so a release that rewrites it in place fails.
+    const store = await storeOf(world.a.dir);
+    const held = await store.locks.acquire('busy', { ttlMs: 60_000 });
+    if (held.status !== 'acquired') throw new Error('expected to acquire');
+    const dir = path.join(store.dir, 'locks', 'busy');
+    const [current] = await readdir(dir);
+    const reading = await open(path.join(dir, current!), 'r');
+    try {
+      expect(await held.lock.renew(120_000)).toBe(true);
+      await held.lock.release();
+    } finally {
+      await reading.close();
+    }
+    expect((await store.locks.inspect('busy')).status).toBe('free');
   });
 
   test('a lock with a ttl lapses without the holder dying', async ({ world }) => {

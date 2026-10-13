@@ -1,12 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
-import {
-  createFileExclusive,
-  readTextIfExists,
-  removeFile,
-  writeFileAtomic,
-} from './fs-atomic';
+import { createFileExclusive, readTextIfExists, removeFile } from './fs-atomic';
 import type { Json } from './docs';
 import { fileNameForKey } from './names';
 import { currentHost, currentProcessStartTime } from './process-info';
@@ -15,10 +10,13 @@ import { currentHost, currentProcessStartTime } from './process-info';
 // name, holding generation files `<n>.json`. The highest generation is the
 // current holder. Taking a free slot means creating generation n+1 with an
 // exclusive create, so of any number of racers exactly one succeeds. The
-// highest generation file is never deleted (release rewrites it as released),
+// highest generation file is never deleted (a release writes a released one above it),
 // so generations only grow and a racer working from an old listing can't slip
 // in under the current holder: it either meets an existing file, or finds a
-// higher generation when it re-lists, and backs off.
+// higher generation when it re-lists, and backs off. A holder's renew and
+// release write the next generation the same way, never over the current one:
+// on Windows a file can't be renamed over while anyone has it open, and with
+// many waiters polling a lock, one of them nearly always is reading it.
 
 /** Who holds a lease or a lock: the bytes of a generation file. Version-free. */
 export interface Holder {
@@ -124,10 +122,7 @@ export class Slot {
         released_at: null,
         ...(fresh.data ? { data: fresh.data } : {}),
       };
-      if (!(await createFileExclusive(this.genFile(gen), serialize(holder)))) continue;
-      const gens = await this.gens();
-      if (gens[gens.length - 1] !== gen) continue; // a racer from an old listing: back off
-      await Promise.all(gens.filter((g) => g < gen).map((g) => removeFile(this.genFile(g)).catch(() => false)));
+      if (!(await this.writeNext(gen, holder))) continue; // a racer from an old listing: back off
       return { taken: holder };
     }
     const state = await this.current();
@@ -136,15 +131,25 @@ export class Slot {
   }
 
   /**
-   * Rewrites the holder's own generation file, if it still holds the slot.
-   * Returns false when someone else has taken it since.
+   * Writes the holder's change as the next generation, if it still holds the
+   * slot. Returns false when someone else has taken it since.
    */
   async rewrite(owner: string, change: (holder: Holder) => Holder): Promise<boolean> {
     const state = await this.current();
     if (!state?.holder || state.holder.owner !== owner) return false;
-    await writeFileAtomic(this.genFile(state.gen), serialize(change(state.holder)));
+    return this.writeNext(state.gen + 1, change(state.holder));
+  }
+
+  /**
+   * Creates generation `gen` holding `holder` and prunes the ones below it.
+   * False when the generation exists, or a higher one appeared meanwhile.
+   */
+  private async writeNext(gen: number, holder: Holder): Promise<boolean> {
+    if (!(await createFileExclusive(this.genFile(gen), serialize(holder)))) return false;
     const gens = await this.gens();
-    return gens[gens.length - 1] === state.gen;
+    if (gens[gens.length - 1] !== gen) return false;
+    await Promise.all(gens.filter((g) => g < gen).map((g) => removeFile(this.genFile(g)).catch(() => false)));
+    return true;
   }
 }
 
