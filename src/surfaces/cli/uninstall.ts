@@ -64,6 +64,7 @@ function closingLines(report: UninstallReport): string[] {
   if (report.leave?.kept.tracker_ref) {
     lines.push(`The local tracker ref stays (${report.leave.kept.tracker_ref.why}). Delete it once you don’t need it: ${report.leave.kept.tracker_ref.command}`);
   }
+  for (const skill of report.ejected) lines.push(`Ejected ${skill.name} as ordinary skill files (${skill.files.join(', ')}): commit them, so the team keeps the skill.`);
   for (const problem of report.problems) lines.push(`Problem: ${problem}`);
   if (report.stopped === 'checkout') lines.push('The removal stopped part way: fix what the problems name, then run grimoire uninstall again to finish it.');
   if (report.commit && report.commit.paths.length > 0) {

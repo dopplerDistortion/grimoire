@@ -6,7 +6,7 @@
 // tracker ref and the machine-local store. The terminal gate and the built
 // bin are seam 3 (uninstall-cli.test.ts).
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { gitTest, makeTempDir, removeDir, type Clone } from '#harness';
@@ -53,8 +53,24 @@ async function tip(clone: Clone, ref: string): Promise<string | null> {
   return run.code === 0 ? run.stdout.trim() : null;
 }
 
-async function remoteTip(clone: Clone): Promise<string> {
-  return (await clone.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]!;
+async function remoteTip(clone: Clone, ref = 'refs/heads/grimoire/tracker'): Promise<string> {
+  return (await clone.git(['ls-remote', 'origin', ref])).split('\t')[0]!;
+}
+
+/** A teammate's tracker commit on top of the remote's tip, pushed from `clone`; its sha. */
+async function pushTrackerCommit(clone: Clone, message: string): Promise<string> {
+  await clone.git(['fetch', '--quiet', 'origin', 'refs/heads/grimoire/tracker']);
+  const tip = await clone.git(['rev-parse', 'FETCH_HEAD']);
+  const sha = await clone.git(['commit-tree', `${tip}^{tree}`, '-p', tip, '-m', message]);
+  await clone.git(['push', '--quiet', 'origin', `${sha}:refs/heads/grimoire/tracker`]);
+  return sha;
+}
+
+/** Runs one printed `git …` command (it quotes nothing) in `clone`; its exit code. */
+async function runPrinted(clone: Clone, command: string): Promise<number> {
+  const [git, ...args] = command.split(' ');
+  expect(git).toBe('git');
+  return (await clone.gitResult(args)).code ?? -1;
 }
 
 /** A tracker commit the remote doesn't hold, with auto-sync off: uninstall asks before it pushes. */
@@ -89,7 +105,8 @@ describe('uninstall in the clone’s only installed worktree', () => {
     expect(report.tracker).toEqual({
       remote: 'origin',
       delete: 'git push origin --delete grimoire/tracker',
-      archive: 'git push origin refs/remotes/origin/grimoire/tracker:refs/tags/grimoire-tracker-archive && git push origin --delete grimoire/tracker',
+      archive:
+        'git fetch origin +refs/heads/grimoire/tracker:refs/remotes/origin/grimoire/tracker && git push origin refs/remotes/origin/grimoire/tracker:refs/tags/grimoire-tracker-archive && git push origin --force-with-lease=refs/heads/grimoire/tracker:refs/remotes/origin/grimoire/tracker --delete grimoire/tracker',
     });
     expect(report.commit?.paths).toEqual(expect.arrayContaining(['.grimoire/config.yml', '.grimoire/manifest.yml', '.mcp.json', 'AGENTS.md', '.claude/settings.json']));
     expect(report.commit?.command).toMatch(/^git add -A -- .* && git commit -m "Uninstall grimoire"$/);
@@ -97,6 +114,22 @@ describe('uninstall in the clone’s only installed worktree', () => {
     expect(report.commit?.message).toContain('`npx @goksening/grimoire leave`');
     expect(said.join('\n')).toMatch(/stays on the remote as an archive/);
     expect(said.join('\n')).toMatch(/Pushed excerpts stay in the remote’s history/);
+  });
+
+  gitTest('the printed archive command fetches first, so the tag holds what teammates pushed since; its delete is refused if the remote moved after that fetch', async ({ world }) => {
+    await installedRepo(world.a);
+    const { report } = await uninstall(world.a, ['uninstall']);
+    const steps = report.tracker.archive!.split(' && ');
+    expect(steps).toHaveLength(3);
+    // A teammate whose server is still installed keeps pushing tracker commits.
+    const later = await pushTrackerCommit(world.b, 'later');
+
+    expect(await runPrinted(world.a, steps[0]!)).toBe(0);
+    expect(await runPrinted(world.a, steps[1]!)).toBe(0);
+    expect(await remoteTip(world.a, 'refs/tags/grimoire-tracker-archive')).toBe(later);
+    const latest = await pushTrackerCommit(world.b, 'latest');
+    expect(await runPrinted(world.a, steps[2]!)).not.toBe(0);
+    expect(await remoteTip(world.a)).toBe(latest);
   });
 
   gitTest('a fresh first install afterwards adopts the archived tracker', async ({ world }) => {
@@ -145,6 +178,37 @@ describe('uninstall in the clone’s only installed worktree', () => {
     expect(await differences(world.a, before)).toEqual([]);
   });
 
+  gitTest('a read failing once confirmed (the manifest unreadable) is a report that stops at the checkout, never an error; leave removes nothing', async ({ world }) => {
+    await installedRepo(world.a);
+    const manifest = path.join(world.a.dir, '.grimoire', 'manifest.yml');
+    const said: string[] = [];
+    const env = await makeTempDir('grimoire-uninstall-env-');
+    try {
+      const report = await runUninstall({
+        root: world.a.dir,
+        ctx: { ...terminal(agentContext(world.a)), repo: { root: world.a.dir, pin: null } },
+        prompter: {
+          ask: async () => {
+            // Between the confirmation and the removal, the manifest can't be read (EISDIR stands in for EACCES).
+            await rm(manifest);
+            await mkdir(manifest);
+            return 'uninstall';
+          },
+        },
+        say: (text) => said.push(text),
+        env: { ...process.env, LOCALAPPDATA: env, XDG_RUNTIME_DIR: env },
+        capture: { claudeConfigDir: path.join(env, 'claude'), codexHome: path.join(env, 'codex'), home: env },
+      });
+      expect(report.uninstalled).toBe(false);
+      expect(report.stopped).toBe('checkout');
+      expect(report.problems.join('\n')).toMatch(/manifest/);
+      expect(existsSync(path.join(world.a.dir, '.git', 'grimoire'))).toBe(true);
+      expect(existsSync(path.join(world.a.dir, '.mcp.json'))).toBe(true);
+    } finally {
+      await removeDir(env);
+    }
+  });
+
   gitTest('the active evolved skills are offered for eject: an ejected one is kept as ordinary files, its generated output goes', async ({ world }) => {
     const { before } = await installedRepo(world.a);
     // The core in this process generates output only in a worktree on its own pin.
@@ -171,6 +235,11 @@ describe('uninstall in the clone’s only installed worktree', () => {
     expect(await readFile(path.join(world.a.dir, '.claude', 'skills', 'release-notes', 'SKILL.md'), 'utf8')).toBe(NOTES);
     expect(await differences(world.a, before)).toEqual(['.agents/skills/release-notes/SKILL.md', '.claude/skills/release-notes/SKILL.md']);
     expect(report.uninstalled).toBe(true);
+    // The ejected skill is part of the commit to make, so the team keeps it.
+    expect(report.commit?.paths).toEqual(expect.arrayContaining(['.claude/skills/release-notes/SKILL.md', '.agents/skills/release-notes/SKILL.md']));
+    expect(report.commit?.message).toContain('release-notes');
+    expect(await runPrinted(world.a, report.commit!.command.split(' && ')[0]!)).toBe(0);
+    expect(await world.a.git(['diff', '--cached', '--name-only', '--diff-filter=A', '--', '.claude/skills', '.agents/skills'])).toBe('.agents/skills/release-notes/SKILL.md\n.claude/skills/release-notes/SKILL.md');
   });
 });
 

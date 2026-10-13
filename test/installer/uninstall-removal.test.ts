@@ -8,7 +8,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { gitTest } from '#harness';
-import { readManifest } from '../../src/installer/manifest';
+import { readManifest, textHash } from '../../src/installer/manifest';
 import { planRemoval, removeCheckout } from '../../src/installer/removal';
 import { USER_AGENTS, USER_SETTINGS, USER_TOML, differences, installedRepo, jsonText, put } from './uninstall-support';
 
@@ -160,6 +160,35 @@ describe('the removal', () => {
     expect(again.problems).toEqual([]);
     expect(again.complete).toBe(true);
     expect(await differences(world.a, before)).toEqual([]);
+  });
+
+  gitTest('a manifest entry whose path leaves the checkout is never followed: reported, with the manifest kept, and nothing outside changes', async ({ world }) => {
+    await installedRepo(world.a);
+    const outside = path.join(world.a.dir, '..', 'outside');
+    const notes = 'their notes\n';
+    const pkg = jsonText({ name: 'other', scripts: { build: 'tsc' } });
+    await put(outside, 'notes.md', notes);
+    await put(outside, 'package.json', pkg);
+    const absolute = path.join(outside, 'notes.md').split(path.sep).join('/');
+    const crafted = [
+      { path: '../outside/notes.md', kind: 'file', hash: textHash(notes), created: true },
+      { path: '../outside/package.json', kind: 'json-key', key: ['scripts'], hash: 'sha256:0', created: false },
+      { path: '..\\outside\\notes.md', kind: 'file', hash: textHash(notes), created: true },
+      { path: absolute, kind: 'file', hash: textHash(notes), created: true },
+      { path: 'docs/./../../outside/notes.md', kind: 'file', hash: textHash(notes), created: true },
+    ];
+    const manifestFile = path.join(world.a.dir, '.grimoire/manifest.yml');
+    await writeFile(manifestFile, `${await readFile(manifestFile, 'utf8')}${crafted.map((entry) => `  - ${JSON.stringify(entry)}\n`).join('')}`);
+
+    const plan = await planRemoval(world.a.dir);
+    const done = await removeCheckout(plan);
+
+    expect(plan.problems).toEqual(crafted.map((entry) => expect.stringContaining(`${entry.path}: `)));
+    expect(plan.problems.every((problem) => /outside this checkout/.test(problem))).toBe(true);
+    expect(done.complete).toBe(false);
+    expect(await readFile(path.join(outside, 'notes.md'), 'utf8')).toBe(notes);
+    expect(await readFile(path.join(outside, 'package.json'), 'utf8')).toBe(pkg);
+    expect(existsSync(manifestFile)).toBe(true);
   });
 
   gitTest('an unknown manifest kind or format stops it before any write', async ({ world }) => {

@@ -22,7 +22,8 @@
 // that can't be changed safely (invalid JSON, broken markers, a symlink, not
 // text, changed while uninstall ran) stops the removal before config.yml,
 // with the manifest kept. An unknown manifest kind stops it before any write.
-import { lstat, readdir, rmdir, unlink } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { link as hardLink, lstat, readdir, rename, rmdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { runGit } from '../git/run';
 import { retryTransient } from '../machine-local';
@@ -279,6 +280,17 @@ function shiftedGroups(text: string, found: { start: number; stop: number }): Sh
   return shifted;
 }
 
+/**
+ * Whether a manifest path names a file inside the checkout: relative, POSIX,
+ * with no empty, `.` or `..` segment, no backslash and no drive colon. A
+ * committed manifest is input like any other: one that points elsewhere is
+ * never followed (git can't bring back what goes outside the checkout).
+ */
+function insideCheckout(relative: string): boolean {
+  if (relative === '' || relative.startsWith('/') || /[\\:\0]/.test(relative)) return false;
+  return relative.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
+}
+
 /** The files grimoire writes into besides what the manifest names: where an out-of-manifest mention may sit. */
 const POINTER_FILES = ['.mcp.json', '.claude/settings.json', '.codex/config.toml', 'AGENTS.md', 'package.json', 'docs/agents/issue-tracker.md'];
 
@@ -306,6 +318,10 @@ export async function planRemoval(root: string): Promise<RemovalPlan> {
 
   for (const [relative, entries] of byPath) {
     const stop = (why: string) => problems.push(`${relative}: ${why}`);
+    if (!insideCheckout(relative)) {
+      stop('the manifest names a path outside this checkout (or not a plain relative path), so grimoire never follows it: fix the manifest, then run uninstall again');
+      continue;
+    }
     const link = await linkedComponent(root, relative);
     if (link !== null) {
       stop(`${link} is a symlink or junction; grimoire never changes anything through one`);
@@ -434,6 +450,7 @@ export async function planRemoval(root: string): Promise<RemovalPlan> {
   // What still mentions grimoire once the entries are out: never touched, only reported.
   const mentions: Mention[] = [];
   for (const relative of [...new Set([...byPath.keys(), ...POINTER_FILES])]) {
+    if (!insideCheckout(relative)) continue;
     let text = afterTexts.has(relative) ? afterTexts.get(relative)! : null;
     if (!afterTexts.has(relative)) {
       if ((await linkedComponent(root, relative)) !== null) continue;
@@ -450,7 +467,13 @@ export async function planRemoval(root: string): Promise<RemovalPlan> {
   return { root, manifest: manifest.exists, unknown, removed, gone, changes, kept, problems, mentions, codex };
 }
 
-/** Deletes `relative` if it still holds `before`; null when deleted, else why not. */
+/**
+ * Deletes `relative` if it still holds `before`; null when deleted, else why
+ * not. The file is renamed aside first and the bytes that moved are compared,
+ * so a save landing between a check and the unlink is never deleted: a
+ * changed file is renamed back (or, when its place was taken meanwhile, left
+ * aside and named).
+ */
 async function deleteIfUnchanged(root: string, relative: string, before: string): Promise<string | null> {
   const link = await linkedComponent(root, relative);
   if (link !== null) return `${link} is a symlink or junction; grimoire never changes anything through one`;
@@ -458,8 +481,26 @@ async function deleteIfUnchanged(root: string, relative: string, before: string)
   const read = await readCheckoutText(file);
   if (read.state === 'absent') return null;
   if (read.state !== 'text' || read.text !== before) return `${relative} changed while uninstall ran`;
-  await retryTransient(() => unlink(file));
-  return null;
+  const aside = path.join(path.dirname(file), `.${path.basename(file)}.grimoire-${process.pid}-${randomBytes(4).toString('hex')}.removing`);
+  try {
+    await retryTransient(() => rename(file, aside));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  const moved = await readCheckoutText(aside);
+  if (moved.state === 'text' && moved.text === before) {
+    await retryTransient(() => unlink(aside));
+    return null;
+  }
+  // Put it back without replacing anything saved at its place meanwhile.
+  try {
+    await retryTransient(() => hardLink(aside, file));
+    await retryTransient(() => unlink(aside));
+    return `${relative} changed while uninstall ran`;
+  } catch {
+    return `${relative} changed while uninstall ran; what it held is kept in ${path.relative(root, aside).split(path.sep).join('/')}`;
+  }
 }
 
 /** Removes the folders above `relative` that are empty now, up to (not including) the checkout root. */

@@ -188,6 +188,21 @@ async function trackerRemote(root: string): Promise<string | null> {
   return remotes.names.length === 1 ? remotes.names[0]! : null;
 }
 
+/**
+ * The commands that keep the remote tracker under a tag, then delete the
+ * branch. Run whenever the person likes, so: fetch first (the tag holds what
+ * teammates pushed since uninstall), and delete with a lease on that fetch
+ * (a push after it makes the delete fail, never lost untagged).
+ */
+function archiveCommand(remote: string): string {
+  const tracking = remoteTrackerRef(remote);
+  return [
+    `git fetch ${remote} +refs/heads/grimoire/tracker:${tracking}`,
+    `git push ${remote} ${tracking}:${ARCHIVE_TAG}`,
+    `git push ${remote} --force-with-lease=refs/heads/grimoire/tracker:${tracking} --delete grimoire/tracker`,
+  ].join(' && ');
+}
+
 function describeEntry(entry: RemovedEntry): string {
   const what = entry.hook !== undefined ? `its ${entry.hook} hook group` : entry.item !== undefined ? `“${entry.item}” in ${entry.key?.join('.')}` : entry.marker !== undefined ? 'its block' : entry.key ? entry.key.join('.') : 'the file';
   return `${entry.path}: ${what}${entry.drift ? ' (edited since grimoire wrote it)' : ''}`;
@@ -214,24 +229,29 @@ function codexNotice(shifted: readonly ShiftedGroup[]): string | null {
   return `Removing grimoire’s hook group moves ${plural(shifted.length, 'Codex SessionStart group')} after it in .codex/config.toml up one position: ${groups}. Codex keys hook approval by position, so each person approves ${shifted.length === 1 ? 'it' : 'them'} again in Codex’s /hooks, once per clone of this repo.`;
 }
 
-/** The paths of the checkout's removal git tracks: what the person commits. */
-async function pathsToCommit(root: string, removal: CheckoutRemoval): Promise<string[]> {
+/** What the person commits: the paths of the checkout's removal git tracks, and the ejected skills' new files. */
+async function pathsToCommit(root: string, removal: CheckoutRemoval, ejected: UninstallReport['ejected']): Promise<string[]> {
   const changed = [...new Set([...removal.edited, ...removal.deleted])];
-  if (changed.length === 0) return [];
-  const run = await runGit(root, ['ls-files', '-z', '--', ...changed]);
-  if (run.code !== 0) return changed.sort();
-  const tracked = new Set(run.stdout.toString('utf8').split('\0').filter((file) => file !== ''));
-  return changed.filter((file) => tracked.has(file)).sort();
+  let tracked = changed;
+  if (changed.length > 0) {
+    const run = await runGit(root, ['ls-files', '-z', '--', ...changed]);
+    if (run.code === 0) {
+      const known = new Set(run.stdout.toString('utf8').split('\0').filter((file) => file !== ''));
+      tracked = changed.filter((file) => known.has(file));
+    }
+  }
+  return [...new Set([...tracked, ...ejected.flatMap((skill) => skill.files)])].sort();
 }
 
-function commitOf(paths: string[]): UninstallReport['commit'] {
+function commitOf(paths: string[], ejected: UninstallReport['ejected']): UninstallReport['commit'] {
   const teammates = 'Teammates: run `npx @goksening/grimoire leave` in your clone to remove grimoire from your machine. Until then, the skill files grimoire generated there tell agents to ignore them.';
   const archive = 'The tracker branch grimoire/tracker stays on the remote as an archive; a later install adopts it.';
+  const kept = ejected.length === 0 ? '' : ` Keeps the evolved ${ejected.length === 1 ? 'skill' : 'skills'} ${ejected.map((skill) => skill.name).join(', ')} as ordinary skills (.claude/skills/ and .agents/skills/).`;
   return {
     paths,
     command: paths.length === 0 ? '' : `git add -A -- ${paths.join(' ')} && git commit -m "${UNINSTALL_SUBJECT}"`,
-    message: `${UNINSTALL_SUBJECT}\n\nRemoves grimoire's files and entries from this repo. ${archive}\n\n${teammates}\n`,
-    pr: `Removes grimoire from this repo: its pointer files, the entries it added to shared files, and .grimoire/. ${archive}\n\n${teammates}\n`,
+    message: `${UNINSTALL_SUBJECT}\n\nRemoves grimoire's files and entries from this repo.${kept} ${archive}\n\n${teammates}\n`,
+    pr: `Removes grimoire from this repo: its pointer files, the entries it added to shared files, and .grimoire/.${kept} ${archive}\n\n${teammates}\n`,
   };
 }
 
@@ -294,7 +314,7 @@ export async function runUninstall(options: UninstallOptions): Promise<Uninstall
     tracker: {
       remote,
       delete: remote === null ? null : `git push ${remote} --delete grimoire/tracker`,
-      archive: remote === null ? null : `git push ${remote} ${remoteTrackerRef(remote)}:${ARCHIVE_TAG} && git push ${remote} --delete grimoire/tracker`,
+      archive: remote === null ? null : archiveCommand(remote),
     },
     commit: null,
     warnings: [],
@@ -430,7 +450,7 @@ export async function runUninstall(options: UninstallOptions): Promise<Uninstall
   const removal = report.checkout as CheckoutRemoval | null;
   if (removal === null) return { ...report, ...(report.leave?.stopped ? { stopped: report.leave.stopped } : {}) };
   report.problems.unshift(...removal.problems);
-  report.commit = commitOf(await pathsToCommit(root, removal));
+  report.commit = commitOf(await pathsToCommit(root, removal, report.ejected), report.ejected);
   if (!removal.complete) return { ...report, stopped: 'checkout' };
   if (!leaving) report.warnings.push(`This clone stays joined: once grimoire is uninstalled in ${stillInstalled.join(', ')}, run grimoire leave.`);
   return { ...report, uninstalled: true };
@@ -438,19 +458,23 @@ export async function runUninstall(options: UninstallOptions): Promise<Uninstall
 
 /** Ejects each accepted skill into the checkout (the core's `skill_eject`), as the person. */
 async function ejectSkills(root: string, ctx: CallContext, skills: readonly ServedSkill[], report: UninstallReport): Promise<void> {
-  const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
   try {
-    for (const skill of skills) {
-      const done = await core.call('skill_eject', { name: skill.name, base: skill.version }, { ...ctx, repo: { ...ctx.repo, root } });
-      if (done.ok) {
-        const result = done.result as { name: string; version: string; files: string[] };
-        report.ejected.push({ name: result.name, version: result.version, files: result.files });
-      } else {
-        report.problems.push(`ejecting ${skill.name} failed: ${done.error.message}`);
+    const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
+    try {
+      for (const skill of skills) {
+        const done = await core.call('skill_eject', { name: skill.name, base: skill.version }, { ...ctx, repo: { ...ctx.repo, root } });
+        if (done.ok) {
+          const result = done.result as { name: string; version: string; files: string[] };
+          report.ejected.push({ name: result.name, version: result.version, files: result.files });
+        } else {
+          report.problems.push(`ejecting ${skill.name} failed: ${done.error.message}`);
+        }
       }
+    } finally {
+      await core.close();
     }
-  } finally {
-    await core.close();
+  } catch (error) {
+    report.problems.push(`ejecting the evolved skills failed: ${messageOf(error)}`);
   }
 }
 
@@ -462,12 +486,42 @@ async function removeThisCheckout(root: string, store: MachineLocalStore, option
     () => false,
   );
   const listed = joined ? await readPathList(store).catch(() => [] as string[]) : [];
-  const lease = joined ? await holdWorktreeLease(store, root) : null;
-  if (joined && lease === null) return failed(`another grimoire process keeps working on ${root} (upkeep or doctor --fix): run uninstall again in a moment`);
+  let lease: Awaited<ReturnType<typeof holdWorktreeLease>> = null;
   try {
-    const plan = await planRemoval(root);
+    lease = joined ? await holdWorktreeLease(store, root) : null;
+  } catch (error) {
+    return failed(`grimoire couldn't take this checkout's lease, so nothing in it was removed: ${messageOf(error)}`);
+  }
+  if (joined && lease === null) return failed(`another grimoire process keeps working on ${root} (upkeep or doctor --fix): run uninstall again in a moment`);
+  // What the test seam throws stops the removal as a crash would: it goes through.
+  const crashed = new Set<unknown>();
+  const onStep = options.onRemovalStep;
+  try {
+    let plan: RemovalPlan;
+    try {
+      plan = await planRemoval(root);
+    } catch (error) {
+      return failed(`grimoire couldn't read ${MANIFEST_PATH} and the files it names again, so nothing in this checkout was removed: ${messageOf(error)}`);
+    }
     for (const mention of plan.mentions) if (!report.mentions.some((known) => known.path === mention.path && known.line === mention.line)) report.mentions.push(mention);
-    return await removeCheckout(plan, { listed, ...(options.onRemovalStep ? { onStep: options.onRemovalStep } : {}) });
+    return await removeCheckout(plan, {
+      listed,
+      ...(onStep
+        ? {
+            onStep: async (relative: string) => {
+              try {
+                await onStep(relative);
+              } catch (error) {
+                crashed.add(error);
+                throw error;
+              }
+            },
+          }
+        : {}),
+    });
+  } catch (error) {
+    if (crashed.has(error)) throw error;
+    return failed(`the removal stopped: ${messageOf(error)}`);
   } finally {
     await lease?.release().catch(() => {});
   }
