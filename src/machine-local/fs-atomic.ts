@@ -77,19 +77,28 @@ export async function writeFileAtomic(file: string, data: string): Promise<void>
 }
 
 /**
+ * The hard-link failures that mean the file system has no hard links (FAT and
+ * exFAT, some network shares): EPERM and ENOTSUP on POSIX, EISDIR (libuv's
+ * spelling of ERROR_INVALID_FUNCTION) or ENOTSUP on Windows.
+ */
+const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EISDIR']);
+
+/**
  * Creates `file` holding `data` only if nothing is there yet; returns false if
  * it already exists. The file appears with its full content (temp file plus a
- * hard link, which fails if the name is taken). On a file system without hard
- * links it falls back to an exclusive create, where a reader may briefly see a
- * partial file.
+ * hard link, which fails if the name is taken); a link a reader or an
+ * antivirus holds up on Windows is retried. Only on a file system without hard
+ * links does it fall back to an exclusive create, where a reader may briefly
+ * see a partial file. Any other failure is an error.
  */
 export async function createFileExclusive(file: string, data: string): Promise<boolean> {
   const temp = await writeTemp(file, data);
   try {
-    await link(temp, file);
+    await retryTransient(() => link(temp, file));
     return true;
   } catch (error) {
     if (errorCode(error) === 'EEXIST') return false;
+    if (!NO_HARD_LINKS.has(errorCode(error) ?? '')) throw error;
     return createWithOpenExclusive(file, data);
   } finally {
     await retryTransient(() => unlink(temp)).catch(() => {});
