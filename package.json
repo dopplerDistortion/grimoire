@@ -1,0 +1,66 @@
+{
+  "name": "@goksening/grimoire",
+  "version": "1.0.0",
+  "description": "An agent-native issue tracker that lives in your git repo, runs fully locally and syncs only through git.",
+  "keywords": [
+    "issue-tracker",
+    "git",
+    "mcp",
+    "agents",
+    "claude-code",
+    "codex",
+    "cli",
+    "local-first"
+  ],
+  "homepage": "https://github.com/dopplerDistortion/grimoire#readme",
+  "bugs": {
+    "url": "https://github.com/dopplerDistortion/grimoire/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dopplerDistortion/grimoire.git"
+  },
+  "license": "MIT",
+  "author": "Göksenin Güngör",
+  "type": "module",
+  "bin": {
+    "grimoire": "dist/grimoire.mjs"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepack": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs",
+    "build:cli": "node scripts/build.mjs cli",
+    "build:dashboard": "node scripts/build.mjs dashboard",
+    "check": "node scripts/check.mjs",
+    "check:full": "node scripts/check.mjs --full",
+    "check:deps": "node scripts/check-deps.mjs",
+    "dev:dashboard": "vite",
+    "test": "vitest run",
+    "test:main": "vitest run --project main",
+    "test:slow": "vitest run --project slow",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json && tsc -p src/surfaces/dashboard/tsconfig.json"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "preact": "^11.0.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}

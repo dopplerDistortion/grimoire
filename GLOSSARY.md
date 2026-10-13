@@ -22,6 +22,14 @@ _Avoid_: Installed version, current version, lock
 A person's setup of grimoire on their own machine for one clone of a host repo and the pinned version its checkout names; it is needed before grimoire runs in that clone and again for each new pinned version, and it is the only step that downloads grimoire.
 _Avoid_: Install, setup, onboarding
 
+**Version copy**:
+One grimoire release unpacked into a clone's git common directory and shared by every worktree of that clone; a join installs the copy its checkout pins, and agent clients only ever run grimoire from such a copy.
+_Avoid_: Install, cache, vendored copy
+
+**Launcher**:
+The small machine-local program that every agent-client entry and the dotfolder's command-line runner go through, which runs the version copy a checkout pins once the clone has joined that version, and otherwise says how to join.
+_Avoid_: Loader, wrapper
+
 **Upgrade**:
 A human's move of one checkout to a new pinned version, together with any change to the shape of grimoire's data that the new version needs; other branches take it through git like any change, and other machines through a join.
 _Avoid_: Update, bump, migration
@@ -42,13 +50,29 @@ _Avoid_: Database, cache, data dir, dotfolder
 The git branch on which grimoire alone commits a host repo's issues, attempts, traces, outcomes and its whole knowledge layer, wiki and evolved-skill texts included; it is never checked out or merged into code, and clones exchange it by ordinary git fetch and push.
 _Avoid_: Sync branch, data branch, issues branch, ledger
 
+**Sync**:
+Grimoire's exchange of the tracker branch with a clone's remote by plain git: fetch the remote's tracker branch, fold it into the local one, and push the result, so that teammates see it after an ordinary `git fetch`; it runs on its own after the writes that matter, never holding one up, and a person can always run it by hand.
+_Avoid_: Replicate, upload, publish
+
+**Sync-pending marker**:
+A machine-local note that one local tip of the tracker branch still has to reach the remote, set before a sync tries and cleared only once the remote holds that tip or a later one, so that a sync that fails or dies is tried again.
+_Avoid_: Dirty flag, outbox, queue
+
 **Pointer file**:
 A small file grimoire writes outside the dotfolder solely so an agent client can find grimoire, recorded in the dotfolder's manifest so it can be removed cleanly.
 _Avoid_: Shim, integration file, config
 
+**Content pointer file**:
+A pointer file, or a marked block in one, that holds text grimoire ships and may change in any release, such as the instruction text or the issue-tracker adapter block; upkeep rewrites it when it drifts from the pinned version's text and asks the person to commit it, unlike the pointer files that carry entry commands or permission grants, which only an install or upgrade writes.
+_Avoid_: Doc file, generated file
+
 **Upkeep**:
 Grimoire's own mechanical background work for a host repo on one machine, such as catching up on excerpts, syncing the tracker branch and refreshing pointer files and skill copies, done on the side by grimoire's own long-running processes rather than by any one command, and never by an LLM.
 _Avoid_: Housekeeping, maintenance, background job, daemon
+
+**Upkeep part**:
+One kind of upkeep work, done either once for the whole clone or once for each worktree that pins the running version, which a process skips while another process is doing the same part and which runs at most so often across the clone.
+_Avoid_: Task, job, step
 
 **Agent client**:
 A program that runs an AI agent's sessions on a developer's machine and through which the agent talks to grimoire, such as Claude Code or Codex.
@@ -57,6 +81,18 @@ _Avoid_: Harness, IDE, host, agent (for the program itself)
 **Skill stub**:
 A pointer file that makes one evolved skill visible to one agent client's own skill discovery, carrying the skill's name and description but not its text; grimoire generates it in each checkout, and nobody commits it.
 _Avoid_: Skill mirror, skill copy, skill shim
+
+**Generated output**:
+The evolved-skill copies and skill stubs grimoire writes into every worktree that pins a release, byte for byte from what is served, each in a folder that ignores itself; it exists only where a pin is, nobody commits it, and a path git tracks is never written over.
+_Avoid_: Generated files, build output, cache
+
+**Served set**:
+The evolved skills agents get in a clone right now, each at its served version, derived from the skill ledger in the merged tracker view and the delivery switch; each machine caches it, keyed by the tracker tip pair.
+_Avoid_: Active skills, current skills, skill list
+
+**SessionStart fast path**:
+The SessionStart hook's own pass over its worktree's generated output: before the client lists skills, it writes whatever differs from the served set, under the worktree's lease, and never removes or moves anything.
+_Avoid_: Hook reconcile, quick refresh
 
 ### Tracking
 
@@ -100,11 +136,23 @@ _Avoid_: Conversation, thread, agent
 The tie between an attempt and a context that claimed it, ended it, or wrote to its issue naming the attempt; only bound contexts have their transcripts cut into the attempt's trace, and every other write on the issue is recorded only as activity.
 _Avoid_: Participation, membership, association
 
+**Fold**:
+Grimoire's own deterministic merge of a clone's tracker branch with the fetched one after they diverged, by rules that know each record's shape and never by `git merge`; a read shows it in memory, the next write commits it, and every clone reaches the same state whichever side folds.
+_Avoid_: Sync, rebase, git merge
+
+**Fold conflict**:
+What a fold sets aside when two clones changed the same field of an issue, deleted an issue the other edited, or both claimed it: the issue keeps one value and shows the other beside it, and can't be claimed until a human resolves it. On a pattern page, two clones' overlapping edits leave the later page standing and the other side set aside beside it, with its own sources, until a later write reconciles them.
+_Avoid_: Merge conflict, collision
+
 ### Surfaces
 
 **Dashboard**:
 The local web page a running grimoire serves to the person at the machine for one host repo; it shows the live store and, together with human-only CLI commands, is the only place a human-only operation can be done.
 _Avoid_: UI, web app, admin panel, console
+
+**Attention**:
+The dashboard's home: only what a human must unblock (stale claims, fold conflicts, id collisions, sync failures a person must fix, stray edits and the knowledge items), each with its action inline; nothing an agent can settle on its own.
+_Avoid_: Inbox, notifications, alerts
 
 **Human-only operation**:
 An operation grimoire never offers to agents, available only in the dashboard and in CLI commands that need an interactive terminal, such as reopening an issue, purging a trace or deciding a skill proposal.
@@ -135,6 +183,34 @@ _Avoid_: Session file, rollout, conversation log
 **Excerpt**:
 The bounded, redacted step log of one bound context's work within an attempt, cut mechanically from its transcript, waiting with the attempt while it is open and then kept inside the trace.
 _Avoid_: Summary, snippet, transcript
+
+**Session record**:
+One bound context's part of an attempt's trace: which client, session and context it was, the window grimoire cut from its transcript, its capture statuses and facts, and its excerpt when the excerpt mode allows one; it waits with the open attempt, a later cut replaces it only by reaching further, and the attempt's end freezes it.
+_Avoid_: Capture file, session log, transcript
+
+**Sweep**:
+The upkeep part that catches capture up without waiting for a session to end: it cuts the bound contexts of open attempts that went idle or whose transcript was archived, and attaches their session records to the still-open attempt.
+_Avoid_: Scan, crawl, harvest
+
+**Late record**:
+A session record that reaches an attempt through a fold after another clone ended it: admitted when it was cut before that end, dropped and counted when cut after it.
+_Avoid_: Stray record, orphan record
+
+**Observed commit**:
+A commit a bound context was seen making: git's creation line in the result of its own commit, cherry-pick or revert command (or a subagent's it launched), or a creating entry in its worktree's HEAD reflog timed inside one of its tool calls; recorded in that context's session record, never inferred from hashes a log or show printed.
+_Avoid_: Attempt commit, session commit, detected commit
+
+**Referenced commit**:
+A commit on any branch of the clone whose `Refs:` trailer names the issue, made while the attempt was open; recorded in the trace's `end.md` beside the observed commits of its session records.
+_Avoid_: Linked commit, mentioned commit
+
+**Agent skill edit**:
+A commit that changes the generated evolved-skill copies (`.grimoire/skills/**`) made by an agent: an observed commit of an agent context, or a referenced commit carrying a known agent co-author trailer (marked agent-assisted in a human attempt); a merge counts only when a merged copy matches neither parent.
+_Avoid_: Skill commit, stray commit
+
+**Excerpt mode**:
+The store setting (`excerpts`, `facts` or `none`) that decides what capture ever commits: excerpt text and facts, facts only, or nothing read from a transcript at all; a machine may only lower it for its own sessions.
+_Avoid_: Capture level, privacy mode, trace mode
 
 **Debrief**:
 A worker's own short account of an attempt, posted on the issue as the attempt ends: what was tried, what failed, what worked, and what the next worker should know; agents are asked for one, humans may write one.
@@ -168,6 +244,10 @@ _Avoid_: Optimizer, skill writer, skill generator
 One pickup of a due knowledge chore by one context, from its start until its result is accepted or it fails, is abandoned or expires; it records what grimoire served it and what it consumed.
 _Avoid_: Job, lease, execution, invocation
 
+**Chore carrier**:
+A content pointer file, or the `chores` MCP prompt, that hands an agent client grimoire's one shipped chore procedure, so a due knowledge chore runs in an isolated context: the `grimoire-chores` skill and subagent in Claude Code, the `grimoire-chores` skill and role in Codex.
+_Avoid_: Chore skill file, chore prompt template
+
 **Runner**:
 A per-machine opt-in that lets grimoire itself start an agent client's headless mode to do due knowledge chores unattended, on that person's own login.
 _Avoid_: Worker, daemon, background agent, bot
@@ -192,6 +272,26 @@ _Avoid_: Local edit, drift, observed change
 One suggested change to exactly one evolved skill, creating it or patching it, drafted by the Skill Proposer together with its evidence; it never changes once written, and it changes nothing until a human accepts it.
 _Avoid_: Suggestion, candidate, change request, PR
 
+**Pending slot**:
+The bound on skill proposals waiting for a human decision, one per host repo by default and judged on the merged view, so every worktree and clone shares it; while it is full the Skill Proposer isn't due and a proposal submit is refused.
+_Avoid_: Queue, inbox, backlog
+
+**Mechanical checks**:
+The fail-closed rules grimoire's own code applies to a skill proposal before any human sees it (shape, names, base, size, the evidence minimum, repeats, copying, hygiene and the secret scan); a failure is a reason code, never a judgment of the advice.
+_Avoid_: Validation, review, linting
+
+**Risk flag**:
+A fact grimoire computes about a skill proposal and shows its reviewer, such as where each command it adds comes from (its token origin), dangerous patterns or a near-rewrite; it never rejects a proposal by itself.
+_Avoid_: Warning, score, lint
+
+**Red flag**:
+A risk flag, or the live evidence flag (the evidence minimum re-checked now and no longer met after a purge, a quarantine or an outcome flip), that a human must acknowledge, one by one, before accepting a skill proposal; the skill ledger records each acknowledgement.
+_Avoid_: Blocker, error, veto
+
+**Lapsed**:
+The status of a skill proposal whose mechanical checks, run again at accept, failed (a create over the cap, a new stub collision, a stricter rule after an upgrade); nothing is accepted and the pending slot frees.
+_Avoid_: Expired, failed, invalid
+
 **Skill version**:
 One exact text of an evolved skill, identified by that text alone, so the same words are always the same version.
 _Avoid_: Revision, snapshot, release
@@ -200,6 +300,18 @@ _Avoid_: Revision, snapshot, release
 A human's forward change that makes an earlier skill version of an evolved skill current again, recorded as a new change rather than by undoing git history.
 _Avoid_: Rollback, revert
 
+**Undone**:
+What a restore makes of the change it restores away from: negative evidence, so the Skill Proposer may not propose it again; a skill proposal whose accepted version a restore left reads `undone`.
+_Avoid_: Reverted, rolled back
+
+**Dropped**:
+What a restore makes of the later skill versions it removes on the way back, between the restored version and the undone change: no negative evidence, and proposable again; the restore's confirmation lists and diffs them first.
+_Avoid_: Discarded, lost, reverted
+
 **Skill ledger**:
-The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, and every change to an evolved skill.
+The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, every change to an evolved skill, and every quarantine mark and clear.
 _Avoid_: Skill impact, changelog, audit log, history
+
+**Scorecard**:
+The watch-only tally for one skill version, derived from the traces of agent attempts whose checkout offered it or that read it: how many were offered it, how many read it, the outcomes of those that read it, and the attempts whose facts were incomplete, counted as "read unknown"; never committed, and it changes nothing.
+_Avoid_: Skill impact, metrics, rating

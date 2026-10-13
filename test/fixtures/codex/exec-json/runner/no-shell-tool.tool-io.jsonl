@@ -1,0 +1,4 @@
+{"type":"function_call","id":"fc_01a12964-1edd-7a60-991e-0c08e2a1e2ac","name":"exec_command","arguments":"{\"cmd\":\"Get-ChildItem -Force -Name; Get-Content $env:GOK131_READ_PROBE\"}","call_id":"call_1_0"}
+{"type":"function_call_output","id":"fco_01a12964-1edd-7a60-991e-0c1296372bb5","call_id":"call_1_0","output":"unsupported call: exec_command"}
+{"type":"function_call","id":"fc_01a12964-1ee0-72f0-84cb-fdafd751f82a","name":"exec_command","arguments":"{\"cmd\":\"Set-Content -Path written-by-runner.txt -Value 'x'\"}","call_id":"call_2_0"}
+{"type":"function_call_output","id":"fco_01a12964-1ee0-72f0-84cb-fdb7a932ee00","call_id":"call_2_0","output":"unsupported call: exec_command"}

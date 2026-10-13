@@ -1,0 +1,115 @@
+{
+  "client": {
+    "name": "codex",
+    "version": "0.162.1"
+  },
+  "reader": {
+    "version": 1
+  },
+  "session": "01a1296e-1847-78b3-87fa-10b5d9b7d8fd",
+  "context": "01a1296e-1847-78b3-87fa-10b5d9b7d8fd",
+  "agentType": null,
+  "lines": {
+    "read": 27,
+    "unknown": 0,
+    "malformed": 0
+  },
+  "status": "cut",
+  "notes": [],
+  "window": {
+    "start": {
+      "at": "2026-10-11T05:27:23.654Z",
+      "ref": "7"
+    },
+    "end": {
+      "at": "2026-10-11T05:27:23.940Z",
+      "ref": "23"
+    }
+  },
+  "reach": {
+    "at": "2026-10-11T05:27:23.940Z",
+    "ref": "23"
+  },
+  "counts": {
+    "stepsInWindow": 8,
+    "stepsKept": 8,
+    "characters": 1265
+  },
+  "steps": [
+    {
+      "kind": "prompt",
+      "text": "PLAN: [{\"search\":\"probe echo\"},{\"call\":\"echo\",\"ns\":\"mcp__probe\",\"args\":{\"text\":\"show gr-7k2pq\"}},{\"call\":\"exec_command\",\"args\":{\"cmd\":\"git log --oneline -1\"}},{\"say\":\"archived session done\"}]",
+      "at": "2026-10-11T05:27:23.654Z",
+      "ref": "7"
+    },
+    {
+      "kind": "tool_call",
+      "id": "call_1_0",
+      "name": "tool_search",
+      "grimoire": null,
+      "input": {
+        "query": "probe echo",
+        "limit": 8
+      },
+      "at": "2026-10-11T05:27:23.667Z",
+      "ref": "8"
+    },
+    {
+      "kind": "tool_result",
+      "id": "call_1_0",
+      "error": false,
+      "text": "[tool_reference mcp__probe__echo]\n[tool_reference mcp__probe__boom]\n[tool_reference mcp__probe__which]\n[tool_reference mcp__probe__big]",
+      "at": "2026-10-11T05:27:23.680Z",
+      "ref": "10"
+    },
+    {
+      "kind": "tool_call",
+      "id": "call_2_0",
+      "name": "mcp__probe__echo",
+      "grimoire": null,
+      "input": {
+        "text": "show gr-7k2pq"
+      },
+      "at": "2026-10-11T05:27:23.696Z",
+      "ref": "12"
+    },
+    {
+      "kind": "tool_result",
+      "id": "call_2_0",
+      "error": false,
+      "text": "{\"era\":\"legacy\",\"protocolVersion\":\"2025-06-18\",\"input\":{\"text\":\"show gr-7k2pq\"},\"hint\":null,\"meta\":{\"progressToken\":1,\"callId\":\"call_2_0\",\"x-codex-turn-metadata\":{\"session_id\":\"01a1296e-1847-78b3-87fa-10b5d9b7d8fd\",\"thread_id\":\"01a1296e-1847-78b3-87fa-10b5d9b7d8fd\",\"reasoning_effort\":\"medium\",\"turn_id\":\"01a1296e-188d-7751-8748-d686c256b462\",\"model\":\"gpt-5.5\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"workspaces\":{\"C:\\\\gok130\\\\runs\\\\zst\\\\work\":{\"latest_git_commit_hash\":\"d16c8f251383ffd685a3679179a8cef1de02437f\",\"has_changes\":false}},\"turn_started_at_unix_ms\":1791696443542,\"codex_version\":\"0.162.1\"},\"threadId\":\"01a1296e-1847-78b3-87fa-10b5d9b7d8fd\",\"sessionId\":\"01a1296e-1847-78b3-87fa-10b5d9b7d8fd\",\"windowId\":\"01a1296e-1847-78b3-87fa-10b5d9b7d8fd:0\",\"itemId\":\"fc_01a1296e-1930-7373-9bab-2d2b7796c3e4\"},\"envelope\":null}",
+      "at": "2026-10-11T05:27:23.721Z",
+      "ref": "15"
+    },
+    {
+      "kind": "tool_call",
+      "id": "call_3_0",
+      "name": "exec_command",
+      "grimoire": null,
+      "input": {
+        "cmd": "git log --oneline -1"
+      },
+      "at": "2026-10-11T05:27:23.734Z",
+      "ref": "17"
+    },
+    {
+      "kind": "tool_result",
+      "id": "call_3_0",
+      "error": false,
+      "text": "d16c8f2 init\n",
+      "at": "2026-10-11T05:27:23.921Z",
+      "ref": "20"
+    },
+    {
+      "kind": "assistant",
+      "text": "archived session done",
+      "at": "2026-10-11T05:27:23.940Z",
+      "ref": "23"
+    }
+  ],
+  "callIds": [
+    "call_1_0",
+    "call_2_0",
+    "call_3_0"
+  ]
+}

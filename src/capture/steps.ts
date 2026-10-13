@@ -1,0 +1,150 @@
+// The client-neutral step model (spec §14 Readers): what every client's
+// transcript reader normalizes into, and what windows and excerpts are cut from.
+// Reasoning is never a step.
+import { stat } from 'node:fs/promises';
+
+/** Where a step came from in its transcript: the line's timestamp and its id (Claude Code: the line uuid). */
+export interface StepOrigin {
+  readonly at: string;
+  readonly ref: string;
+}
+
+/** A user prompt that opens a turn. */
+export interface PromptStep extends StepOrigin {
+  readonly kind: 'prompt';
+  readonly text: string;
+}
+
+/** Visible assistant text. */
+export interface AssistantStep extends StepOrigin {
+  readonly kind: 'assistant';
+  readonly text: string;
+}
+
+/** A tool call, with the model's own input. */
+export interface ToolCallStep extends StepOrigin {
+  readonly kind: 'tool_call';
+  readonly id: string;
+  readonly name: string;
+  /**
+   * The grimoire operation the call makes: the MCP tool's name (`claim`,
+   * `show`, `chore_start`, …), or `cli` for a shell command running grimoire.
+   * `null` for every other call.
+   */
+  readonly grimoire: string | null;
+  readonly input: unknown;
+}
+
+/** A tool's result. `error` is false unless the client marked the result as failed. */
+export interface ToolResultStep extends StepOrigin {
+  readonly kind: 'tool_result';
+  readonly id: string;
+  readonly error: boolean;
+  readonly text: string;
+}
+
+/** The summary a compaction left; the transcript continues after it. */
+export interface CompactionStep extends StepOrigin {
+  readonly kind: 'compaction';
+  readonly text: string;
+}
+
+/** A call that launched a subagent (its own context, with its own transcript). */
+export interface SubagentLaunchStep extends StepOrigin {
+  readonly kind: 'subagent_launch';
+  readonly id: string;
+  readonly name: string;
+  /** The subagent's type, when the launch names it. */
+  readonly agentType: string | null;
+  readonly input: unknown;
+}
+
+/** A subagent's result, back in the launching context. */
+export interface SubagentResultStep extends StepOrigin {
+  readonly kind: 'subagent_result';
+  readonly id: string;
+  /** The subagent's id, which names its own transcript, when the client recorded it. */
+  readonly agentId: string | null;
+  readonly error: boolean;
+  readonly text: string;
+}
+
+export type Step =
+  | PromptStep
+  | AssistantStep
+  | ToolCallStep
+  | ToolResultStep
+  | CompactionStep
+  | SubagentLaunchStep
+  | SubagentResultStep;
+
+export type CallStep = ToolCallStep | SubagentLaunchStep;
+export type ResultStep = ToolResultStep | SubagentResultStep;
+
+export function isCall(step: Step): step is CallStep {
+  return step.kind === 'tool_call' || step.kind === 'subagent_launch';
+}
+
+export function isResult(step: Step): step is ResultStep {
+  return step.kind === 'tool_result' || step.kind === 'subagent_result';
+}
+
+/**
+ * The file a reader read, as it stood just before the read: a sweep reads it
+ * again only once its size or modification time moved (spec §14 Sweeps).
+ */
+export interface TranscriptStamp {
+  readonly file: string;
+  readonly size: number;
+  readonly mtime_ms: number;
+}
+
+/** The stamp of `file` as it stands now; null when it can't be read. */
+export async function stampOf(file: string): Promise<TranscriptStamp | null> {
+  try {
+    const stats = await stat(file);
+    return stats.isFile() ? { file, size: stats.size, mtime_ms: stats.mtimeMs } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `file` still stands as `stamp` saw it. */
+export async function unchangedSince(stamp: TranscriptStamp): Promise<boolean> {
+  const now = await stampOf(stamp.file);
+  return now !== null && now.size === stamp.size && now.mtime_ms === stamp.mtime_ms;
+}
+
+/** What a reader made of one context's transcript. */
+export interface Transcript {
+  readonly client: { readonly name: string; readonly version: string | null };
+  readonly reader: { readonly version: number };
+  readonly session: string;
+  /** `main` for the session's main line, otherwise the subagent's id. */
+  readonly context: string;
+  /**
+   * The context's own agent type, when its transcript names it: a Claude Code
+   * subagent's `agentType` (its `.meta.json`), a Codex thread's
+   * `session_meta.agent_role`. A `grimoire-chores` context is excluded from
+   * excerpts and fact scans (spec §14).
+   */
+  readonly agentType: string | null;
+  /** Every step, in transcript order. */
+  readonly steps: readonly Step[];
+  /**
+   * How many leading steps are history a fork copied from another transcript.
+   * They belong to the transcript they were copied from, never to this one.
+   */
+  readonly copiedSteps: number;
+  /** The latest timestamp on any line read: how far the transcript was flushed. */
+  readonly flushedTo: string | null;
+  /** The file read, as it stood just before the read, when a reader knows it. */
+  readonly stamp?: TranscriptStamp;
+  readonly lines: {
+    readonly read: number;
+    /** Lines of a type, or with content, the reader doesn't know: skipped and counted. */
+    readonly unknown: number;
+    /** Lines that aren't JSON, before the last line: skipped and counted. A torn last line is ignored. */
+    readonly malformed: number;
+  };
+}

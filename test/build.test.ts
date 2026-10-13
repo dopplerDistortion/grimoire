@@ -1,0 +1,141 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { makeTempDir, removeDir, runCommand } from '#harness';
+
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const pkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
+  version: string;
+  bin: { grimoire: string };
+};
+
+/** The environment a developer's shell would give `npm run build`, minus Vitest's markers. */
+function buildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key !== 'NODE_ENV' && !key.startsWith('VITEST')) env[key] = value;
+  }
+  return env;
+}
+
+// One build command, run as `npm run build` runs it, into a temp package root
+// laid out like the published package (<root>/dist/...).
+describe('the build', () => {
+  let packageRoot: string;
+
+  beforeAll(async () => {
+    packageRoot = await makeTempDir('grimoire-build-');
+    const result = await runCommand(
+      process.execPath,
+      [path.join(repoRoot, 'scripts', 'build.mjs'), '--out-dir', path.join(packageRoot, 'dist')],
+      { cwd: repoRoot, env: buildEnv() },
+    );
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+  });
+  afterAll(() => removeDir(packageRoot));
+
+  /**
+   * The code a file loads up front: its own and its static imports', followed
+   * transitively. Bare side-effect imports (`import "./chunks/chunk-X.mjs";`) count
+   * too; dynamic `import()`s don't.
+   */
+  const upFront = (entry: string): string => {
+    const loaded = new Set<string>();
+    const visit = (file: string) => {
+      if (loaded.has(file)) return;
+      loaded.add(file);
+      for (const [, spec] of readFileSync(file, 'utf8').matchAll(/^(?:import|export)\s(?:[^;]*?\sfrom\s*)?"(\.{1,2}\/[^"]+)"/gm)) {
+        visit(path.resolve(path.dirname(file), spec!));
+      }
+    };
+    visit(entry);
+    return [...loaded].map((file) => readFileSync(file, 'utf8')).join('\n');
+  };
+
+  it('produces a self-contained bin that reports the package version', async () => {
+    const bin = path.join(packageRoot, pkg.bin.grimoire);
+    // Run from the temp root, far from the repo's node_modules.
+    const result = await runCommand(process.execPath, [bin, '--version'], { cwd: packageRoot });
+
+    expect(result.stderr).toBe('');
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ version: pkg.version });
+  });
+
+  it('loads each verb’s code only for that verb: the SDK only for `mcp`, the core only after its opening', () => {
+    const chunks = path.join(packageRoot, 'dist', 'chunks');
+    const serve = readdirSync(chunks).find((name) => name.startsWith('serve-'));
+
+    const cli = upFront(path.join(packageRoot, pkg.bin.grimoire));
+    expect(cli).toContain('src/surfaces/cli/main.ts');
+    expect(cli).not.toContain('node_modules/@modelcontextprotocol/');
+    expect(cli).not.toContain('src/core/index.ts');
+    // The `mcp` verb's chunk: the SDK, but neither the core nor the tracker before the opening is answered.
+    expect(serve).toBeDefined();
+    const mcp = upFront(path.join(chunks, serve!));
+    expect(mcp).toContain('node_modules/@modelcontextprotocol/server/');
+    expect(mcp).not.toContain('src/core/index.ts');
+    expect(mcp).not.toContain('src/tracker/');
+  });
+
+  it('gives a version copy its entry, dist/launch.mjs, whose pre-tool-use hook loads neither the CLI, the core nor the SDK', async () => {
+    const dist = path.join(packageRoot, 'dist');
+    const chunks = path.join(dist, 'chunks');
+    const chunk = (prefix: string) => {
+      const name = readdirSync(chunks).find((file) => file.startsWith(prefix));
+      expect(name, prefix).toBeDefined();
+      return path.join(chunks, name!);
+    };
+
+    const entry = (await import(pathToFileURL(path.join(dist, 'launch.mjs')).href)) as { launch?: unknown };
+    expect(typeof entry.launch).toBe('function');
+    // Everything `hook pre-tool-use` loads: the entry, the hook dispatch and its own chunk.
+    const hook = [upFront(path.join(dist, 'launch.mjs')), upFront(chunk('run-hook-')), upFront(chunk('pre-tool-use-'))].join('\n');
+    expect(hook).toContain('src/surfaces/hooks/pre-tool-use.ts');
+    for (const heavy of ['src/surfaces/cli/run.ts', 'src/core/', 'src/tracker/', 'node_modules/@modelcontextprotocol/']) {
+      expect(hook, heavy).not.toContain(heavy);
+    }
+  });
+
+  it('produces the dashboard as hashed static assets with no inline code', () => {
+    const dashboard = path.join(packageRoot, 'dist', 'dashboard');
+    const html = readFileSync(path.join(dashboard, 'index.html'), 'utf8');
+    const assets = readdirSync(path.join(dashboard, 'assets'));
+
+    const hashed = /^[\w.-]+-[\w-]{8,}\.(js|css)$/;
+    expect(assets.filter((name) => name.endsWith('.js')).length).toBeGreaterThan(0);
+    expect(assets.filter((name) => name.endsWith('.css')).length).toBeGreaterThan(0);
+    for (const name of assets) expect(name).toMatch(hashed);
+
+    const referenced = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((m) => m[1]!);
+    expect(referenced.length).toBeGreaterThan(0);
+    for (const ref of referenced) {
+      expect(ref).toMatch(/^\/assets\//);
+      expect(existsSync(path.join(dashboard, ref))).toBe(true);
+    }
+
+    // The CSP allows no inline script or style.
+    expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
+    expect(html).not.toMatch(/<style/);
+    expect(html).not.toMatch(/\sstyle="/);
+  });
+
+  it('ships the license notice of every package bundled into the CLI or the dashboard, and no source maps', () => {
+    const notices = readFileSync(path.join(packageRoot, 'dist', 'THIRD_PARTY_LICENSES.md'), 'utf8');
+    // The MCP server SDK and what it brings (CLI), and Preact (dashboard): each named with its version and
+    // license as its package.json declares them, then its license file's text, whole.
+    for (const name of ['@modelcontextprotocol/server', '@modelcontextprotocol/core', 'zod', 'preact']) {
+      const dir = path.join(repoRoot, 'node_modules', ...name.split('/'));
+      const declared = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { version: string; license: string };
+      const text = readFileSync(path.join(dir, 'LICENSE'), 'utf8').replace(/\r\n/g, '\n').trim();
+      expect(notices, name).toContain(`## ${name}@${declared.version} (${declared.license})\n\n${text}\n`);
+    }
+    // Only what is bundled: the test client and the toolchain are not.
+    for (const name of ['@modelcontextprotocol/client', 'vitest', 'esbuild', 'vite', 'typescript']) {
+      expect(notices, name).not.toMatch(new RegExp(`^## ${name.replace(/[/.]/g, '\\$&')}@`, 'm'));
+    }
+    const all = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? all(path.join(dir, entry.name)) : [entry.name]));
+    expect(all(path.join(packageRoot, 'dist')).filter((name) => name.endsWith('.map'))).toEqual([]);
+  });
+});
