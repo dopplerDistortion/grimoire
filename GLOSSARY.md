@@ -292,6 +292,14 @@ _Avoid_: Revision, snapshot, release
 A human's forward change that makes an earlier skill version of an evolved skill current again, recorded as a new change rather than by undoing git history.
 _Avoid_: Rollback, revert
 
+**Undone**:
+What a restore makes of the change it restores away from: negative evidence, so the Skill Proposer may not propose it again; a skill proposal whose accepted version a restore left reads `undone`.
+_Avoid_: Reverted, rolled back
+
+**Dropped**:
+What a restore makes of the later skill versions it removes on the way back, between the restored version and the undone change: no negative evidence, and proposable again; the restore's confirmation lists and diffs them first.
+_Avoid_: Discarded, lost, reverted
+
 **Skill ledger**:
 The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, every change to an evolved skill, and every quarantine mark and clear.
 _Avoid_: Skill impact, changelog, audit log, history
