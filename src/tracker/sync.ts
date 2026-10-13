@@ -371,14 +371,18 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     refs = await host.trackerRefs();
     local = refs.local;
     remoteTip = refs.remotes.get(remote) ?? null;
+    /** The remote-tracking ref as this sync left it: the push moves it on only from there. */
+    let tracked = remoteTip;
     if (tracker === null && remoteTip !== null) {
       // The remote holds no tracker: someone deleted it, and the remote-tracking ref is stale. Folded in, it would
       // bring the deleted tracker back. It goes (as `git fetch --prune` drops it) while it still holds what was read.
-      await host.deleteRef(tracking, remoteTip);
-      remoteTip = (await host.trackerRefs()).remotes.get(remote) ?? null;
+      // Dropped or not (a fetch, gc or pack-refs elsewhere may hold its lock), the stale tip is never folded in: only
+      // another tip a fetch elsewhere put there since is.
+      const stale = remoteTip;
+      await host.deleteRef(tracking, stale);
+      tracked = (await host.trackerRefs()).remotes.get(remote) ?? null;
+      remoteTip = tracked === stale ? null : tracked;
     }
-    /** The remote-tracking ref as this sync left it: the push moves it on only from there. */
-    const tracked = remoteTip;
     if (local !== null && remoteTip !== null && local !== remoteTip) {
       if (spec.author) {
         const folded = await host.fold({ author: spec.author, actor: spec.actor });
