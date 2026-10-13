@@ -113,8 +113,9 @@ async function buildDashboard(dir) {
 function packageDirOf(file) {
   const parts = path.resolve(repoRoot, file.replace(/^\0/, '').replace(/\?.*$/, '')).split(path.sep);
   const at = parts.lastIndexOf('node_modules');
-  if (at < 0 || at + 1 >= parts.length) return null;
-  return parts.slice(0, at + (parts[at + 1].startsWith('@') ? 3 : 2)).join(path.sep);
+  const name = at < 0 ? undefined : parts[at + 1];
+  if (name === undefined) return null;
+  return parts.slice(0, at + (name.startsWith('@') ? 3 : 2)).join(path.sep);
 }
 
 /**
