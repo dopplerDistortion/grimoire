@@ -66,10 +66,27 @@ function readPidFiles(files: Map<string, string>): void {
 
 const running = (child: ChildProcess) => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
 
+/** How long a synchronous taskkill may take before the guard falls back to process.kill. */
+const KILL_TIMEOUT_MS = 30_000;
+
 /** Kills `pid` and every process it started (by parent pid), as a hung test's would be. */
 function killTree(pid: number): void {
   if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    // Bounded: a taskkill that stalls on a busy machine must not block the
+    // worker past every vitest timeout (it runs synchronously in the guard).
+    const run = spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+      timeout: KILL_TIMEOUT_MS,
+    });
+    if (run.error !== undefined || run.signal !== null) {
+      console.warn(`leak guard: taskkill of ${pid} did not finish in ${KILL_TIMEOUT_MS} ms; killing it directly`);
+      try {
+        process.kill(pid);
+      } catch {
+        // Gone already.
+      }
+    }
     return;
   }
   for (const target of [-pid, pid]) {
