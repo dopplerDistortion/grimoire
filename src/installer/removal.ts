@@ -27,7 +27,7 @@ import { link as hardLink, lstat, readdir, rename, rmdir, unlink } from 'node:fs
 import path from 'node:path';
 import { runGit } from '../git/run';
 import { retryTransient } from '../machine-local';
-import { linkedComponent, readCheckoutText, safeWrite } from '../safe-write';
+import { keptNote, linkedComponent, readCheckoutText, safeWrite } from '../safe-write';
 import { BOOTSTRAP } from './bootstrap';
 import { CONFIG_PATH } from './config';
 import { removeGenerated } from './leave';
@@ -542,7 +542,7 @@ export async function removeCheckout(plan: RemovalPlan, options: RemovalOptions 
       } else {
         const skip = await safeWrite(root, change.path, change.before, change.after);
         if (skip !== null) {
-          result.problems.push(skip.reason === 'link' ? `${skip.at} is a symlink; grimoire never writes through one` : skip.reason === 'changed' ? `${change.path} changed while uninstall ran` : `${change.path} is not a file`);
+          result.problems.push(skip.reason === 'link' ? `${skip.at} is a symlink; grimoire never writes through one` : skip.reason === 'changed' ? `${change.path} changed while uninstall ran${keptNote(skip)}` : `${change.path} is not a file`);
           continue;
         }
         result.edited.push(change.path);

@@ -26,7 +26,7 @@ import path from 'node:path';
 import { runGit } from '../git/run';
 import { normalizeSkillText, skillVersionOf, STUB_PREFIX, type ServedSkill } from '../knowledge';
 import { retryTransient, type MachineLocalStore } from '../machine-local';
-import { linkedComponent, readCheckoutText, safeWrite, type SafeWriteSkip } from '../safe-write';
+import { keptNote, linkedComponent, readCheckoutText, safeWrite, type SafeWriteSkip } from '../safe-write';
 import { readCopyState, writeCopyState } from './copy-state';
 import { comparablePath, readPathList, updatePathList } from './path-list';
 import type { ServedSet } from './served';
@@ -119,7 +119,7 @@ function skipWhy(file: string, skip: SafeWriteSkip): string {
     case 'link':
       return linkWhy(skip.at);
     case 'changed':
-      return `${file} changed while grimoire wrote it`;
+      return `${file} changed while grimoire wrote it${keptNote(skip)}`;
     case 'not-a-file':
       return `${file} is not a file`;
   }

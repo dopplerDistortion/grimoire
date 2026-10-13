@@ -1,11 +1,20 @@
 // Safe writes into a checkout (spec §13 Safe writes): compare-and-swap through
 // a temp file, a re-check and a rename, never through a link. Seam 1: the
-// safe write called directly, with a plan that went stale before it ran.
+// safe write called directly, with a plan that went stale before it ran, and
+// with a person's save landing between its re-check and its move.
+import * as fsp from 'node:fs/promises';
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeTempDir, removeDir } from '#harness';
 import { readCheckoutText, safeWrite } from '../src/safe-write';
+
+// Lets a test land a save right before the write's next rename or hard link that touches the file.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rename: vi.fn(actual.rename), link: vi.fn(actual.link) };
+});
+const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 
 let root: string;
 let elsewhere: string;
@@ -14,9 +23,34 @@ beforeEach(async () => {
   elsewhere = await makeTempDir('grimoire-safe-write-elsewhere-');
 });
 afterEach(async () => {
+  vi.mocked(fsp.rename).mockImplementation(actualFs.rename);
+  vi.mocked(fsp.link).mockImplementation(actualFs.link);
   await removeDir(root);
   await removeDir(elsewhere);
 });
+
+/**
+ * A person saves `text` to `file` the moment before the safe write's first
+ * rename or hard link that names `file`: after every check it makes, before
+ * its move.
+ */
+function saveBeforeTheMove(file: string, text: string): void {
+  let saved = false;
+  const save = async (...paths: unknown[]) => {
+    if (!saved && paths.some((p) => path.resolve(String(p)) === path.resolve(file))) {
+      saved = true;
+      await actualFs.writeFile(file, text);
+    }
+  };
+  vi.mocked(fsp.rename).mockImplementation(async (from, to) => {
+    await save(from, to);
+    return actualFs.rename(from, to);
+  });
+  vi.mocked(fsp.link).mockImplementation(async (from, to) => {
+    await save(from, to);
+    return actualFs.link(from, to);
+  });
+}
 
 /** Every file below `dir`, as POSIX paths: a temp file left behind would show here. */
 async function filesIn(dir: string): Promise<string[]> {
@@ -85,6 +119,36 @@ describe('a safe write', () => {
     expect(await safeWrite(root, 'AGENTS.md', 'old\n', 'new\n')).toEqual({ reason: 'not-a-file' });
 
     expect(await filesIn(root)).toEqual([]);
+  });
+
+  it('a save landing after the re-check of a new file stands: the write is left alone as changed', async () => {
+    saveBeforeTheMove(path.join(root, 'AGENTS.md'), 'saved just now\n');
+
+    expect(await safeWrite(root, 'AGENTS.md', null, 'shipped\n')).toEqual({ reason: 'changed' });
+
+    expect(await readFile(path.join(root, 'AGENTS.md'), 'utf8')).toBe('saved just now\n');
+    expect(await filesIn(root)).toEqual(['AGENTS.md']);
+  });
+
+  it('a save landing after the re-check of a file it replaces stands: the write is left alone as changed', async () => {
+    await writeFile(path.join(root, 'AGENTS.md'), 'what the plan saw\n');
+    saveBeforeTheMove(path.join(root, 'AGENTS.md'), 'saved just now\n');
+
+    expect(await safeWrite(root, 'AGENTS.md', 'what the plan saw\n', 'shipped\n')).toEqual({ reason: 'changed' });
+
+    expect(await readFile(path.join(root, 'AGENTS.md'), 'utf8')).toBe('saved just now\n');
+    expect(await filesIn(root)).toEqual(['AGENTS.md']);
+  });
+
+  it('writes on a file system without hard links, creating and replacing', async () => {
+    vi.mocked(fsp.link).mockRejectedValue(Object.assign(new Error('ENOTSUP: injected'), { code: 'ENOTSUP' }));
+
+    expect(await safeWrite(root, 'AGENTS.md', null, 'first\n')).toBeNull();
+    expect(await safeWrite(root, 'AGENTS.md', 'first\n', 'second\n')).toBeNull();
+    expect(await safeWrite(root, 'AGENTS.md', 'first\n', 'third\n')).toEqual({ reason: 'changed' });
+
+    expect(await readFile(path.join(root, 'AGENTS.md'), 'utf8')).toBe('second\n');
+    expect(await filesIn(root)).toEqual(['AGENTS.md']);
   });
 
   it('fails without leaving its temp file when the folder can’t be made', async () => {
