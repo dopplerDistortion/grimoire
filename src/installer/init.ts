@@ -65,6 +65,7 @@ import { holdWorktreeLease, operationInProgress, runUpkeep, upgradeInProgress, u
 import { nodeMajor, readClientRuntimes } from './client-runtime';
 import { codexHookState } from './codex-trust';
 import { compareSemver } from './semver';
+import { nodeModulesPackage } from './source';
 import { worktreePins } from './worktrees';
 import {
   claimUpgradeRecord,
@@ -95,6 +96,8 @@ export interface InitFlags {
   readonly adapter: boolean;
   /** `--upgrade`: move this checkout's pin to the running version (spec §21). */
   readonly upgrade?: boolean;
+  /** `--from-node-modules`: the version copy comes from the host repo's devDependency at that version (spec §11). */
+  readonly fromNodeModules?: boolean;
 }
 
 /** An upgrade step done (spec §21): 2 after the copy, launcher and join record; 5 after the checkout files. */
@@ -499,6 +502,9 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     );
   }
 
+  // --from-node-modules: the host's devDependency, which must be the version installed here (refused otherwise, before anything is written).
+  const source = flags.fromNodeModules === true ? await nodeModulesPackage(root, version) : o.source;
+
   const warnings: InitReport['warnings'] = [];
   const warn = (code: string, message: string) => warnings.push({ code, message });
 
@@ -892,7 +898,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     const finalConfig: InstallConfig = { ...config, tracker_root: tracker.root! };
 
     // 5. The version copy, the launcher and the join record.
-    const copy = await installCopy(store, version, o.source);
+    const copy = await installCopy(store, version, source);
     const launched = await installLauncher(store);
     const record: JoinRecord = { ...joinRecord, excerpt_mode: mode ?? 'unknown' };
     const joinWrite: MachineResult['join_record'] =
