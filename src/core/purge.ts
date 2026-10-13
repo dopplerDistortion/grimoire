@@ -105,7 +105,9 @@ export const purgeTrace = define({
     const author = writer(ctx);
     const handle = parseHandle(input.attempt);
     const reason = input.reason.trim();
-    const write = await tracker.transact<Omit<PurgeTraceResult, 'cited_by' | 'history'>>({ op: 'purge', author, actor }, (draft) => {
+    // What cites the trace is read from the draft (a purge changes no page or proposal): once the write has landed,
+    // nothing is left that could fail and turn it into an error that says nothing changed.
+    const write = await tracker.transact<Omit<PurgeTraceResult, 'history'>>({ op: 'purge', author, actor }, async (draft) => {
       const record = draft.attempt(handle);
       const stored = draft.tracePurge(handle);
       if (!record && !stored) throw new GrimoireError('NOT_FOUND', `there is no trace ${handle}`, { field: 'attempt', ref: handle });
@@ -116,12 +118,11 @@ export const purgeTrace = define({
       }
       draft.purgeTrace(handle, { by: author.email, reason });
       const tombstone = draft.tracePurge(handle)!;
-      const result = { attempt: handle, issue: record?.issue ?? null, purged: true as const, changed: !stored, ...tombstoneFields(tombstone) };
+      const cited_by = { pages: await citingPages(draft, handle), proposals: await citingProposals(draft, handle) };
+      const result = { attempt: handle, issue: record?.issue ?? null, purged: true as const, changed: !stored, ...tombstoneFields(tombstone), cited_by };
       return record ? { result, issue: record.issue } : { result };
     });
-    const history = historyOf(write.history);
-    const view = await tracker.read();
-    return { ...write.result, cited_by: { pages: await citingPages(view, handle), proposals: await citingProposals(view, handle) }, history };
+    return { ...write.result, history: historyOf(write.history) };
   },
 });
 

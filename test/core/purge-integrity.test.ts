@@ -10,6 +10,8 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, vi } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
+import { GitStalledError } from '../../src/git/run';
+import { openTracker, type TrackerStore } from '../../src/tracker';
 import { runNetworkGit } from '../../src/tracker/remote';
 import { coreTest, fetchTracker, pushTracker, TRACKER_REF } from './support';
 import { remoteTracker, withTracker } from './sync-support';
@@ -67,6 +69,38 @@ describe('a purge whose commit landed', () => {
     expect(purged).toMatchObject({ ok: true, result: { attempt, changed: true, history: { pushed: true } } });
     expect(purged.ok && purged.result.history.note).toMatch(/couldn’t tell whether pushed history holds it/);
     expect(await world.a.git(['log', '-1', '--format=%B', TRACKER_REF])).toMatch(/^Grimoire-Op: purge$/m);
+    expect(await world.a.git(['rev-list', TRACKER_REF, '--', attemptPath(id, attempt)])).toBe('');
+  });
+});
+
+describe('a purge whose commit landed, and a git that stops answering afterwards', () => {
+  coreTest('answers that it purged, never BUSY: what cites the trace is read from the view the purge wrote', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const { id, attempt } = await endedAttempt(core, ctx);
+    // Every tracker read after a write has landed meets a git that stopped answering.
+    const proto = Object.getPrototypeOf(await openTracker(world.a.dir)) as TrackerStore;
+    let landed = false;
+    const transact = proto.transact;
+    const read = proto.read;
+    const spies = [
+      vi.spyOn(proto, 'transact').mockImplementation(async function (this: TrackerStore, ...args: Parameters<TrackerStore['transact']>) {
+        const done = await transact.apply(this, args);
+        landed = true;
+        return done;
+      } as TrackerStore['transact']),
+      vi.spyOn(proto, 'read').mockImplementation(async function (this: TrackerStore) {
+        if (landed) throw new GitStalledError('cat-file', 1000);
+        return read.apply(this);
+      }),
+    ];
+    let purged;
+    try {
+      purged = await core.call('purge_trace', { attempt, reason: 'secret' }, terminal(ctx));
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+
+    expect(purged).toMatchObject({ ok: true, result: { attempt, changed: true, cited_by: { pages: [], proposals: [] } } });
     expect(await world.a.git(['rev-list', TRACKER_REF, '--', attemptPath(id, attempt)])).toBe('');
   });
 });
