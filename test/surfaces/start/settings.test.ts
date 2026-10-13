@@ -17,6 +17,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { sessionKey } from '../../../src/capture/seen-here';
 import { MachineLocalStore } from '../../../src/machine-local';
+import { VERSION } from '../../../src/version';
 import { agentContext, commitToTracker, coreTest, fetchTracker, pushTracker, TRACKER_REF, trackerTip } from '../../core/support';
 import { nameRoot, remoteTracker, rootOf } from '../../core/sync-support';
 import { findChromium, openHeadless, type HeadlessPage } from './browser';
@@ -229,7 +230,7 @@ describe('full pages and the pin banner, in a browser', () => {
   browserTest.skipIf(!chromium)('a clone whose config.yml names a root no ref holds shows NOT_SYNCED with its remedy, never an empty board; Sync now brings the board', async ({ world, page, serve }) => {
     await nameRoot(world.b.dir, await rootOf(world.a));
     // Run as the version copy a join leaves (pkg/<v>/dist beside .complete): the checkout's pin, run here.
-    const copy = path.join(world.root, 'pkg', '0.0.0');
+    const copy = path.join(world.root, 'pkg', VERSION);
     await cp(path.dirname(bin), path.join(copy, 'dist'), { recursive: true });
     await writeFile(path.join(copy, '.complete'), '{}');
     const served = await serve(world.b.dir, 'b-env', path.join(copy, 'dist', 'grimoire.mjs'));

@@ -307,13 +307,16 @@ describe('what uninstall refuses, changing nothing', () => {
     const { installed } = await installedRepo(world.a);
     const manifest = path.join(world.a.dir, '.grimoire', 'manifest.yml');
     await writeFile(manifest, `${await readFile(manifest, 'utf8')}  - {"path":"x.json","kind":"yaml-key","hash":"sha256:0","created":true}\n`);
+    // The pin that wrote the manifest is a release newer than this one: it knows the kind.
+    const newer = `${Number(VERSION.split('.')[0]) + 1}.0.0`;
+    const config = path.join(world.a.dir, '.grimoire', 'config.yml');
+    await writeFile(config, (await readFile(config, 'utf8')).replace(/^version: .*$/m, `version: ${newer}`));
 
     await expect(uninstall(world.a, [])).rejects.toMatchObject({
       code: 'UPGRADE_REQUIRED',
-      // The pin that wrote the manifest is newer than this release (0.0.0 in tests): it knows the kind.
-      details: { marker: 'manifest', remedies: ['npx @goksening/grimoire@1.0.0-test.2 uninstall'] },
+      details: { marker: 'manifest', remedies: [`npx @goksening/grimoire@${newer} uninstall`] },
     });
-    expect(await differences(world.a, installed)).toEqual(['.grimoire/manifest.yml']);
+    expect(await differences(world.a, installed)).toEqual(['.grimoire/config.yml', '.grimoire/manifest.yml']);
   });
 
   gitTest('a checkout grimoire isn’t installed in', async ({ world }) => {
