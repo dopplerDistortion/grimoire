@@ -38,6 +38,7 @@ import {
   type ChoresDue,
   type ChoreThresholds,
   type OpenRun,
+  type ProposalSignals,
   type ServedItem,
 } from '../knowledge/chores';
 import { observedEvidence } from '../capture/evidence';
@@ -81,9 +82,12 @@ async function kindsInProgress(store: MachineLocalStore, now: Date): Promise<Set
 
 /** What `status`, the SessionStart line and the dashboard show: every chore's due-ness now. */
 export async function dueChores(tracker: TrackerStore, ctx: CallContext) {
-  const view = await tracker.read();
-  const now = tracker.now();
-  return choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(storeOf(tracker, ctx), now), proposals: await proposalSignals(view) });
+  return dueChoresIn(await tracker.read(), storeOf(tracker, ctx), tracker.now());
+}
+
+/** Every chore's due-ness in `view` at `now`, a run in progress on this machine (`store`) included. Reads only. */
+export async function dueChoresIn(view: TrackerView, store: MachineLocalStore, now: Date, proposals?: ProposalSignals) {
+  return choresDue(view, { now, thresholds: choreThresholds(view), inProgress: await kindsInProgress(store, now), proposals: proposals ?? (await proposalSignals(view)) });
 }
 
 /**

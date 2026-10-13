@@ -20,6 +20,11 @@ import { agentContext, initializeTracker } from '../../core/support';
 import { installed } from '../../upkeep/support';
 import { runHook } from '../../../src/surfaces/hooks/run-hook';
 import { sessionStart, sessionStartClient, sessionStartOutput } from '../../../src/surfaces/hooks/session-start';
+import { putMachineSetting } from '../../../src/core/settings';
+import { sessionLine } from '../../../src/knowledge/chores/offering';
+import { randomProposalId } from '../../../src/tracker';
+import { VERSION } from '../../../src/version';
+import { workPair } from '../../core/chore-support';
 
 const CLAUDE = ['startup', 'startup-plain', 'clear', 'compact', 'resume', 'fork'].map((name) => `claude-code/hook-payloads/session-start-${name}.json`);
 const CODEX = ['startup', 'resume'].map((name) => `codex/hook-payloads/session-start-${name}.json`);
@@ -157,6 +162,140 @@ describe('the session line', () => {
 
     await world.a.git(['commit', '--quiet', '-am', 'take the shipped text']);
     expect(await sessionStart(readFixture(CLAUDE[0]!), { startDir: root })).toBe('');
+  });
+});
+
+describe('the session line, by priority (spec §12)', () => {
+  const ASK = "grimoire: a maintenance chore is due. At a natural pause, offer to run the grimoire-chores skill; don't run it unasked.";
+  const AUTO = 'grimoire: a maintenance chore is due. Run the grimoire-chores skill now; it works in the background.';
+  const MANUAL = 'grimoire: a maintenance chore is due.';
+  const PROPOSAL_ALONE = "1 skill proposal awaits human review in grimoire's dashboard";
+  const PROPOSAL_TEXT = 'SECRET-PROPOSAL-TEXT';
+
+  /** Clone a installed and committed at `pin`, with a tracker. */
+  async function setUp(world: GitWorld, pin?: string): Promise<string> {
+    const root = world.a.dir;
+    await installed(root, pin);
+    await world.a.git(['add', '-A']);
+    await world.a.git(['commit', '--quiet', '-m', 'install grimoire']);
+    await initializeTracker(world.a, world.a);
+    return root;
+  }
+
+  /** Makes the Wiki Maintainer due: one settled failing trace, at compile_pairs 1. */
+  async function choreDue(world: GitWorld): Promise<void> {
+    const core = createCore({ autoSync: 'off', refreshSkills: 'off' });
+    try {
+      for (const [key, value] of [['chores.compile_pairs', 1], ['chores.settle_hours', 0]] as const) {
+        expect(await core.call('settings_set', { key, value }, terminalOf(world))).toMatchObject({ ok: true });
+      }
+      await workPair(core, agentContext(world.a), 'fail');
+    } finally {
+      await core.close();
+    }
+  }
+
+  /** A skill proposal pending human review, as a Skill Proposer run writes it. */
+  async function proposalPending(world: GitWorld): Promise<void> {
+    const tracker = await openTracker(world.a.dir);
+    try {
+      await tracker.transact({ op: 'propose', author: { name: world.a.identity.name, email: world.a.identity.email }, actor: { kind: 'agent', client: 'test', nonce: 'n' } }, async (draft) => {
+        const text = `---\nname: port-picking\ndescription: Pick free ports in tests.\n---\n${PROPOSAL_TEXT}\n`;
+        await draft.proposals.add({
+          id: randomProposalId(),
+          action: 'create',
+          skill: 'port-picking',
+          base: null,
+          after: [],
+          version: skillVersionOf(text),
+          ops: [],
+          citations: [],
+          served: [],
+          pages: [],
+          traces: [],
+          claims: { rationale: PROPOSAL_TEXT, failures: [], expected_signal: PROPOSAL_TEXT, provenance: PROPOSAL_TEXT },
+          flags: [],
+          tokens: [],
+          run: 'cr-test',
+          origin: 'session',
+          isolation: 'claude-chore-agent',
+          unverified: { client: null, model: null },
+          actor: { kind: 'agent' },
+          at: draft.now.toISOString(),
+          text,
+        });
+        return { result: null };
+      });
+    } finally {
+      await tracker.close();
+    }
+  }
+
+  const pickup = (root: string, value: string) => putMachineSetting(path.join(root, '.git'), 'knowledge.pickup', value);
+
+  /** The line each client is given (no skills were written, so Claude Code gets it plain too). */
+  async function lines(root: string): Promise<string[]> {
+    return Promise.all([CLAUDE[0]!, CODEX[0]!].map((fixture) => sessionStart(readFixture(fixture), { startDir: root })));
+  }
+
+  function expectLine(output: string[], line: string): void {
+    expect(output).toEqual([`${line}\n`, `${line}\n`]);
+    expect(line.length).toBeLessThanOrEqual(200);
+    expect(line).not.toContain(PROPOSAL_TEXT);
+    expect(line.toLowerCase()).not.toContain('wiki');
+  }
+
+  gitTest('a due chore: the pickup text of this machine’s knowledge.pickup, ask by default', async ({ world }) => {
+    const root = await setUp(world);
+    await choreDue(world);
+
+    expectLine(await lines(root), ASK);
+    await pickup(root, 'auto');
+    expectLine(await lines(root), AUTO);
+    await pickup(root, 'manual');
+    expectLine(await lines(root), MANUAL);
+  });
+
+  gitTest('a due chore with a proposal pending notes the proposal; a proposal alone says it awaits review; nothing due or pending says nothing', async ({ world }) => {
+    const root = await setUp(world);
+    expect(await lines(root)).toEqual(['', '']);
+
+    await proposalPending(world);
+    expectLine(await lines(root), PROPOSAL_ALONE);
+
+    await choreDue(world);
+    expectLine(await lines(root), `${ASK.slice(0, -1)}; 1 skill proposal awaits review`);
+    await pickup(root, 'manual');
+    expectLine(await lines(root), 'grimoire: a maintenance chore is due; 1 skill proposal awaits review');
+  });
+
+  gitTest('a pin mismatch outranks a due chore', async ({ world }) => {
+    const root = await setUp(world, '9.9.9');
+    await choreDue(world);
+
+    expectLine(await lines(root), `grimoire: this checkout pins 9.9.9, but this session runs grimoire ${VERSION}; restart it`);
+  });
+
+  gitTest('a due chore outranks stray edits and refreshed pointer files', async ({ world }) => {
+    const root = await setUp(world);
+    await writeFile(path.join(root, '.claude/rules/grimoire.md'), 'drifted\n');
+    await world.a.git(['commit', '--quiet', '-am', 'my edits']);
+    await runUpkeep({ root });
+    expectLine(await lines(root), 'grimoire refreshed 1 pointer file: commit it');
+
+    await choreDue(world);
+    expectLine(await lines(root), ASK);
+  });
+
+  it('the not-joined notice comes first, then the pin mismatch; a chore line drops the proposal note rather than pass 200 characters', () => {
+    expect(sessionLine({ notJoined: 'not joined', pinMismatch: 'mismatch', choreDue: 'ask', proposalsPending: 1, last: 'strays' })).toBe('not joined');
+    expect(sessionLine({ pinMismatch: 'mismatch', choreDue: 'ask', proposalsPending: 1, last: 'strays' })).toBe('mismatch');
+    expect(sessionLine({ choreDue: 'auto', proposalsPending: 2 })).toBe(`${AUTO.slice(0, -1)}; 2 skill proposals await review`);
+    expect(sessionLine({ proposalsPending: 0, last: 'strays' })).toBe('strays');
+    expect(sessionLine({})).toBeNull();
+    for (const choreDue of ['ask', 'auto', 'manual'] as const) {
+      for (const proposalsPending of [0, 1, 16]) expect(sessionLine({ choreDue, proposalsPending })!.length).toBeLessThanOrEqual(200);
+    }
   });
 });
 
