@@ -27,8 +27,12 @@ export function cleanGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proce
   for (const [key, value] of Object.entries(base)) {
     const upper = key.toUpperCase();
     if (upper.startsWith('GIT_') && !PASS_THROUGH.has(upper)) continue;
+    // The locale goes too (set to C below): grimoire reads git's stderr (a lost compare-and-set, a
+    // held ref lock, a push's refusal), and git translates it into the UI language.
+    if (upper === 'LC_ALL' || upper === 'LANGUAGE') continue;
     env[key] = value;
   }
+  env.LC_ALL = 'C';
   env.GIT_TERMINAL_PROMPT = '0';
   // Reads never touch the network, even in a partial clone (spec §4, Read path).
   env.GIT_NO_LAZY_FETCH = '1';
