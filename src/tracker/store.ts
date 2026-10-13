@@ -138,6 +138,20 @@ export interface TrackerStore {
    * UPGRADE_REQUIRED, BUSY) throw.
    */
   sync(spec: SyncSpec): Promise<SyncOutcome>;
+  /**
+   * The unpushed segment (spec §21 the purge offer of uninstall and leave):
+   * how many local commits no remote-tracking tracker holds, and how many of
+   * them add a session record whose text `policy` would strip and that the
+   * chosen remote's tip doesn't hold already.
+   */
+  unpushed(policy: TextPolicy): Promise<{ commits: number; withText: number }>;
+  /**
+   * Purges the text of the unpushed segment's session records, whatever the
+   * mode: the rewrite a push makes under a mode that forbids text (§4), run
+   * on its own. Pushed history is never rewritten. Returns how many commits
+   * were written again.
+   */
+  stripUnpushedText(policy: TextPolicy): Promise<number>;
   /** Stops the store's git process. */
   close(): Promise<void>;
 }
@@ -427,6 +441,62 @@ class GitTrackerStore implements TrackerStore {
       },
       spec,
     );
+  }
+
+  async unpushed(policy: TextPolicy): Promise<{ commits: number; withText: number }> {
+    const refs = await this.trackerRefs();
+    if (refs.local === null) return { commits: 0, withText: 0 };
+    const remotes = [...new Set(refs.remotes.values())];
+    const listed = await this.git(['rev-list', refs.local, ...remotes.map((tip) => `^${tip}`)]);
+    if (listed.code !== 0) throw new Error(`git rev-list failed: ${listed.stderr.toString().trim()}`);
+    const commits = listed.stdout.toString('utf8').split(/\r?\n/).filter((line) => line !== '');
+    const pushed = (await this.resolveTips()).remote;
+    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
+    let withText = 0;
+    for (const commit of commits) {
+      const { tree, parents } = await this.objects.commit(commit);
+      const parentTree = parents[0] ? (await this.objects.commit(parents[0])).tree : null;
+      // What this commit adds that neither its first parent nor the remote holds.
+      const added = await this.strippable(tree, parentTree, policy);
+      const fresh = await Promise.all(
+        added.map(async ({ path, oid }) => (pushedTree ? (await this.objects.entryAt(pushedTree, path))?.oid !== oid : true)),
+      );
+      if (fresh.some(Boolean)) withText++;
+    }
+    return { commits: commits.length, withText };
+  }
+
+  async stripUnpushedText(policy: TextPolicy): Promise<number> {
+    const pushed = (await this.resolveTips()).remote;
+    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
+    const done = await this.rewriteUnpushed(async (local) => {
+      if (local === pushed) return null;
+      return { excluded: pushed ? [pushed] : [], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
+    });
+    return done?.rewritten ?? 0;
+  }
+
+  /** The session records of `tree` that `base` doesn't hold at the same path, whose text `policy` would strip. */
+  private async strippable(tree: string, base: string | null, policy: TextPolicy): Promise<{ path: string; oid: string }[]> {
+    const found: { path: string; oid: string }[] = [];
+    const entriesOf = async (oid: string | null) => new Map((oid ? await this.objects.tree(oid) : []).map((e): [string, TreeEntry] => [e.name, e]));
+    const walk = async (oid: string, baseOid: string | null, at: readonly string[]): Promise<void> => {
+      if (oid === baseOid) return;
+      const [ours, theirs] = await Promise.all([entriesOf(oid), entriesOf(baseOid)]);
+      for (const [name, entry] of ours) {
+        if (at.length === 0 && name !== ATTEMPTS_DIR) continue;
+        const held = theirs.get(name);
+        if (held && held.oid === entry.oid && held.mode === entry.mode) continue;
+        const path = [...at, name];
+        if (entry.mode === TREE_MODE) {
+          if (path.length < 7) await walk(entry.oid, held?.mode === TREE_MODE ? held.oid : null, path);
+        } else if (path.length === 7 && path[5] === SESSIONS_DIR && name.endsWith('.md')) {
+          if (policy.stripText(await this.objects.blob(entry.oid))) found.push({ path: path.join('/'), oid: entry.oid });
+        }
+      }
+    };
+    await walk(tree, base, []);
+    return found;
   }
 
   /**

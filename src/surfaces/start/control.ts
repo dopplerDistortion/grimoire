@@ -37,7 +37,7 @@
 //   sign-in  args {"ref"?: string}  →  {"url", "port", "version", "pin", "pid"}
 //   stop     args {}                →  {"stopping": true, "pid"}
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -117,6 +117,37 @@ export async function findControlPaths(cloneId: string, nonce: string, env: Node
     if ((await onlyMine(dir)) && (await lstat(paths.endpoint).then((info) => info.isSocket(), () => false))) return paths;
   }
   return null;
+}
+
+/**
+ * Removes clone `cloneId`'s control-channel files for this user (spec §21
+ * Leave: the named-pipe fallback secret and the socket directory): its secret
+ * and sockets in every folder a `start` of this user may have used, then each
+ * such folder (and, on Windows, `%LOCALAPPDATA%\grimoire`) once it is empty.
+ * Another clone's files are never touched. Returns what was removed.
+ */
+export async function removeControlFiles(cloneId: string, env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
+  const removed: string[] = [];
+  const dirs = process.platform === 'win32' ? [controlDir(env)] : posixControlDirs(env, os.userInfo().uid);
+  const secret = `${cloneId.slice(0, 16)}.secret`;
+  const socket = new RegExp(`^${cloneId.slice(0, 12)}-[0-9a-f]+\\.sock$`);
+  for (const dir of dirs) {
+    const info = await lstat(dir).catch(() => null);
+    // Never through a link, and outside Windows only a folder that is this user's own.
+    if (!info?.isDirectory() || (process.platform !== 'win32' && info.uid !== os.userInfo().uid)) continue;
+    for (const name of await readdir(dir).catch(() => [] as string[])) {
+      if (name !== secret && !socket.test(name)) continue;
+      const file = path.join(dir, name);
+      if (await rm(file, { force: true }).then(() => true, () => false)) removed.push(file);
+    }
+    // Only an empty folder goes: another clone's `start` may use it.
+    const parents = process.platform === 'win32' ? [dir, path.dirname(dir)] : [dir];
+    for (const folder of parents) {
+      if (await rmdir(folder).then(() => true, () => false)) removed.push(folder);
+      else break;
+    }
+  }
+  return removed;
 }
 
 function mac(secret: string, parts: readonly (string | number)[]): string {

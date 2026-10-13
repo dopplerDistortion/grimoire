@@ -53,6 +53,13 @@ export interface SyncSpec {
   readonly network?: NetworkGit;
   /** Waits out the pause before a retry after a lost race (default: a timer). A test seam, like `network`. */
   readonly pause?: (ms: number) => Promise<void>;
+  /**
+   * Fetch only (`leave` without consent to push): the remote's tracker is
+   * fetched as usual, but nothing is folded, rewritten or pushed. The outcome
+   * is `in-sync` when the remote holds the local tip (or there is none), else
+   * `pending` with no `reason`.
+   */
+  readonly fetchOnly?: boolean;
 }
 
 export interface SyncFailure {
@@ -344,6 +351,14 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
         if (run.code !== 0 || run.timedOut) return failed('fetch', run);
         fetched = true;
       }
+    }
+
+    if (spec.fetchOnly) {
+      refs = await host.trackerRefs();
+      local = refs.local;
+      remoteTip = tracker;
+      const held = local === null || (tracker !== null && (await isAncestor(git, local, tracker)));
+      return outcome({ state: held ? 'in-sync' : 'pending' });
     }
 
     // 4. Fold the fetched tracker into the local one.
