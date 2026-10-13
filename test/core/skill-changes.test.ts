@@ -3,12 +3,13 @@
 // §15 Eject, Delete and delivery off; ADR 0005): restore, delete, eject,
 // acknowledge and unblock are human-only core ops, each one skill ledger
 // record. Seam 1: the core against real git in temp repos.
+import path from 'node:path';
 import { describe, expect } from 'vitest';
 import type { CallContext } from '../../src/core';
 import { terminal } from './chore-support';
 import { createResult, manualRun, ok, patchResult, proposer, SKILL, SKILL_V1, skillText, submit } from './proposer-support';
 import { coreTest as test, TRACKER_REF, trackerTip } from './support';
-import { expectNoOutput, fileIn, NOTES, pinAndCommit } from '../generated/support';
+import { existsIn, expectNoOutput, fileIn, gitStatus, NOTES, pinAndCommit, writeInto } from '../generated/support';
 
 const SEEDS = '\n## Seeds\n\nPrint the seed on failure so the run can be repeated exactly.\n';
 const TIMEOUTS = '\n## Timeouts\n\nRaise a timeout only after finding what the test waits on.\n';
@@ -136,5 +137,58 @@ describe('delete and unblock', () => {
     // The run's one fix-up: the same create, now that the name is free.
     const proposed = ok(await submit(p, createResult(p, 'free-ports', body)));
     expect(proposed).toMatchObject({ proposal: expect.stringMatching(/^pp-/) });
+  });
+});
+
+describe('eject', () => {
+  test('eject writes the current text into both client folders of the chosen worktree and blocks the name; no stub for it is generated anywhere afterwards, and an existing target is refused', async ({
+    world,
+    grimoire,
+  }) => {
+    const core = grimoire.makeCore();
+    const cli = human(grimoire.ctx);
+    const notes = ok(await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, cli));
+    ok(await core.call('skill_edit', { name: 'free-ports', text: FREE_PORTS, base: null }, cli));
+    await pinAndCommit(world.a);
+    const b = await world.a.addWorktree('b');
+    // A hand-written folder of free-ports already sits in one client folder of b.
+    await writeInto(b.dir, '.agents/skills/free-ports/SKILL.md', 'hand-written\n');
+
+    const tip = await trackerTip(world.a);
+    expect(await core.call('skill_eject', { name: 'free-ports', worktree: b.dir }, cli)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID', details: { fields: { name: expect.stringContaining('.agents/skills/free-ports') } } },
+    });
+    expect(await existsIn(b, '.claude/skills/free-ports')).toBe(false);
+    expect(await core.call('skill_eject', { name: 'release-notes', worktree: path.dirname(world.a.dir) }, cli)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID', details: { fields: { worktree: expect.any(String) } } },
+    });
+    expect(await trackerTip(world.a)).toBe(tip);
+
+    const ejected = ok(await core.call('skill_eject', { name: 'release-notes', worktree: b.dir, base: notes.version }, cli));
+    expect(ejected).toMatchObject({
+      name: 'release-notes',
+      version: notes.version,
+      files: ['.claude/skills/release-notes/SKILL.md', '.agents/skills/release-notes/SKILL.md'],
+    });
+    expect(await world.a.git(['log', '-1', '--format=%(trailers:key=Grimoire-Op,valueonly,unfold)', TRACKER_REF])).toBe('eject');
+    await core.close();
+
+    // The refresh that removed the stubs left the ejected files alone.
+    for (const file of ejected.files) expect(await fileIn(b, file), file).toBe(NOTES);
+    // Ordinary files the person commits: untracked, with no grimoire .gitignore.
+    expect(await gitStatus(b)).toContain('.claude/skills/release-notes/SKILL.md');
+    for (const wt of [world.a, b]) {
+      await expectNoOutput(wt, 'release-notes');
+      expect(await fileIn(wt, '.grimoire/skills/free-ports/SKILL.md'), wt.dir).toBe(FREE_PORTS);
+    }
+    expect(await existsIn(world.a, '.claude/skills/release-notes')).toBe(false);
+
+    const next = grimoire.makeCore();
+    expect(ok(await next.call('skill_show', { name: 'release-notes' }, cli)).skills[0]).toMatchObject({ status: 'ejected', blocked: true, served: null });
+    expect(ok(await next.call('skill_list', {}, grimoire.ctx)).skills.map((skill) => skill.name)).toEqual(['free-ports']);
+    // A hand-written skill from now on: grimoire won't restore over it.
+    expect(await next.call('skill_restore', { name: 'release-notes', version: notes.version }, cli)).toMatchObject({ ok: false, error: { code: 'INVALID' } });
   });
 });
