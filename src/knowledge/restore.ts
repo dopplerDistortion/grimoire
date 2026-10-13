@@ -70,14 +70,29 @@ export function restoreSpan(records: readonly LedgerEntry[], from: LedgerEntry |
  */
 export function restoreFates(records: readonly LedgerEntry[]): Map<string, RestoreFate> {
   const fates = new Map<string, RestoreFate>();
-  const byId = new Map(records.map((record) => [record.id, record]));
-  for (const restore of records.filter((record) => record.kind === 'restore' && record.to !== null)) {
-    const from = madeCurrent(restore, byId);
-    const span = restoreSpan(records, from, restore.to!);
+  for (const { restore, undone } of undoneChanges(records)) {
+    const span = restoreSpan(records, undone, restore.to!);
     if (span.undone) fates.set(span.undone.id, 'undone');
     for (const dropped of span.dropped) if (!fates.has(dropped.id)) fates.set(dropped.id, 'dropped');
   }
   return fates;
+}
+
+/**
+ * The change each recorded restore undid (the one it restored away from), in
+ * ledger order, leaving out a restore whose undone change can't be told. What
+ * an undone change changed is its own `from` → `to`: for an undone restore,
+ * the version it left and the one it brought back.
+ */
+export function undoneChanges(records: readonly LedgerEntry[]): { restore: LedgerEntry; undone: LedgerEntry }[] {
+  const byId = new Map(records.map((record) => [record.id, record]));
+  const found: { restore: LedgerEntry; undone: LedgerEntry }[] = [];
+  for (const restore of records) {
+    if (restore.kind !== 'restore' || restore.to === null) continue;
+    const undone = madeCurrent(restore, byId);
+    if (undone) found.push({ restore, undone });
+  }
+  return found;
 }
 
 /**

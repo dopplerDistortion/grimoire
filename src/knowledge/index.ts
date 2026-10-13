@@ -33,4 +33,4 @@ export {
   type SkillChange,
   type WrittenChange,
 } from './book';
-export { restoreFates, restoreSpan, type RestoreFate, type RestoreSpan } from './restore';
+export { restoreFates, restoreSpan, undoneChanges, type RestoreFate, type RestoreSpan } from './restore';

@@ -8,7 +8,7 @@ import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import type { GitWorld } from '#harness';
 import { terminal } from './chore-support';
-import { createResult, manualRun, ok, patchResult, proposer, SKILL, SKILL_V1, skillText, submit } from './proposer-support';
+import { createResult, manualRun, ok, patchResult, proposer, readAll, SKILL, SKILL_V1, skillText, submit } from './proposer-support';
 import { agentContext, coreTest as test, fetchTracker, fetchTrackerFrom, pushTracker, TRACKER_REF, trackerTip } from './support';
 import { existsIn, expectNoOutput, fileIn, gitStatus, NOTES, NOTES_DESCRIPTION, pinAndCommit, writeInto } from '../generated/support';
 
@@ -61,6 +61,37 @@ describe('restore', () => {
       ['edit', v3, 'undone'],
       ['restore', v1, null],
     ]);
+
+    // What the restore undid is negative evidence; what it dropped may be proposed again.
+    const after = await manualRun({ ...p, base: v1 });
+    expect(ok(await submit(after, patchResult(after, { ops: [{ op: 'append', text: TIMEOUTS }] })))).toMatchObject({
+      result: 'invalid',
+      reasons: ['repeats_rejected'],
+    });
+    expect(ok(await submit(after, patchResult(after, { ops: [{ op: 'append', text: SEEDS }] })))).toMatchObject({ proposal: expect.stringMatching(/^pp-/) });
+  });
+
+  test('a restore that undoes a restore makes the change that restore made negative evidence, in the repeat check and the Proposer digest alike', async ({
+    world,
+    grimoire,
+  }) => {
+    const p = await proposer(grimoire, world);
+    const cli = human(grimoire.ctx);
+    const v1 = p.base;
+    const v2 = ok(await p.core.call('skill_edit', { name: SKILL, text: `${SKILL_V1}${SEEDS}`, base: v1 }, cli)).version;
+    ok(await p.core.call('skill_restore', { name: SKILL, version: v1, base: v2 }, cli));
+    // Back to v2: this undoes the first restore (v2 → v1, the Seeds section removed).
+    const shown = ok(await p.core.call('skill_show', { name: SKILL, restore: v2 }, cli)).restore!;
+    expect(shown.undone).toMatchObject({ kind: 'restore', version: v1 });
+    ok(await p.core.call('skill_restore', { name: SKILL, version: v2, base: v1 }, cli));
+    ok(await p.core.call('chore_abandon', { run: p.brief.run, reason: 'the skill moved' }, p.chores));
+
+    const again = await manualRun({ ...p, base: v2 });
+    const [digest] = (await readAll(p.core, p.chores, again.brief.run, 'ledger')).flatMap((page) => page.items);
+    expect(digest!.text).toContain(`undone change ${v2.slice(0, 12)} -> ${v1.slice(0, 12)}`);
+    expect(digest!.text).not.toContain(`undone change none`);
+    const removeSeeds = [{ op: 'replace', anchor: SEEDS.trimStart(), text: '' }];
+    expect(ok(await submit(again, patchResult(again, { ops: removeSeeds })))).toMatchObject({ result: 'invalid', reasons: ['repeats_rejected'] });
   });
 });
 
