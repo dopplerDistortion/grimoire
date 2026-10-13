@@ -62,7 +62,7 @@ import { registeredWorktrees } from './worktrees';
 export const LEAVE_CONFIRMATION = 'leave';
 
 /** The purge of unpushed excerpt text: every session record's text goes, whatever the mode. */
-const PURGE_TEXT: TextPolicy = { forbidsText: () => true, stripText: stripExcerptText };
+export const PURGE_TEXT: TextPolicy = { forbidsText: () => true, stripText: stripExcerptText };
 
 /** How long the cut of every uncut context may take, all told. */
 const CUT_BUDGET_MS = 30_000;
@@ -88,6 +88,8 @@ export interface LeaveOptions {
   readonly cutBudgetMs?: number;
   /** Runs between the removal and its re-check (a test seam: a session that starts while leave removes). */
   readonly afterRemoval?: () => Promise<void>;
+  /** What the caller commits after the confirmation and before the final sync (uninstall's ejects, as "ejecting"): named in the push offer. */
+  readonly pendingWrites?: string;
 }
 
 /** A live grimoire process that makes leave refuse. */
@@ -105,9 +107,10 @@ export interface LeaveReport {
   /**
    * Why it stopped: to record stray edits or copy out folders moved aside
    * first; contexts the cut left uncut (the person stopped so a later leave
-   * cuts them); or a grimoire process that started after the preflight.
+   * cuts them); a grimoire process that started after the preflight; or
+   * (under uninstall) the checkout’s own removal, which stopped first.
    */
-  readonly stopped?: 'stray-edits' | 'moved-aside' | 'uncut' | 'busy';
+  readonly stopped?: 'stray-edits' | 'moved-aside' | 'uncut' | 'busy' | 'checkout';
   /** With `stopped: 'busy'`: the live processes (empty when leave couldn't tell; see `problems`). */
   readonly processes?: LiveProcess[];
   /** Open attempts released as abandoned. */
@@ -143,19 +146,19 @@ export interface LeaveReport {
   readonly problems: string[];
 }
 
-function yes(answer: string | null, byDefault = false): boolean {
+export function yes(answer: string | null, byDefault = false): boolean {
   if (answer === null) return false;
   const text = answer.trim().toLowerCase();
   if (text === '') return byDefault;
   return text === 'y' || text === 'yes';
 }
 
-function messageOf(error: unknown): string {
+export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 /** What the liveness check found: the live processes, or what it couldn't read (so it can't tell). */
-type ProcessCheck = { readonly live: LiveProcess[]; readonly unreadable: null } | { readonly live: null; readonly unreadable: string };
+export type ProcessCheck = { readonly live: LiveProcess[]; readonly unreadable: null } | { readonly live: null; readonly unreadable: string };
 
 function errorCodeOf(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | null)?.code;
@@ -166,7 +169,7 @@ function errorCodeOf(error: unknown): string | undefined {
  * fails closed: a process record or `start` lock it can't read is named
  * instead, since leave can't tell whether its process still runs.
  */
-async function checkProcesses(store: MachineLocalStore): Promise<ProcessCheck> {
+export async function checkProcesses(store: MachineLocalStore): Promise<ProcessCheck> {
   const unreadable = (what: string, error: unknown): ProcessCheck => ({ live: null, unreadable: `${what} (${messageOf(error)})` });
   const dir = path.join(store.dir, 'processes');
   let names: string[] = [];
@@ -203,17 +206,22 @@ async function checkProcesses(store: MachineLocalStore): Promise<ProcessCheck> {
   return { live, unreadable: null };
 }
 
-function describeProcess(entry: LiveProcess): string {
+export function describeProcess(entry: LiveProcess): string {
   return `${entry.client ?? 'grimoire'} ${entry.role} (pid ${entry.pid}${entry.worktree ? `, ${entry.worktree}` : ''})`;
 }
 
-/** Why leave can't go on (`after`: what that means at this point), or null when nothing runs. */
-function busyText(check: ProcessCheck, after: string): string | null {
+/**
+ * Why leave (or `scope.verb`, for processes in `scope.where`) can't go on
+ * (`after`: what that means at this point), or null when nothing runs.
+ */
+export function busyText(check: ProcessCheck, after: string, scope: { readonly verb?: string; readonly where?: string } = {}): string | null {
+  const verb = scope.verb ?? 'leave';
+  const where = scope.where ?? 'this clone';
   if (check.live === null) {
-    return `grimoire can’t tell whether grimoire processes run in this clone: it can’t read ${check.unreadable}, so it won’t remove the store under them. Make that readable (or remove it once no grimoire process runs), then run leave again; ${after}`;
+    return `grimoire can’t tell whether grimoire processes run in ${where}: it can’t read ${check.unreadable}, so it won’t remove anything under them. Make that readable (or remove it once no grimoire process runs), then run ${verb} again; ${after}`;
   }
   if (check.live.length === 0) return null;
-  return `grimoire processes still run in this clone: ${check.live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run leave again; ${after}`;
+  return `grimoire processes still run in ${where}: ${check.live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run ${verb} again; ${after}`;
 }
 
 /** Throws BUSY while grimoire processes run in the clone, or when leave can't tell. */
@@ -232,14 +240,14 @@ interface HeldHere {
 }
 
 /** A copy that holds text grimoire never served, not yet set aside. */
-interface UnsavedStray {
+export interface UnsavedStray {
   readonly skill: string;
   readonly worktree: string;
   readonly path: string;
   readonly text: string;
 }
 
-interface Preflight {
+export interface Preflight {
   readonly tracker: TrackerStore;
   readonly view: TrackerView | null;
   readonly localTip: string | null;
@@ -257,13 +265,13 @@ interface Preflight {
   readonly warnings: string[];
 }
 
-async function localTipOf(root: string): Promise<string | null> {
+export async function localTipOf(root: string): Promise<string | null> {
   const run = await runGit(root, ['rev-parse', '--verify', '--quiet', TRACKER_REF]);
   return run.code === 0 ? run.stdout.toString('utf8').trim() : null;
 }
 
 /** Copies in `worktree` holding text the ledger never had for their skill (a copy git tracks loses nothing). */
-async function unsavedStrays(worktree: string, served: ServedSet): Promise<UnsavedStray[]> {
+export async function unsavedStrays(worktree: string, served: ServedSet): Promise<UnsavedStray[]> {
   const found: UnsavedStray[] = [];
   const listed = await runGit(worktree, ['ls-files', '-z', '--', COPY_ROOT]);
   const tracked = new Set(listed.code === 0 ? listed.stdout.toString('utf8').split('\0').filter((file) => file !== '') : []);
@@ -280,7 +288,7 @@ async function unsavedStrays(worktree: string, served: ServedSet): Promise<Unsav
   return found;
 }
 
-async function preflight(root: string, commonDir: string, store: MachineLocalStore, ctx: CallContext): Promise<Preflight> {
+export async function preflight(root: string, commonDir: string, store: MachineLocalStore, ctx: CallContext): Promise<Preflight> {
   const warnings: string[] = [];
   const tracker = await openTracker(root);
   const localTip = await localTipOf(root);
@@ -332,19 +340,36 @@ async function preflight(root: string, commonDir: string, store: MachineLocalSto
   return { tracker, view, localTip, held, uncut, saved, unsaved, served, unpushed, worktrees, installed, movedAside, warnings };
 }
 
-function plural(n: number, one: string, many = `${one}s`): string {
+export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/** What leave's preflight and the person's answers decided: what it does once confirmed. */
+export interface LeavePlan {
+  readonly root: string;
+  readonly commonDir: string;
+  readonly store: MachineLocalStore;
+  readonly pre: Preflight;
+  readonly report: LeaveReport;
+  /** Release the open attempts held from this machine. */
+  readonly release: boolean;
+  /** Cut the uncut contexts (`contexts` of them). */
+  readonly cut: boolean;
+  readonly contexts: number;
+  readonly push: boolean;
+  readonly purge: boolean;
+}
+
 /**
- * Runs leave in the clone `options.root` is a checkout of. Throws BUSY while
- * grimoire processes run in it (or it can't tell), and INVALID when the typed
- * confirmation doesn't match; both before anything changed. Once the accepted
- * offers have committed, a stop is a report (`left: false`), never an error.
+ * Leave's first half: the liveness refusal, the read-only preflight, the plan
+ * and the offers, and nothing else: no write, no typed confirmation. Throws
+ * BUSY while grimoire processes run in the clone (or it can't tell). A stop
+ * the person chose (to record stray edits or copy out folders moved aside
+ * first) comes back as `stopped`. Otherwise the plan's tracker stays open
+ * until `performLeave` runs it, or `closeLeave` drops it.
  */
-export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
+export async function prepareLeave(options: LeaveOptions): Promise<{ readonly stopped: LeaveReport } | { readonly plan: LeavePlan }> {
   const { ctx, prompter, say } = options;
-  const env = options.env ?? process.env;
   const dirs = await findGitDirs(options.root);
   if (!dirs) throw new GrimoireError('NO_REPO', `${options.root} is not inside a git checkout`, { root: options.root });
   const { commonDir } = dirs;
@@ -368,6 +393,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     warnings: [...pre.warnings],
     problems: [],
   };
+  let handed = false;
   try {
     // The plan.
     say(`grimoire leave removes grimoire from this clone on this machine (${commonDir}):`);
@@ -385,7 +411,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
         const ids = await saveStrays(store, pre, report);
         say('Nothing was removed. Record each stray edit you want to keep, then run leave again:');
         for (const id of ids) say(`  grimoire skill record ${id}`);
-        return { ...report, stopped: 'stray-edits' };
+        return { stopped: { ...report, stopped: 'stray-edits' } };
       }
     }
     if (pre.movedAside.length > 0) {
@@ -393,7 +419,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
       for (const dir of pre.movedAside) say(`  ${dir}`);
       if (yes(await prompter.ask('Stop now so you can copy them out first? [y/N] '))) {
         say('Nothing was removed. Copy out what you want to keep, then run leave again.');
-        return { ...report, stopped: 'moved-aside' };
+        return { stopped: { ...report, stopped: 'moved-aside' } };
       }
     }
     let release = false;
@@ -412,9 +438,12 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
     let push = false;
     let purge = false;
     const unpushed = pre.unpushed?.commits ?? 0;
-    // Releasing and cutting commit too: what they write is unpushed as well.
-    const writes = release || cut;
-    const more = writes ? (unpushed > 0 ? ', plus what releasing and cutting write' : 'what releasing and cutting write') : '';
+    // Releasing and cutting commit too, and so does what the caller commits first (uninstall's ejects): it is unpushed as well.
+    const settling = release || cut;
+    const pending = options.pendingWrites;
+    const writers = settling ? (pending ? `${pending}, releasing and cutting write` : 'releasing and cutting write') : pending ? `${pending} writes` : null;
+    const writes = writers !== null;
+    const more = writes ? `${unpushed > 0 ? ', plus ' : ''}what ${writers}` : '';
     const what = `${unpushed > 0 ? plural(unpushed, 'unpushed tracker commit') : ''}${more}`;
     if ((unpushed > 0 || writes) && pre.view && autoSyncOn(pre.view)) {
       push = true;
@@ -424,22 +453,63 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
       if (!push) say('The local tracker ref keeps what isn’t pushed: leave keeps the ref and prints the command that deletes it.');
     }
     const withText = pre.unpushed?.withText ?? 0;
-    const cutText = writes && pre.view !== null && storeExcerptMode(pre.view) === 'excerpts';
+    const cutText = settling && pre.view !== null && storeExcerptMode(pre.view) === 'excerpts';
     if (push && (withText > 0 || cutText)) {
       const now = withText > 0 ? `${plural(withText, 'unpushed commit')} ${withText === 1 ? 'carries' : 'carry'} excerpt text${cutText ? ', and the cut may add more' : ''}` : 'The cut may attach excerpt text';
       purge = yes(await prompter.ask(`${now}. Purge the unpushed excerpt text before the push? [y/N] `));
     }
-    if (pre.localTip !== null && !push) say('Pushed excerpts stay in the remote’s history.');
+    if (pre.localTip !== null) say('Pushed excerpts stay in the remote’s history.');
+    handed = true;
+    return { plan: { root, commonDir, store, pre, report, release, cut, contexts: uncut.length, push, purge } };
+  } finally {
+    if (!handed) await pre.tracker.close().catch(() => {});
+  }
+}
 
-    const answer = await prompter.ask(`grimoire leave is a human-only operation. Type ${LEAVE_CONFIRMATION} to confirm (anything else cancels): `);
-    if (answer === null || answer.trim() !== LEAVE_CONFIRMATION) {
-      throw new GrimoireError('INVALID', `leave was not confirmed: type ${LEAVE_CONFIRMATION} exactly to run it; nothing changed`, {
-        fields: { confirmation: `must be ${LEAVE_CONFIRMATION}` },
-      });
-    }
+/** Drops a plan `performLeave` won't run. */
+export async function closeLeave(plan: LeavePlan): Promise<void> {
+  await plan.pre.tracker.close().catch(() => {});
+}
 
+/**
+ * Runs leave in the clone `options.root` is a checkout of. Throws BUSY while
+ * grimoire processes run in it (or it can't tell), and INVALID when the typed
+ * confirmation doesn't match; both before anything changed. Once the accepted
+ * offers have committed, a stop is a report (`left: false`), never an error.
+ */
+export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
+  const prepared = await prepareLeave(options);
+  if ('stopped' in prepared) return prepared.stopped;
+  const { plan } = prepared;
+  let answer: string | null;
+  try {
+    answer = await options.prompter.ask(`grimoire leave is a human-only operation. Type ${LEAVE_CONFIRMATION} to confirm (anything else cancels): `);
+  } catch (error) {
+    await closeLeave(plan);
+    throw error;
+  }
+  if (answer === null || answer.trim() !== LEAVE_CONFIRMATION) {
+    await closeLeave(plan);
+    throw new GrimoireError('INVALID', `leave was not confirmed: type ${LEAVE_CONFIRMATION} exactly to run it; nothing changed`, {
+      fields: { confirmation: `must be ${LEAVE_CONFIRMATION}` },
+    });
+  }
+  return performLeave(options, plan);
+}
+
+/**
+ * Leave's second half, once the person confirmed: the accepted offers, the
+ * final sync, a last liveness check, then the removal. `beforeRemoval` runs
+ * right before the removal, after the last liveness check (uninstall removes
+ * the checkout's files there); false stops leave there, removing nothing.
+ */
+export async function performLeave(options: LeaveOptions, plan: LeavePlan, hooks: { readonly beforeRemoval?: () => Promise<boolean> } = {}): Promise<LeaveReport> {
+  const { ctx, prompter, say } = options;
+  const env = options.env ?? process.env;
+  const { pre, report, store, commonDir, root, release, cut, push, purge } = plan;
+  try {
     // The accepted offers.
-    if (release || cut) await settleAttempts(options, pre, store, report, { release, cut, contexts: uncut.length });
+    if (release || cut) await settleAttempts(options, pre, store, report, { release, cut, contexts: plan.contexts });
     const left = report.cut?.uncut ?? 0;
     if (left > 0) {
       // Their seen-here rows go with the store, and no later sweep would cut them.
@@ -469,6 +539,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
       report.problems.push(busy);
       return { ...report, stopped: 'busy', processes: late.live ?? [] };
     }
+    if (hooks.beforeRemoval && !(await hooks.beforeRemoval())) return { ...report, stopped: 'checkout' };
     await removeAll(store, commonDir, root, pre.worktrees, env, outcome, report);
     await options.afterRemoval?.();
     // Nothing stops a session started meanwhile (older pins' processes honour no marker): say what came back.
@@ -485,7 +556,7 @@ export async function runLeave(options: LeaveOptions): Promise<LeaveReport> {
 }
 
 /** Sets aside every unsaved stray edit, so `skill record` can take it; the ids of all of them. */
-async function saveStrays(store: MachineLocalStore, pre: Preflight, report: LeaveReport): Promise<string[]> {
+export async function saveStrays(store: MachineLocalStore, pre: Pick<Preflight, 'saved' | 'unsaved' | 'served'>, report: { readonly problems: string[] }): Promise<string[]> {
   const ids = pre.saved.map((edit) => edit.id);
   for (const edit of pre.unsaved) {
     const served = pre.served?.skills.find((skill) => skill.name === edit.skill)?.version ?? null;
@@ -538,7 +609,7 @@ async function settleAttempts(
 }
 
 /** The final sync: a push when allowed, else a fetch only. Null when there is no local tracker, or it failed. */
-async function finalSync(tracker: TrackerStore, ctx: CallContext, push: boolean, report: LeaveReport): Promise<SyncOutcome | null> {
+export async function finalSync(tracker: TrackerStore, ctx: CallContext, push: boolean, report: { sync: LeaveReport['sync']; readonly problems: string[] }): Promise<SyncOutcome | null> {
   if ((await localTipOf(tracker.location.root)) === null) return null;
   try {
     const outcome = push
@@ -570,7 +641,9 @@ async function removeAll(
   const listed = await readPathList(store).catch(() => [] as string[]);
   for (const worktree of worktrees) {
     try {
-      await removeGenerated(worktree, listed, report);
+      const done = await removeGenerated(worktree, listed);
+      report.removed.generated.push(...done.removed.map((folder) => ({ worktree, path: folder })));
+      report.kept.generated.push(...done.kept.map((entry) => ({ worktree, ...entry })));
     } catch (error) {
       report.problems.push(`removing the generated output in ${worktree} failed: ${messageOf(error)}`);
     }
@@ -620,8 +693,14 @@ function generatedShape(relative: string): string | null {
   return null;
 }
 
-/** Removes `worktree`'s generated folders: each one untracked, unlinked, carrying grimoire's `.gitignore` and nothing but grimoire's files. */
-async function removeGenerated(worktree: string, listed: readonly string[], report: LeaveReport): Promise<void> {
+/**
+ * Removes `worktree`'s generated folders (spec §15): each one untracked,
+ * unlinked, carrying grimoire's `.gitignore` and nothing but grimoire's files;
+ * `listed` is the generated-path list. Returns the folders removed, and those
+ * kept with why (POSIX paths relative to the worktree).
+ */
+export async function removeGenerated(worktree: string, listed: readonly string[]): Promise<{ removed: string[]; kept: { path: string; why: string }[] }> {
+  const result: { removed: string[]; kept: { path: string; why: string }[] } = { removed: [], kept: [] };
   const folders = new Map<string, string>();
   const abs = (folder: string) => path.join(worktree, ...folder.split('/'));
   for (const { folder } of await existingFolders(worktree)) folders.set(comparablePath(abs(folder)), folder);
@@ -631,12 +710,12 @@ async function removeGenerated(worktree: string, listed: readonly string[], repo
     const shape = generatedShape(path.relative(worktree, entry).split(path.sep).join('/'));
     if (shape !== null && !folders.has(comparablePath(abs(shape)))) folders.set(comparablePath(abs(shape)), shape);
   }
-  if (folders.size === 0) return;
-  const keep = (folder: string, why: string) => report.kept.generated.push({ worktree, path: folder, why });
+  if (folders.size === 0) return result;
+  const keep = (folder: string, why: string) => result.kept.push({ path: folder, why });
   const tracked = await runGit(worktree, ['ls-files', '-z', '--', COPY_ROOT, ...Object.values(STUB_ROOTS)]);
   if (tracked.code !== 0) {
     for (const folder of folders.values()) keep(folder, `git can't say which paths it tracks here (${tracked.stderr.toString().trim()})`);
-    return;
+    return result;
   }
   const trackedFiles = tracked.stdout.toString('utf8').split('\0').filter((file) => file !== '');
   for (const folder of [...folders.values()].sort()) {
@@ -680,7 +759,7 @@ async function removeGenerated(worktree: string, listed: readonly string[], repo
       if (entries.includes(SKILL_FILE)) await retryTransient(() => unlink(path.join(full, SKILL_FILE)));
       await retryTransient(() => unlink(path.join(full, '.gitignore')));
       await retryTransient(() => rmdir(full));
-      report.removed.generated.push({ worktree, path: folder });
+      result.removed.push(folder);
     } catch (error) {
       keep(folder, `grimoire couldn’t remove it (${messageOf(error)})`);
     }
@@ -689,6 +768,7 @@ async function removeGenerated(worktree: string, listed: readonly string[], repo
   for (const dir of [COPY_ROOT, '.grimoire']) {
     if ((await linkedComponent(worktree, dir)) === null) await rmdir(abs(dir)).catch(() => {});
   }
+  return result;
 }
 
 /** Removes the machine-local store: everything in it, then `pkg/`, then the launcher, then its folder. */
