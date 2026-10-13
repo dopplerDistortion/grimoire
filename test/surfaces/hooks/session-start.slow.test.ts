@@ -74,3 +74,27 @@ describe('the SessionStart fast path through the real chain', () => {
     }
   });
 });
+
+describe('the pin-mismatch notice through the real chain', () => {
+  gitTest('a server still serving this worktree on an older pin: after a clear, the hook (always the checkout’s pin) says §8’s restart notice; a fresh start doesn’t', async ({ world }) => {
+    await initializeTracker(world.a, world.a);
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    const { tarball, integrity } = packed!;
+    expect((await installCopy(store, PIN, { tarball, integrity })).status).toBe('installed');
+    await installLauncher(store);
+    await writeJoinRecord(store, PIN, { excerpt_mode: 'facts', codex_hook_hash: null, joined_at: Date.now() });
+    await writeConfig(world.a.dir, PIN);
+    // This test process stands in for the session's server, started before a pull moved the pin.
+    const server = await store.processes.register({ role: 'mcp', client: 'claude-code', worktree: world.a.dir, pin: '0.9.0', pathSource: null });
+    try {
+      const run = (payload: string) => runEntry(claudeHookArgs('session-start'), { cwd: world.a.dir, projectDir: world.a.dir, input: readFixture(payload) });
+      const cleared = await run('claude-code/hook-payloads/session-start-clear.json');
+      expect([cleared.code, cleared.stdout, cleared.stderr]).toEqual([0, `grimoire: this checkout now pins ${PIN}; this session runs 0.9.0; restart it
+`, '']);
+      const fresh = await run('claude-code/hook-payloads/session-start-startup.json');
+      expect([fresh.code, fresh.stdout, fresh.stderr]).toEqual([0, '', '']);
+    } finally {
+      await server.unregister();
+    }
+  });
+});

@@ -84,6 +84,10 @@ describe('a clone joined from the packed tarball', () => {
         // tools/list loads the core: lazily imported chunks, so dist/chunks/ came along with the copy.
         const { tools } = await client.listTools();
         expect(tools.map((tool) => tool.name), era).toContain('show');
+        // The chore surface (spec §16 Carriers): the 4 chore tools, and the chores prompt for generic clients.
+        expect(tools.map((tool) => tool.name), era).toEqual(expect.arrayContaining(['chore_start', 'chore_read', 'chore_submit', 'chore_abandon']));
+        expect((await client.listPrompts()).prompts.map((prompt) => prompt.name), era).toEqual(['chores']);
+        expect((await client.getPrompt({ name: 'chores' })).messages[0]?.content, era).toMatchObject({ type: 'text', text: expect.stringContaining('1. Start: call `chore_start`') });
         const listed = await client.callTool({ name: 'list', arguments: {} });
         expect(listed.isError, era).toBeFalsy();
       } finally {
