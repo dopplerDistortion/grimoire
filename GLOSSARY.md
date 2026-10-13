@@ -240,6 +240,10 @@ _Avoid_: Optimizer, skill writer, skill generator
 One pickup of a due knowledge chore by one context, from its start until its result is accepted or it fails, is abandoned or expires; it records what grimoire served it and what it consumed.
 _Avoid_: Job, lease, execution, invocation
 
+**Chore carrier**:
+A content pointer file, or the `chores` MCP prompt, that hands an agent client grimoire's one shipped chore procedure, so a due knowledge chore runs in an isolated context: the `grimoire-chores` skill and subagent in Claude Code, the `grimoire-chores` skill and role in Codex.
+_Avoid_: Chore skill file, chore prompt template
+
 **Runner**:
 A per-machine opt-in that lets grimoire itself start an agent client's headless mode to do due knowledge chores unattended, on that person's own login.
 _Avoid_: Worker, daemon, background agent, bot

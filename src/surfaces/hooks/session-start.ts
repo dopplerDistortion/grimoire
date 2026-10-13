@@ -148,7 +148,12 @@ async function knowledgeFacts(
   const tracker = await openTracker(root).catch(() => null);
   if (tracker === null) return null;
   try {
-    const view = await tracker.read();
+    // No tracker fetched yet, or one this release can't read: nothing to say about chores (status says why).
+    const view = await tracker.read().catch((error: unknown) => {
+      if ((error as { code?: unknown }).code === 'NOT_SYNCED' || (error as { code?: unknown }).code === 'UPGRADE_REQUIRED') return null;
+      throw error;
+    });
+    if (view === null) return null;
     const proposals = await proposalSignals(view);
     const due = await dueChoresIn(view, store, tracker.now(), proposals);
     const pickup = due.next === null ? null : ((await machineSetting(store.commonDir, 'knowledge.pickup')) as Pickup);
