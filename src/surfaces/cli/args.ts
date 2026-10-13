@@ -342,6 +342,9 @@ const RUNTIME_VERBS = [
   { verb: 'init', kind: 'write', policy: 'human-only', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
   { verb: 'leave', kind: 'write', policy: 'human-only', description: 'Remove grimoire from this clone on this machine: generated output, the machine-local store, version copies and launcher, and the local tracker ref once the remote holds its tip.' },
   { verb: 'status', kind: 'read', policy: 'agent', description: 'What to know about this checkout now: sync, refreshed pointer files, Node, stale claims, the excerpt mode, the Codex hook. Writes nothing.' },
+  { verb: 'runner enable', kind: 'write', policy: 'human-only', description: 'Let grimoire start your own claude -p or codex exec to do due knowledge chores unattended on this machine (claude or codex; --allow-api-billing).' },
+  { verb: 'runner disable', kind: 'write', policy: 'human-only', description: 'Turn the runner off on this machine.' },
+  { verb: 'chore run', kind: 'write', policy: 'human-read', description: 'Run due knowledge chores with this machine’s runner: --due for OS schedulers, or one chore by kind. Refuses agent markers.' },
   { verb: 'doctor', kind: 'read', policy: 'agent', description: 'A report on the store, the install and capture statistics; --fix makes the single-answer repairs (content pointer files, stale locks); --readers adds the transcript readers’ structure statistics.' },
 ] as const;
 

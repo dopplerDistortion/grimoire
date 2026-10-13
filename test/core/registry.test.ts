@@ -10,6 +10,8 @@ describe('the op registry', () => {
       expect(Object.keys(byName).sort()).toEqual([
         'activity',
         'assign',
+        'attempt_show',
+        'attention',
         'chore_abandon',
         'chore_read',
         'chore_start',
@@ -114,6 +116,8 @@ describe('the op registry', () => {
       expect(byName.skill_restore).toMatchObject({ inputSchema: { required: ['name', 'version', 'base'] } });
       for (const name of ['skill_delete', 'skill_eject']) expect(byName[name]?.inputSchema.required, name).toContain('base');
       expect(byName.activity).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      expect(byName.attention).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      expect(byName.attempt_show).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false, inputSchema: { required: ['attempt'] } });
       expect(byName.create).toMatchObject({
         kind: 'write',
         policy: 'agent',

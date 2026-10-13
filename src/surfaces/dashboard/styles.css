@@ -875,3 +875,129 @@ td.empty {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
   font-size: 12.5px;
 }
+
+/* Attention (the home): the queue, the count tiles, the live activity feed */
+.pad {
+  padding: 10px 12px;
+}
+
+.att {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.att:last-child {
+  border-bottom: none;
+}
+
+.att .ic {
+  min-width: 26px;
+  justify-content: center;
+}
+
+.att-actions {
+  flex-shrink: 0;
+}
+
+.att-detail .src,
+.att-detail .command {
+  margin: 6px 0;
+}
+
+.command {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.12);
+  white-space: pre-wrap;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.tile {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: inherit;
+}
+
+.tile:hover {
+  border-color: var(--acc);
+  text-decoration: none;
+}
+
+.tile .v {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.tile .l {
+  color: var(--mute);
+  font-size: 12px;
+}
+
+.feed .feed-entry {
+  margin: 3px 0;
+}
+
+/* the attempt page */
+.attempt-id {
+  font-family: var(--mono);
+}
+
+.attempt > * + * {
+  margin-top: 12px;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.attempt .panel h2 {
+  margin-top: 0;
+}
+
+.attempt .panel > div + div {
+  margin-top: 4px;
+}
+
+.contexts {
+  margin: 8px 0;
+}
+
+.session {
+  margin-bottom: 8px;
+}
+
+.excerpt summary {
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+.excerpt .excerpt-text {
+  max-height: 480px;
+  margin-top: 6px;
+}
+
+.commit-row .chip,
+.exposure-hit {
+  margin-left: 4px;
+}
+
+.purge-scope {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
