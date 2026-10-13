@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from 'preact/hooks';
 import { ApiError, read, write } from './api';
 import { useLiveRefetch } from './data';
 import { ago, short } from './format';
+import { liftQuarantineDialog, purgeTraceDialog, quarantineDialog } from './trace-actions';
 import type { AttemptShowResult, ShownContext, ShownOutcome } from './types';
 import { ActorName, errorText, LockTag, openDialog, OutcomeChip, toast } from './ui';
 
@@ -463,7 +464,7 @@ function KnowledgeUse({ shown }: { shown: AttemptShowResult }) {
           : proposals.map((proposal, k) => (
               <span key={proposal.id}>
                 {k > 0 ? ', ' : ''}
-                <code>{proposal.id}</code> <span class="mute">({proposal.action} {proposal.skill})</span>
+                <a href={`/knowledge/proposals/${proposal.id}`}><code>{proposal.id}</code></a> <span class="mute">({proposal.action} {proposal.skill})</span>
               </span>
             ))}
       </div>
@@ -494,86 +495,6 @@ function Actions({ shown, reload }: { shown: AttemptShowResult; reload: () => Pr
   );
 }
 
-function quarantineTrace(shown: AttemptShowResult, reload: () => Promise<void>) {
-  openDialog({
-    title: `Quarantine trace ${shown.attempt}`,
-    humanOnly: true,
-    ok: 'Quarantine',
-    body: (
-      <>
-        <p>Keeps this trace out of knowledge chores and out of any skill proposal’s evidence. Nothing is purged and the wiki is not rolled back.</p>
-        <label class="field">
-          Reason (required)
-          <textarea name="reason" rows={2} />
-        </label>
-      </>
-    ),
-    validate: (values) => ((values.reason ?? '').trim() === '' ? 'Give a reason: a quarantine needs one.' : null),
-    run: async (values) => {
-      await write('quarantine', { trace: shown.attempt, reason: values.reason!.trim() });
-      toast(`Quarantined ${shown.attempt}.`);
-      await reload();
-    },
-  });
-}
-
-function liftQuarantine(shown: AttemptShowResult, reload: () => Promise<void>) {
-  openDialog({
-    title: `Lift the quarantine on ${shown.attempt}`,
-    humanOnly: true,
-    ok: 'Lift quarantine',
-    body: (
-      <>
-        <p>The trace counts as evidence again and is served to knowledge chores.</p>
-        <label class="field">
-          Reason (optional)
-          <textarea name="reason" rows={2} />
-        </label>
-      </>
-    ),
-    run: async (values) => {
-      await write('unquarantine', { trace: shown.attempt, ...((values.reason ?? '').trim() ? { reason: values.reason!.trim() } : {}) });
-      toast(`Lifted the quarantine on ${shown.attempt}.`);
-      await reload();
-    },
-  });
-}
-
-function purgeTrace(shown: AttemptShowResult, reload: () => Promise<void>) {
-  const { pages, proposals } = shown.knowledge;
-  openDialog({
-    title: `Purge trace ${shown.attempt}?`,
-    humanOnly: true,
-    danger: true,
-    ok: 'Purge trace',
-    typed: shown.attempt,
-    body: (
-      <>
-        <p>
-          Removes the trace and its outcome from the tracker’s tip in one commit, and leaves a tombstone that wins every later fold. Unpushed tracker commits are
-          rewritten without it.
-        </p>
-        <p class="banner warn purge-history">Pushed git history still keeps it: grimoire never rewrites pushed history, so the remote and every clone that fetched it keep the content.</p>
-        {pages.length > 0 || proposals.length > 0 ? (
-          <div class="banner warn purge-citing">
-            Cited by {pages.length > 0 ? `pattern pages ${pages.map((page) => page.slug).join(', ')}` : ''}
-            {pages.length > 0 && proposals.length > 0 ? ' and ' : ''}
-            {proposals.length > 0 ? `proposals ${proposals.map((proposal) => proposal.id).join(', ')}` : ''}. They stay as written and show this source as purged.
-          </div>
-        ) : (
-          <p class="mute small purge-citing">No pattern page or proposal cites it.</p>
-        )}
-        <label class="field">
-          Reason (required, kept in the tombstone)
-          <textarea name="reason" rows={2} />
-        </label>
-      </>
-    ),
-    validate: (values) => ((values.reason ?? '').trim() === '' ? 'Give a reason: a purge needs one.' : null),
-    run: async (values) => {
-      const result = await write<{ history: { note: string } }>('purge_trace', { attempt: shown.attempt, reason: values.reason!.trim() });
-      toast(`Purged ${shown.attempt}. ${result.history.note}`);
-      await reload();
-    },
-  });
-}
+const quarantineTrace = (shown: AttemptShowResult, reload: () => Promise<void>) => quarantineDialog({ trace: shown.attempt }, reload);
+const liftQuarantine = (shown: AttemptShowResult, reload: () => Promise<void>) => liftQuarantineDialog({ trace: shown.attempt }, reload);
+const purgeTrace = (shown: AttemptShowResult, reload: () => Promise<void>) => purgeTraceDialog(shown.attempt, shown.knowledge, reload);
