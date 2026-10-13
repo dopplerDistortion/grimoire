@@ -80,3 +80,23 @@ export function similarity(a: readonly string[], b: readonly string[]): number {
   if (a.length + b.length === 0) return 1;
   return (2 * common(a, b).length) / (a.length + b.length);
 }
+
+/** A diff to show a person: every line of both texts in order, marked `  ` (kept), `- ` (removed) or `+ ` (added). */
+export function shownDiff(before: string, after: string): string[] {
+  const a = linesOf(before);
+  const b = linesOf(after);
+  const { keptA, keptB } = common(a, b);
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && !keptA[i]) out.push(`- ${a[i++]}`);
+    else if (j < b.length && !keptB[j]) out.push(`+ ${b[j++]}`);
+    else {
+      out.push(`  ${a[i]}`);
+      i++;
+      j++;
+    }
+  }
+  return out;
+}

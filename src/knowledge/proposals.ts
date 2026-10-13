@@ -2,27 +2,31 @@
 // proposal records and the skill ledger of the merged view; nothing about a
 // proposal's status is ever committed.
 //
-// - A decision on the proposal (a ledger record naming it) decides it:
-//   accepted, rejected, or dismissed until a reconsider follows the dismiss.
+// - An accept of the proposal decides it `accepted`, unless the skill's
+//   derivation says otherwise: `contested` while a reject of the same
+//   proposal stands against it unsettled, `superseded` when its accept lost a
+//   fork to another change (and still after a later change followed the fork,
+//   unless one made its version current again), and `undone` once a restore
+//   moved the skill off the version it made current.
+// - Otherwise a reject decides it `rejected`; a dismiss `dismissed`, until a
+//   reconsider follows it; a `lapse` record (an accept whose checks failed at
+//   accept time) `lapsed`.
 // - Otherwise it is `stale` once any change of its skill landed that its
 //   ledger heads at drafting (`after`) don't already hold: the target moved
 //   off its base. Staleness is monotone; a later change back doesn't undo it.
 // - Otherwise it is `pending`, and holds the pending slot.
-//
-// The gate's own statuses (lapsed, undone, contested, superseded) come with
-// the decision ops.
 import type { ProposalRecord, TrackerView } from '../tracker';
 import type { ProposalSignals } from './chores/due';
 import { deriveSkills, type SkillState } from './derive';
 import { parseLedgerRecord, type LedgerEntry } from './ledger';
 import type { TargetedPattern } from './scorecards';
 
-export type ProposalStatus = 'pending' | 'stale' | 'accepted' | 'rejected' | 'dismissed';
+export type ProposalStatus = 'pending' | 'stale' | 'lapsed' | 'accepted' | 'rejected' | 'dismissed' | 'undone' | 'contested' | 'superseded';
 
 export interface ProposalState {
   readonly record: ProposalRecord;
   readonly status: ProposalStatus;
-  /** When the change that made it stale was recorded; null unless stale. */
+  /** When the change that made it stale, or its lapse, was recorded; null unless stale or lapsed. */
   readonly staleSince: string | null;
   /** The decision that decided it, or null. */
   readonly decision: LedgerEntry | null;
@@ -48,15 +52,26 @@ function held(records: readonly LedgerEntry[], heads: readonly string[]): Set<st
 /** The status of every proposal, oldest first. `skills` is the skill book's states, by name. */
 export function proposalStates(proposals: readonly ProposalRecord[], skills: ReadonlyMap<string, SkillState>): ProposalState[] {
   return proposals.map((record) => {
-    const records = skills.get(record.skill)?.records ?? [];
+    const skill = skills.get(record.skill);
+    const records = skill?.records ?? [];
     // Records come each after the ones it follows: the last decision of a kind is the latest.
     const decisions = records.filter((entry) => entry.proposal === record.id);
+    const decided = (status: ProposalStatus, decision: LedgerEntry, staleSince: string | null = null): ProposalState => ({ record, status, staleSince, decision });
     const accept = decisions.find((entry) => entry.kind === 'accept');
-    if (accept) return { record, status: 'accepted', staleSince: null, decision: accept };
+    if (accept) {
+      if (skill?.contested.some((contest) => contest.proposal === record.id)) return decided('contested', accept);
+      if (skill && [...skill.superseded, ...skill.lost].some((loser) => loser.id === accept.id)) return decided('superseded', accept);
+      const undone = records.some(
+        (entry) => entry.kind === 'restore' && accept.to !== null && entry.from === accept.to && held(records, entry.after).has(accept.id),
+      );
+      return decided(undone ? 'undone' : 'accepted', accept);
+    }
     const reject = decisions.find((entry) => entry.kind === 'reject');
-    if (reject) return { record, status: 'rejected', staleSince: null, decision: reject };
+    if (reject) return decided('rejected', reject);
     const lastDismissal = decisions.filter((entry) => entry.kind === 'dismiss' || entry.kind === 'reconsider').at(-1);
-    if (lastDismissal?.kind === 'dismiss') return { record, status: 'dismissed', staleSince: null, decision: lastDismissal };
+    if (lastDismissal?.kind === 'dismiss') return decided('dismissed', lastDismissal);
+    const lapse = decisions.find((entry) => entry.kind === 'lapse');
+    if (lapse) return decided('lapsed', lapse, lapse.at);
     const known = held(records, record.after);
     const moves = records.filter((entry) => MOVES.has(entry.kind) && !known.has(entry.id));
     if (moves.length > 0) {

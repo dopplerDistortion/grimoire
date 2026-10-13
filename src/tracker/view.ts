@@ -55,6 +55,7 @@ import {
   SESSIONS_DIR,
   PURGES_DIR,
   tracePurgeFile,
+  proposalPurgeFile,
   SETTINGS_FILE,
   skillVersionFile,
 } from './layout';
@@ -67,7 +68,7 @@ import { parseSetting, serializeSettings, settingLine, settingLines, type StoreS
 import { WikiDraftState, WikiReader, type WikiDraft, type WikiView } from './wiki';
 import { QuarantineDraftState, QuarantineReader, type QuarantineDraft, type QuarantineView } from './quarantine';
 import { ChoreRunDraftState, ChoreRunReader, type ChoreRunDraft, type ChoreRunView } from './chore-runs';
-import { ProposalDraftState, ProposalReader, type ProposalDraft, type ProposalView } from './proposals';
+import { PROPOSAL_PATTERN, proposalFile, ProposalDraftState, ProposalReader, type ProposalDraft, type ProposalView } from './proposals';
 import { NO_PURGES, parsePurge, serializePurge, type PurgedFacts, type PurgeIndex, type PurgeTombstone } from './purge';
 
 /** What every read sees: the tracker at one tip. */
@@ -135,6 +136,8 @@ export interface TrackerView {
   tracePurge(handle: string): PurgeTombstone | undefined;
   /** Every purged trace's tombstone, by attempt handle. */
   purgedTraces(): ReadonlyMap<string, PurgeTombstone>;
+  /** The tombstone of a purged skill proposal (`purges/<proposal-id>.md`), or undefined. A purged proposal is gone from every other read. */
+  proposalPurge(id: string): PurgeTombstone | undefined;
   /**
    * Files a purge tombstone says are gone that this tree still holds (a hand
    * edit, or a writer that ignored the tombstone), by the handle whose
@@ -250,6 +253,13 @@ export interface TrackerDraft extends TrackerView {
    * kept facts when `facts` is `kept`. Returns the paths it removes.
    */
   purgeSession(handle: string, key: string, tombstone: NewPurge & { facts: PurgedFacts; kept: Buffer | null }): readonly string[];
+  /**
+   * Purges a skill proposal (spec §3, §18): removes its record and writes
+   * `purges/<proposal-id>.md`. For a proposal purged already, it removes
+   * only a file the tree still holds, keeping the tombstone. Returns the
+   * paths it removes.
+   */
+  purgeProposal(id: string, tombstone: NewPurge): Promise<readonly string[]>;
   /** The wiki as this round changes it; page writes regenerate the derived index and log. */
   readonly wiki: WikiDraft;
   /** Quarantine as this round changes it. */
@@ -371,7 +381,7 @@ export class Snapshot implements TrackerView {
     this.wiki = new WikiReader(parts.source, parts.rootTree);
     this.quarantine = new QuarantineReader(() => this.ledgerFiles());
     this.choreRuns = new ChoreRunReader(parts.source, parts.rootTree);
-    this.proposals = new ProposalReader(parts.source, parts.rootTree);
+    this.proposals = new ProposalReader(parts.source, parts.rootTree, new Set(this.purges.proposals.keys()));
   }
 
   issue(id: string): IssueRecord | undefined {
@@ -487,6 +497,10 @@ export class Snapshot implements TrackerView {
     return this.purges.traces;
   }
 
+  proposalPurge(id: string): PurgeTombstone | undefined {
+    return this.purges.proposals.get(id);
+  }
+
   purgeLeftovers(handle: string): readonly string[] {
     return this.leftovers.get(handle) ?? [];
   }
@@ -534,6 +548,8 @@ export class Draft implements TrackerDraft {
   private readonly sessionsHere = new Map<string, Map<string, Buffer>>();
   /** Traces this round purges, by handle, with the tombstone it writes (the stored one for a trace purged already). */
   private readonly tracePurgesHere = new Map<string, PurgeTombstone>();
+  /** Proposals this round purges, by id, with the tombstone it writes (the stored one for a proposal purged already). */
+  private readonly proposalPurgesHere = new Map<string, PurgeTombstone>();
   /** Session records this round purges, by handle, then key. */
   private readonly sessionPurgesHere = new Map<string, Map<string, PurgeTombstone>>();
   /** What this round's purges remove, and the tombstones they write (null: one stored already stays). */
@@ -740,6 +756,25 @@ export class Draft implements TrackerDraft {
   purgedTraces(): ReadonlyMap<string, PurgeTombstone> {
     if (this.tracePurgesHere.size === 0) return this.base.purgedTraces();
     return new Map([...this.base.purgedTraces(), ...this.tracePurgesHere]);
+  }
+
+  proposalPurge(id: string): PurgeTombstone | undefined {
+    return this.proposalPurgesHere.get(id) ?? this.base.proposalPurge(id);
+  }
+
+  async purgeProposal(id: string, tombstone: NewPurge): Promise<readonly string[]> {
+    const stored = this.proposalPurge(id);
+    const live = (await this.proposals.records()).some((record) => record.id === id);
+    if (!live && !stored) throw notFound('id', id);
+    const file = proposalFile(id);
+    const held = await this.base.proposals.holds(id);
+    if (held) this.purgeEdits.set(file, null);
+    this.droppedPaths.add(file);
+    const kept: PurgeTombstone = stored ?? { by: tombstone.by, at: this.now.toISOString(), reason: tombstone.reason, kept: null, extra: {} };
+    if (!stored) this.purgeEdits.set(proposalPurgeFile(id), serializePurge(kept));
+    this.proposalPurgesHere.set(id, kept);
+    this.proposals.hide(id);
+    return held || live ? [file] : [];
   }
 
   purgeLeftovers(handle: string): readonly string[] {
@@ -1145,10 +1180,13 @@ export class SnapshotLoader {
     if (!index) {
       const traces = new Map<string, PurgeTombstone>();
       const sessions = new Map<string, Map<string, PurgeTombstone>>();
+      const proposals = new Map<string, PurgeTombstone>();
       for (const entry of await this.objects.tree(dir)) {
         if (entry.mode !== TREE_MODE) {
           const handle = entry.name.slice(0, -3);
-          if (entry.name.endsWith('.md') && ATTEMPT_PATTERN.test(handle)) traces.set(handle, parsePurge(await this.objects.blob(entry.oid)));
+          if (!entry.name.endsWith('.md')) continue;
+          if (ATTEMPT_PATTERN.test(handle)) traces.set(handle, parsePurge(await this.objects.blob(entry.oid)));
+          else if (PROPOSAL_PATTERN.test(handle)) proposals.set(handle, parsePurge(await this.objects.blob(entry.oid)));
           continue;
         }
         if (!ATTEMPT_PATTERN.test(entry.name)) continue;
@@ -1158,7 +1196,7 @@ export class SnapshotLoader {
         }
         if (keys.size > 0) sessions.set(entry.name, keys);
       }
-      index = { traces, sessions };
+      index = { traces, sessions, proposals };
       this.memos.purgesByTree.set(dir, index);
     }
     return index;

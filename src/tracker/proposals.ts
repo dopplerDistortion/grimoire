@@ -10,7 +10,8 @@
 // Proposals carry random ids, so two clones' records fold to their union. No
 // status is stored: pending, stale, accepted and the rest are derived from
 // the skill ledger on read (src/knowledge/proposals.ts). Purging a proposal
-// removes its file and writes `purges/<proposal-id>.md`.
+// removes its file and writes `purges/<proposal-id>.md`; the tombstone
+// dominates, so a tree that still holds the file reads as if it didn't.
 import { randomBytes } from 'node:crypto';
 import { TREE_MODE } from '../git/objects';
 import { ID_ALPHABET } from './ids';
@@ -259,7 +260,15 @@ export class ProposalReader implements ProposalView {
   constructor(
     private readonly source: ObjectSource,
     private readonly rootTree: string,
+    /** Proposals a tombstone purged: never read, even where the tree still holds them. */
+    private readonly purged: ReadonlySet<string> = new Set(),
   ) {}
+
+  /** Whether the tree holds the proposal's file, purged or not. */
+  async holds(id: string): Promise<boolean> {
+    const entry = await this.source.entryAt(this.rootTree, proposalFile(id));
+    return entry !== null && entry !== undefined && entry.mode !== TREE_MODE;
+  }
 
   records(): Promise<readonly ProposalRecord[]> {
     if (!this.loaded) {
@@ -278,7 +287,7 @@ export class ProposalReader implements ProposalView {
     const records: ProposalRecord[] = [];
     for (const e of await this.source.tree(dir.oid)) {
       const id = e.name.slice(0, -3);
-      if (e.mode !== TREE_MODE && e.name.endsWith('.md') && PROPOSAL_PATTERN.test(id)) records.push(parseProposal(id, await this.source.blob(e.oid)));
+      if (e.mode !== TREE_MODE && e.name.endsWith('.md') && PROPOSAL_PATTERN.test(id) && !this.purged.has(id)) records.push(parseProposal(id, await this.source.blob(e.oid)));
     }
     return records.sort(byAt);
   }
@@ -292,16 +301,24 @@ export interface ProposalDraft extends ProposalView {
 
 export class ProposalDraftState implements ProposalDraft {
   private readonly added = new Map<string, { bytes: Buffer; record: ProposalRecord }>();
+  /** Proposals this round purges: gone from its reads. */
+  private readonly hidden = new Set<string>();
 
   constructor(private readonly base: ProposalReader) {}
 
   async records(): Promise<readonly ProposalRecord[]> {
-    return [...(await this.base.records()), ...[...this.added.values()].map((a) => a.record)].sort(byAt);
+    return [...(await this.base.records()), ...[...this.added.values()].map((a) => a.record)].filter((record) => !this.hidden.has(record.id)).sort(byAt);
+  }
+
+  /** Purged this round: gone from every read, and never written (the draft writes the removal). */
+  hide(id: string): void {
+    this.hidden.add(id);
+    this.added.delete(id);
   }
 
   async add(record: NewProposal): Promise<ProposalRecord> {
     if (!PROPOSAL_PATTERN.test(record.id)) throw new Error(`a proposal id is pp- and 10 Crockford characters, not ${JSON.stringify(record.id)}`);
-    if (this.added.has(record.id) || (await this.base.records()).some((base) => base.id === record.id)) {
+    if (this.hidden.has(record.id) || this.added.has(record.id) || (await this.base.holds(record.id))) {
       throw new Error(`the proposal ${record.id} is already written`);
     }
     const bytes = serializeProposal(record);

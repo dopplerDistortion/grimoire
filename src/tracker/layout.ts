@@ -120,6 +120,11 @@ export function tracePurgeFile(attempt: string): string {
   return `${PURGES_DIR}/${attempt}.md`;
 }
 
+/** `purges/<proposal-id>.md`: the tombstone of a purged skill proposal (spec §3, §18). */
+export function proposalPurgeFile(proposal: string): string {
+  return `${PURGES_DIR}/${proposal}.md`;
+}
+
 /** `purges/<attempt-id>/<session-key>.md`: the tombstone of one purged session record (spec §3, §14). */
 export function sessionPurgeFile(attempt: string, key: string): string {
   return `${PURGES_DIR}/${attempt}/${key}.md`;
