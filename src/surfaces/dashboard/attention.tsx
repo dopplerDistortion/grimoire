@@ -144,7 +144,7 @@ function Item({ item, reload }: { item: AttentionItem; reload: () => Promise<voi
               <pre class="src remote-message">{item.message}</pre>
               <div class="sync-fix">{item.fix}</div>
               <div>
-                Hit by a {item.client} {item.surface} process · {ago(item.at)}
+                Hit by {hitBy(item.client, item.surface)} · {ago(item.at)}
                 {item.pending_since ? ` · unpushed since ${ago(item.pending_since)}` : ''}
               </div>
             </>
@@ -295,6 +295,14 @@ function StrayEditRow({ stray, reload }: { stray: ShownStrayEdit; reload: () => 
       }
     />
   );
+}
+
+const SURFACE_NOUNS: Readonly<Record<string, string>> = { mcp: 'server', cli: 'CLI call', hook: 'hook', runner: 'runner' };
+
+/** Whose process hit a sync failure: "the dashboard", "a claude-code server". */
+function hitBy(client: string, surface: string): string {
+  if (surface === 'dashboard') return 'the dashboard';
+  return `a ${client} ${SURFACE_NOUNS[surface] ?? surface}`;
 }
 
 /** Runs an inline action: a failure shows as a toast with the core's code and message. */

@@ -46,7 +46,6 @@ function setBy(outcome: ShownOutcome): string {
 export function AttemptScreen({ id }: { id: string }) {
   const [shown, setShown] = useState<AttemptShowResult | null>(null);
   const [missing, setMissing] = useState<string | null>(null);
-  const [flash, setFlash] = useState(0);
 
   const reload = useCallback(async () => {
     try {
@@ -67,24 +66,22 @@ export function AttemptScreen({ id }: { id: string }) {
   }, [reload]);
 
   useLiveRefetch(
-    (change) => {
-      void reload();
-      if (change) setFlash(Date.now());
-    },
+    () => void reload(),
     (change) => change.attempts.includes(id) || (shown?.issue ? change.issues.includes(shown.issue.id) : false) || change.knowledge,
   );
 
   if (missing !== null) {
     return (
       <div class="attempt missing">
-        <h1 class="mono">{id}</h1>
+        <h1 class="attempt-id">{id}</h1>
         <p class="mute">{missing}</p>
       </div>
     );
   }
   if (!shown) return <p class="mute loading-attempt">Loading {id}…</p>;
   if (shown.state === 'purged') return <PurgedAttempt shown={shown} />;
-  return <AttemptView shown={shown} reload={reload} flash={Date.now() - flash < 2_600} />;
+  // Refetched in place on live updates: opened excerpts and scroll stay.
+  return <AttemptView shown={shown} reload={reload} />;
 }
 
 function PurgedAttempt({ shown }: { shown: AttemptShowResult }) {
@@ -92,7 +89,7 @@ function PurgedAttempt({ shown }: { shown: AttemptShowResult }) {
   return (
     <div class="attempt purged-attempt">
       <div class="small mute">Attempt · purged trace</div>
-      <h1 class="mono">{shown.attempt}</h1>
+      <h1 class="attempt-id">{shown.attempt}</h1>
       <p class="banner warn">
         Purged by {purged.by} {ago(purged.at)}: {purged.reason}. The tombstone wins every later fold; pushed git history still has the content.
       </p>
@@ -113,17 +110,17 @@ function Panel({ title, children, tag, cls }: { title: string; children: Compone
   );
 }
 
-function AttemptView({ shown, reload, flash }: { shown: AttemptShowResult; reload: () => Promise<void>; flash: boolean }) {
+function AttemptView({ shown, reload }: { shown: AttemptShowResult; reload: () => Promise<void> }) {
   const start = shown.start!;
   const end = shown.end;
   const issue = shown.issue!;
   const wiki = shown.capture.wiki_exposed;
   return (
-    <div class={`attempt${flash ? ' flash' : ''}`}>
+    <div class="attempt">
       <div class="row between wrap">
         <div>
           <div class="small mute">Attempt · {end ? 'sealed trace' : 'open'}</div>
-          <h1 class="mono attempt-id">{shown.attempt}</h1>
+          <h1 class="attempt-id">{shown.attempt}</h1>
           <div>
             <a href={`/issues/${issue.id}`}>
               <span class="id">{issue.id}</span> {issue.title ?? '(deleted)'}

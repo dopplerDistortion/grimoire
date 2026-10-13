@@ -952,6 +952,10 @@ td.empty {
 }
 
 /* the attempt page */
+.attempt-id {
+  font-family: var(--mono);
+}
+
 .attempt > * + * {
   margin-top: 12px;
 }
