@@ -2,10 +2,11 @@
 // Thin: transport (argv, JSON stdin/stdout, exit codes) and gating, never
 // business rules, which seam 1 covers.
 import { existsSync } from 'node:fs';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
-import { makeUnwritable, permissionsApply } from '#harness';
+import { makeUnwritable, permissionsApply, trackPidFile } from '#harness';
+import { isPidAlive } from '../../../src/machine-local/process-info';
 import { expectRefUnmoved, trackerTip } from '../../core/support';
 import { buildGrimoire, cli, cliAtTerminal, fakeEditor, humanEnv, lastJsonOnScreen } from './support';
 import { cliTest, personAtShell, coreResult, until, machineOf, remoteTracker, syncedInBackground, closeThroughCli, MARKER_NAMES } from './cli-support';
@@ -292,16 +293,21 @@ describe('the detached sync child', () => {
   cliTest('a sync child that dies leaves the sync-pending marker for upkeep', async ({ world, a }) => {
     // The push waits at the remote until the test opens the gate (two minutes at
     // most, so a failed test leaves no hook looping), then fails: the child is
-    // caught mid-push, and only a live child could have pushed.
+    // caught mid-push, and only a live child could have pushed. The hook names
+    // its process (its Windows pid under Git Bash) in a pid file the leak guard
+    // holds the test to.
     const signal = (name: string) => path.join(world.root, name);
     const sh = (file: string) => file.split(path.sep).join('/');
-    const [alive, gate, done] = [signal('hook-alive'), signal('hook-gate'), signal('hook-done')];
+    const [hookPid, gate] = [signal('hook.pid'), signal('hook-gate')];
+    trackPidFile(hookPid);
     await writeFile(
       path.join(world.remote, 'hooks', 'pre-receive'),
       `#!/bin/sh
+pid=$$
+[ -r /proc/$$/winpid ] && pid=$(cat /proc/$$/winpid)
+echo "$pid $((($(date +%s) + 1) * 1000))" > '${sh(hookPid)}.tmp' && mv '${sh(hookPid)}.tmp' '${sh(hookPid)}'
 i=0
-while [ ! -f '${sh(gate)}' ] && [ $i -lt 1200 ]; do touch '${sh(alive)}'; sleep 0.1; i=$((i+1)); done
-touch '${sh(done)}'
+while [ ! -f '${sh(gate)}' ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done
 exit 1
 `,
       { mode: 0o755 },
@@ -310,7 +316,8 @@ exit 1
     await closeThroughCli(bin, a);
     const machine = machineOf(a);
     await until(async () => (await machine.processes.live({ role: 'sync' })).length === 1, 'the child’s process record');
-    await until(async () => existsSync(alive), 'the child’s push to reach the remote');
+    await until(async () => existsSync(hookPid), 'the child’s push to reach the remote');
+    const hook = Number((await readFile(hookPid, 'utf8')).split(' ')[0]);
     const [child] = await machine.processes.live({ role: 'sync' });
     process.kill(child!.pid);
     await until(async () => (await machine.processes.live({ role: 'sync' })).length === 0, 'the child to die');
@@ -320,10 +327,13 @@ exit 1
     expect(status.json).toMatchObject({ pending_since: expect.any(String), last_result: null, failure: null });
     expect(await remoteTracker(a)).toBeNull();
 
-    // Let the push end before the world goes: it fails once the gate opens,
-    // unless it died with the child (Windows ends a process's whole tree).
+    // Let the push end before the world goes: the hook runs in the remote, and
+    // killing the child leaves its git running (on Windows only git's launcher
+    // is in the child's job object; on POSIX git leads its own process group).
+    // It fails once the gate opens. Waiting on the hook's own process, not on a
+    // file it touches, holds under load: the gate stays until the hook is gone.
     await writeFile(gate, '');
-    await until(async () => existsSync(done) || Date.now() - (await stat(alive)).mtimeMs > 2_000, 'the push to end');
+    await until(async () => !isPidAlive(hook), 'the hook to exit');
   });
 });
 
