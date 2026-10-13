@@ -134,9 +134,9 @@ function IssueLink({ id, title }: { id: string; title: string }) {
 }
 
 /** One attention row: its icon, what it is, why, and its actions. */
-function Row({ tone, icon, title, detail, actions, kind }: { tone: string; icon: string; title: ComponentChildren; detail: ComponentChildren; actions: ComponentChildren; kind: string }) {
+function Row({ tone, icon, title, detail, actions, kind, id }: { tone: string; icon: string; title: ComponentChildren; detail: ComponentChildren; actions: ComponentChildren; kind: string; id?: string }) {
   return (
-    <div class={`att att-${kind}`}>
+    <div class={`att att-${kind}`} data-id={id}>
       <div class={`ic chip ${tone}`}>{icon}</div>
       <div class="grow">
         <div class="b att-title">{title}</div>
@@ -462,6 +462,7 @@ function StrayEditRow({ stray, reload }: { stray: ShownStrayEdit; reload: () => 
   return (
     <Row
       kind="stray"
+      id={stray.id}
       tone="warn"
       icon="✎"
       title={`Stray edit to ${stray.skill}`}
