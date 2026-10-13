@@ -306,3 +306,20 @@ export function DiffView({ lines, context }: { lines: readonly { t: '=' | '-' | 
   });
   return <div class="diff">{out}</div>;
 }
+
+/** A diff the core shows as lines marked `  `, `- ` or `+ ` (shownDiff), as source text. */
+export function SourceDiff({ lines, context }: { lines: readonly string[]; context?: number }) {
+  const parsed = lines.map((line) => ({ t: (line.startsWith('+ ') ? '+' : line.startsWith('- ') ? '-' : '=') as '=' | '-' | '+', l: line.slice(2) }));
+  if (parsed.length === 0) return <div class="diff mute">No change.</div>;
+  return context === undefined ? <DiffView lines={parsed} /> : <DiffView lines={parsed} context={context} />;
+}
+
+/** A version id, shortened for display (the whole id on hover). */
+export function Version({ id }: { id: string | null | undefined }) {
+  if (!id) return <span class="mute">none</span>;
+  return (
+    <code class="version-id" title={id}>
+      {id.slice(0, 10)}
+    </code>
+  );
+}

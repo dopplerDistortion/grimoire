@@ -6,11 +6,13 @@
 // page with the remedies takes the frame's place, never an empty board; the
 // pin-mismatch banner sits above everything. Served under a CSP with no inline
 // script or style: every style lives in styles.css.
+import { Fragment } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, BlockedEvent, blocks, instance, read, session, signedOut, signIn, signOut, storeBlocked, type ApiErrorBody, type InstanceInfo, type SessionInfo } from './api';
 import { AttemptScreen } from './attempt';
 import { AttentionScreen } from './attention';
 import { IssuesScreen } from './issues';
+import { KNOWLEDGE_VIEWS, KnowledgeScreen } from './knowledge';
 import { connectLive, type LiveState } from './live';
 import { interceptLinks, usePath } from './router';
 import { SettingsScreen } from './settings';
@@ -88,14 +90,22 @@ function sectionOf(path: string): string {
   return SECTIONS.some((section) => section.path === top) ? top : '/';
 }
 
-/** The screen a path shows: Attention at home, Issues, an attempt page, Settings; the other sections come with their slices. */
+/** The screen a path shows: Attention at home, Issues, an attempt page, Knowledge, Settings. */
 function Screen({ path, section, session }: { path: string; section: string; session: SessionInfo }) {
   if (section === '/issues') return <IssuesScreen path={path} />;
   if (section === '/') return <AttentionScreen />;
   if (section === '/settings') return <SettingsScreen session={session} />;
+  if (section === '/knowledge') return <KnowledgeScreen path={path} />;
   const attempt = /^\/attempts\/([^/]+)$/.exec(path);
   if (attempt) return <AttemptScreen key={attempt[1]} id={decodeURIComponent(attempt[1]!)} />;
   return <h1>{SECTIONS.find((entry) => entry.path === section)?.label ?? 'grimoire'}</h1>;
+}
+
+/** The Knowledge view a path belongs to, for the sidebar. */
+function knowledgeView(path: string): string | null {
+  const parts = path.split('/');
+  if (parts[1] !== 'knowledge') return null;
+  return parts[2] ? `/knowledge/${parts[2]}` : '/knowledge';
 }
 
 /** How often a full page checks whether the store became usable (besides every live update). */
@@ -166,9 +176,18 @@ function Shell({ session: who, instance: running }: { session: SessionInfo; inst
       <nav class="sidebar">
         <span class="brand">grimoire</span>
         {SECTIONS.map((entry) => (
-          <a key={entry.path} href={entry.path} class={section === entry.path ? 'current' : undefined}>
-            {entry.label}
-          </a>
+          <Fragment key={entry.path}>
+            <a href={entry.path} class={section === entry.path ? 'current' : undefined}>
+              {entry.label}
+            </a>
+            {entry.path === '/knowledge'
+              ? KNOWLEDGE_VIEWS.map(([href, label]) => (
+                  <a key={href} href={href} class={`sub ${knowledgeView(path) === href ? 'current' : ''}`}>
+                    {label}
+                  </a>
+                ))
+              : null}
+          </Fragment>
         ))}
       </nav>
       <main class={section === '/issues' ? 'content issues-content' : 'content'}>

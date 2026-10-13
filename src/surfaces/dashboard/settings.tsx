@@ -158,7 +158,44 @@ function showDisclosure(result: SettingsSetResult): void {
   });
 }
 
-function SettingRow({ name, setting, scope, onChanged }: { name: string; setting: ShownSetting; scope: 'store' | 'machine'; onChanged: () => void }) {
+/**
+ * The scope dialog a store setting's change goes through (spec §20 Settings):
+ * human-only, "committed on grimoire/tracker; every worktree now, every clone
+ * after sync", with what the change does. `apply` writes it.
+ */
+export function confirmStoreSetting(name: string, from: unknown, to: unknown, apply: () => Promise<unknown>, onCancel?: () => void): void {
+  openDialog({
+    title: `Change ${label(name)}?`,
+    humanOnly: true,
+    ok: 'Save store setting',
+    body: (
+      <>
+        <p>
+          <b>{shown(from)}</b> → <b>{shown(to)}</b>
+        </p>
+        <p class="scope">
+          Committed on <code>grimoire/tracker</code>; every worktree now, every clone after sync.
+        </p>
+        {consequences(name, from, to)}
+      </>
+    ),
+    run: async () => {
+      await apply();
+    },
+    ...(onCancel ? { onCancel } : {}),
+  });
+}
+
+/** Sets a store setting behind the scope dialog, then calls `done`. */
+export function changeStoreSetting(name: string, from: unknown, to: unknown, done: () => void): void {
+  confirmStoreSetting(name, from, to, async () => {
+    await write<SettingsSetResult>('settings_set', { key: name, value: to });
+    toast(`${label(name)}: ${shown(to)}. Committed on grimoire/tracker.`);
+    done();
+  });
+}
+
+export function SettingRow({ name, setting, scope, onChanged }: { name: string; setting: ShownSetting; scope: 'store' | 'machine'; onChanged: () => void }) {
   const [draft, setDraft] = useState<string | null>(null);
   const current = String(setting.value);
   const known = setting.description !== undefined;
@@ -186,26 +223,7 @@ function SettingRow({ name, setting, scope, onChanged }: { name: string; setting
       return;
     }
     setDraft(raw);
-    openDialog({
-      title: `Change ${label(name)}?`,
-      humanOnly: true,
-      ok: 'Save store setting',
-      body: (
-        <>
-          <p>
-            <b>{shown(setting.value)}</b> → <b>{shown(value)}</b>
-          </p>
-          <p class="scope">
-            Committed on <code>grimoire/tracker</code>; every worktree now, every clone after sync.
-          </p>
-          {consequences(name, setting.value, value)}
-        </>
-      ),
-      run: async () => {
-        await apply();
-      },
-      onCancel: () => setDraft(null),
-    });
+    confirmStoreSetting(name, setting.value, value, apply, () => setDraft(null));
   };
 
   const value = draft ?? current;
@@ -287,11 +305,12 @@ function MachineSettings({ settings, onChanged }: { settings: SettingsResult; on
 
 // ---------- the runner ----------
 
-function RunnerPanel({ runner }: { runner: RunnerInfo | null }) {
+export function RunnerPanel({ runner, title = 'Runner (this machine)' }: { runner: RunnerInfo | null; title?: string }) {
   if (!runner) return null;
+  const trigger = runner.trigger ?? null;
   return (
     <div class="panel pad small runner-panel">
-      <h2>Runner (this machine)</h2>
+      <h2>{title}</h2>
       {runner.enabled ? (
         <>
           <div>
@@ -307,6 +326,24 @@ function RunnerPanel({ runner }: { runner: RunnerInfo | null }) {
               Last run: {runner.last.result}
               {runner.last.kind ? ` (${runner.last.kind})` : ''} {ago(runner.last.at)}
               {runner.last.reason ? `: ${runner.last.reason}` : ''}
+            </div>
+          ) : null}
+          <div class="runner-preflight">
+            Preflight:{' '}
+            {trigger?.preflight ? (
+              <>
+                <span class="chip bad">refused</span> {trigger.message} · {ago(trigger.at)}
+              </>
+            ) : (
+              <>
+                <span class="chip ok">passed</span> when it was enabled{runner.auth_method ? ` (auth ${runner.auth_method})` : ''}
+              </>
+            )}
+          </div>
+          {trigger && !trigger.preflight ? (
+            <div class="runner-trigger mute">
+              Last check by start {ago(trigger.at)}: {trigger.outcome}
+              {trigger.outcome === 'refused' && trigger.message ? ` (${trigger.message})` : ''}
             </div>
           ) : null}
           {runner.auth_method ? (

@@ -334,6 +334,8 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
       started_at: new Date(startedAt).toISOString(),
     };
   };
+  // The runner trigger's last evaluation (spec §20 Knowledge, the runner card: the preflight result, refusals), for GET /api/runner.
+  let lastTrigger: { at: string; outcome: 'ran' | 'nothing due' | 'refused'; code?: string; message?: string; preflight?: boolean } | null = null;
   const server = createDashboardServer({
     core,
     context,
@@ -348,6 +350,7 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
       const kind = (status.value as { kind?: unknown }).kind;
       return {
         ...(status.value as Record<string, unknown>),
+        trigger: lastTrigger,
         lines: status.lines,
         warnings: kind === 'claude' || kind === 'codex' ? enableWarnings(kind) : [],
         commands: { enable: ['grimoire runner enable claude', 'grimoire runner enable codex'], disable: 'grimoire runner disable' },
@@ -421,7 +424,19 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
     root,
     tips: async () => (await tracker).tips(),
     configured: async () => (await readRunnerConfig(store)) !== null,
-    run: () => runChores({ root, core, env: io.env, due: true }),
+    run: async () => {
+      const at = new Date().toISOString();
+      try {
+        const report = await runChores({ root, core, env: io.env, due: true });
+        lastTrigger = { at, outcome: report.runs.length > 0 ? 'ran' : 'nothing due', message: report.summary };
+        return report;
+      } catch (error) {
+        const body = errorBodyOf(error, () => {});
+        const fields = (body.details as { fields?: Record<string, unknown> }).fields;
+        lastTrigger = { at, outcome: 'refused', code: body.code, message: body.message, preflight: fields?.preflight === 'refused' };
+        throw error;
+      }
+    },
     log: say,
   });
   let syncing: Promise<void> | null = null;

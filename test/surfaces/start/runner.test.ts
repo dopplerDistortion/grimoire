@@ -2,7 +2,8 @@
 // status): the real `start`, with a stand-in `claude` enabled as this
 // machine's runner. A trace write by another process makes `start` evaluate
 // due-ness and spawn the runner within the caps: the 6th run of the day
-// spawns, the 7th doesn't. `/api/runner` shows the status and the commands.
+// spawns, the 7th doesn't. `/api/runner` shows the status, the trigger's last
+// evaluation and the commands.
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { MachineLocalStore } from '../../../src/machine-local';
@@ -95,6 +96,8 @@ describe('start drives the runner', () => {
       });
       expect((before.warnings as string[]).join('\n')).toContain('policy gray zone');
       expect(after).toMatchObject({ runs_today: 6, next_run_at: expect.any(String), last: { result: 'compiled', kind: 'wiki-maintainer' } });
+      // The trigger's last evaluation, for the Knowledge runner card: the cap refused it (no preflight failure).
+      expect(after.trigger).toMatchObject({ outcome: 'refused', code: 'NOT_DUE', preflight: false });
       expect(start.stderr()).toMatch(/grimoire chores: compile done, 1 trace/);
     } finally {
       await stopStart(start, commonDir, env);
