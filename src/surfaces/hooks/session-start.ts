@@ -88,7 +88,7 @@ function lastPriorityLine(strays: string | null, refreshed: string | null): stri
  * not-joined notice never reaches this code: the bootstrap and the launcher
  * print it when there is no launcher, copy or join record.
  */
-async function compose(_payload: unknown, ctx: SessionStartContext): Promise<SessionStartMessage> {
+async function compose(payload: unknown, ctx: SessionStartContext): Promise<SessionStartMessage> {
   const started = Date.now();
   const [{ findHostRoot }, { locateMachineLocalStore }, { refreshedPointerFiles, refreshNotice }, { sessionStartFastPath }, { listStrayEdits }, { worktreeKey }] =
     await Promise.all([
@@ -106,6 +106,7 @@ async function compose(_payload: unknown, ctx: SessionStartContext): Promise<Ses
     hookFailed(error);
     return null;
   });
+  await markCodexSession(store, payload).catch(() => {});
   const changed = fast?.changed === true;
   const refreshed = await refreshedPointerFiles(store, root).catch(() => null);
   const own = await worktreeKey(root);
@@ -113,6 +114,20 @@ async function compose(_payload: unknown, ctx: SessionStartContext): Promise<Ses
   const edits = await Promise.all(strays.map(async (edit) => ({ skill: edit.skill, where: (await worktreeKey(edit.worktree)) === own ? null : edit.worktree })));
   const line = lastPriorityLine(strayEditsLine(edits), refreshed ? refreshNotice(refreshed.paths.length, null) : null);
   return { ...(line ? { line } : {}), ...(changed ? { reloadSkills: true } : {}) };
+}
+
+/**
+ * A Codex session's mark (spec §21, Codex re-approval; §6 revealed transcript
+ * roots): the transcript its payload reveals, keyed by its session id. Codex
+ * runs this hook only once it is approved, so a Codex-spawned server that finds
+ * no mark for its session tells the session to approve it in `/hooks`.
+ */
+async function markCodexSession(store: import('../../machine-local').MachineLocalStore, payload: unknown): Promise<void> {
+  if (sessionStartClient(payload) !== 'codex') return;
+  const { session_id, transcript_path } = payload as Record<string, unknown>;
+  if (typeof session_id !== 'string' || session_id === '' || typeof transcript_path !== 'string' || transcript_path === '') return;
+  const { recordRevealedRoot } = await import('../../capture/transcript-roots');
+  await recordRevealedRoot(store, { client: 'codex', session: session_id, transcriptPath: transcript_path });
 }
 
 /** The verb's body: the payload in, what to print out. */

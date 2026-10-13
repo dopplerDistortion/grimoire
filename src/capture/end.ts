@@ -53,6 +53,8 @@ export const CUT_BUDGET_MS = 10_000;
 /** How long the calling context waits for its ending call to reach its transcript (spec §14: 2 s). */
 export const FLUSH_WAIT_MS = 2_000;
 const FLUSH_POLL_MS = 100;
+/** What a facts scan the deadline overtook gives, as against one that failed. */
+const OVERTAKEN = Symbol('overtaken');
 
 const READER_VERSION = { 'claude-code': CLAUDE_CODE_READER_VERSION, codex: CODEX_READER_VERSION } as const;
 
@@ -446,7 +448,7 @@ function launchedSubagents(steps: readonly Step[]): string[] {
 class ContextCut {
   /** The call ids its window holds, once cut: no later excerpt of the trace may hold them. */
   callIds: readonly string[] | null = null;
-  /** The record of its last finished cut, for when the deadline overtakes the next one. */
+  /** The record of its last finished cut (or of one that replaces it, its facts scan cut short), for when the deadline overtakes the next one. */
   latest: SessionRecord | null = null;
   /** The transcript `latest` was cut from, as it stood before the read. */
   stamp: TranscriptStamp | null = null;
@@ -494,14 +496,20 @@ class ContextCut {
   }
 
   async once(): Promise<SessionRecord> {
-    const { record, callIds, stamp } = await this.cutOnce();
-    this.latest = record;
-    this.callIds = callIds;
-    this.stamp = stamp ?? null;
+    const { record, callIds, stamp, overtaken } = await this.cutOnce();
+    // A cut whose facts scan the deadline overtook stood only if it replaces the one before (cutOnce kept it then).
+    if (overtaken && this.latest !== null) return this.latest;
+    this.keep(record, callIds, stamp);
     return record;
   }
 
-  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null; stamp?: TranscriptStamp }> {
+  private keep(record: SessionRecord, callIds: readonly string[] | null, stamp: TranscriptStamp | undefined): void {
+    this.latest = record;
+    this.callIds = callIds;
+    this.stamp = stamp ?? null;
+  }
+
+  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null; stamp?: TranscriptStamp; overtaken?: true }> {
     const { input, target } = this;
     const family = clientFamily(target.client);
     if (input.mode === 'none') return { record: this.factsOnly('off'), callIds: null };
@@ -509,8 +517,17 @@ class ContextCut {
     try {
       const { cut, roots, source, subagents } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
       if (isChoresContext(cut)) this.chores = true;
-      const facts = cut.window === null || this.chores ? null : await beforeDeadline(this.scanFacts(cut, subagents), this.deadline, null);
-      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}) };
+      // Should the deadline overtake the facts scan, this cut stands in place of the one before it only if it replaces it
+      // (spec §14: it succeeded, and it reaches strictly further), facts partial. Kept before the scan, so whichever
+      // deadline timer fires first, the caller's or the scan's, finds it.
+      if (this.latest !== null && !this.chores && cut.window !== null) {
+        const unscanned = this.fromCut(cut, source, roots, null);
+        if (replaces(unscanned, this.latest)) this.keep(unscanned, cut.callIds, cut.stamp);
+      }
+      const scanned = cut.window === null || this.chores ? null : await beforeDeadline(this.scanFacts(cut, subagents).catch(() => null), this.deadline, OVERTAKEN);
+      const facts = scanned === OVERTAKEN ? null : scanned;
+      const overtaken = scanned === OVERTAKEN ? { overtaken: true as const } : {};
+      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}), ...overtaken };
     } catch {
       // A reader that throws is one grimoire can't trust on this transcript.
       const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };

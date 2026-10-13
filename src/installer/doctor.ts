@@ -144,7 +144,7 @@ async function refreshPointers(input: DoctorInput, fix: FixReport, leaseWaitMs: 
   const upgradeGate = async (): Promise<boolean> => {
     const upgrade = await upgradeInProgress(store, root).catch(() => null);
     if (!upgrade || upgrade.to === version) return false;
-    fix.notices.push(upgradeSkipNotice(root, upgrade.to));
+    fix.notices.push(upgradeSkipNotice(root, upgrade));
     skip(`an upgrade to ${upgrade.to} is in progress`);
     return true;
   };
@@ -196,6 +196,12 @@ async function applyFixes(input: DoctorInput, findings: readonly Finding[], leas
     else fix.skipped.push({ kind: finding.kind, subject: finding.subject!, why: 'it is held again' });
   }
   if (fixable('content-drift').length > 0) await refreshPointers(input, fix, leaseWaitMs);
+  // An upgrade to another pin is moving this worktree: say so even with nothing of the worktree's to repair (spec §21 step 2).
+  const upgrade = await upgradeInProgress(input.store, input.root).catch(() => null);
+  if (upgrade && upgrade.to !== input.version) {
+    const notice = upgradeSkipNotice(input.root, upgrade);
+    if (!fix.notices.includes(notice)) fix.notices.push(notice);
+  }
   return fix;
 }
 

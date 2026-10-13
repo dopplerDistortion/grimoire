@@ -41,6 +41,11 @@ export interface SweepOptions {
   readonly scanner?: SecretScanner;
   /** Whether the commit asks for an automatic sync (default true). */
   readonly sync?: boolean;
+  /**
+   * How long a context must have been idle to be cut (default IDLE_MS). `leave`
+   * passes 0: every bound context still uncut is cut before the clone goes.
+   */
+  readonly idleMs?: number;
   /** Called after each context's cut (a test's pause point). */
   readonly afterCut?: () => Promise<void> | void;
 }
@@ -116,6 +121,7 @@ export async function sweepContexts(
   const entries = await store.coordination.list<SeenHereRow>(SEEN_HERE);
   if (entries.length === 0) return report;
   const now = (options.clock ?? (() => new Date()))();
+  const idleMs = options.idleMs ?? IDLE_MS;
   const view = await tracker.read();
 
   // Rows are hints only: those of sealed attempts have nothing left to cut.
@@ -128,7 +134,7 @@ export async function sweepContexts(
       continue;
     }
     if (!attempt) continue;
-    if (now.getTime() - Date.parse(row.last_at) < IDLE_MS && !archived(row)) continue;
+    if (now.getTime() - Date.parse(row.last_at) < idleMs && !archived(row)) continue;
     const group = open.get(row.handle) ?? { attempt, rows: [] };
     group.rows.push(row);
     open.set(row.handle, group);
@@ -199,7 +205,7 @@ export async function sweepContexts(
           continue;
         }
         // Still active in the last 30 min (its last step), unless the client archived it: a later sweep.
-        if (!archived(row) && now.getTime() - Date.parse(record.reach!.at) < IDLE_MS) continue;
+        if (!archived(row) && now.getTime() - Date.parse(record.reach!.at) < idleMs) continue;
         fresh.push({ handle: attempt.id, key, record });
       }
       // A picked context with no capture (purged, a chores context, no binding of its own): behind the rest next time.

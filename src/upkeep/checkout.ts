@@ -61,7 +61,13 @@ export async function upgradeInProgress(store: MachineLocalStore, worktree: stri
   return null;
 }
 
-/** The line every process at another pin prints for a worktree an upgrade is moving (spec §21 step 2). */
-export function upgradeSkipNotice(worktree: string, to: string): string {
-  return `grimoire skipped ${worktree}: an upgrade to ${to} is in progress there; finish with \`${joinCommand(to)} --upgrade\`, or discard with \`git restore\``;
+/**
+ * The line every process at another pin prints for a worktree an upgrade is
+ * moving (spec §21 step 2). The record outlives `git restore`, so discarding
+ * also names the left pin's own `init --upgrade`: it rewrites that pin's files
+ * and clears the record.
+ */
+export function upgradeSkipNotice(worktree: string, upgrade: { readonly to: string; readonly from?: string }): string {
+  const discard = typeof upgrade.from === 'string' ? `discard with \`git restore\`, then \`${joinCommand(upgrade.from)} --upgrade\`` : 'discard with `git restore`';
+  return `grimoire skipped ${worktree}: an upgrade to ${upgrade.to} is in progress there; finish with \`${joinCommand(upgrade.to)} --upgrade\`, or ${discard}`;
 }

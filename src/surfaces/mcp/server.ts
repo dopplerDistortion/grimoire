@@ -59,6 +59,8 @@ export function spawnEnvFacts(env: NodeJS.ProcessEnv): Pick<McpDeps, 'spawnEnvId
 }
 
 export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
+  /** Codex sessions this process already told about the hook's approval (once each). */
+  const announced = new Set<string>();
   return ({ era }) => {
     const server = new Server(
       { name: 'grimoire', version: VERSION },
@@ -136,6 +138,8 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
         nonce: deps.nonce,
       };
       notices.push(...noticesFor(root, deps.startDir, config?.pin ?? null));
+      const unapproved = await codexHookNotice(root, client, ctx.mcp?.meta ?? null, announced).catch(() => null);
+      if (unapproved) notices.push(unapproved);
       const outcome = await core.call(name, input, ctx);
       return outcome.ok
         ? toolResult(outcome.result as Record<string, unknown>, notices)
@@ -156,6 +160,34 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
 
     return server;
   };
+}
+
+/** What a Codex session hears when grimoire's SessionStart hook didn't run for it (spec §21, Codex re-approval). */
+export const CODEX_HOOK_NOTICE =
+  'Codex will skip grimoire’s hook until you approve it in `/hooks`, once per clone of this repo; Codex runs the main checkout’s .codex/ in every linked worktree';
+
+/**
+ * Once per Codex session: when its SessionStart hook left no mark (the
+ * transcript root it reveals, keyed by the session id `_meta` carries),
+ * Codex skipped the hook, so the session is told to approve it. Null for
+ * every other client and call.
+ */
+async function codexHookNotice(
+  root: string,
+  client: ClientInfo | null,
+  meta: Readonly<Record<string, unknown>> | null,
+  announced: Set<string>,
+): Promise<string | null> {
+  const turn = meta?.['x-codex-turn-metadata.session_id'];
+  const session = typeof turn === 'string' ? turn : client?.name.startsWith('codex') && typeof meta?.sessionId === 'string' ? meta.sessionId : null;
+  if (session === null || announced.has(session)) return null;
+  // Taken before any await: two calls of one session at once still announce once.
+  announced.add(session);
+  const [{ locateMachineLocalStore }, { revealedRoot }] = await Promise.all([import('../../machine-local'), import('../../capture/transcript-roots')]);
+  const store = await locateMachineLocalStore(root);
+  if (!store) return null;
+  const mark = await revealedRoot(store, session).catch(() => undefined);
+  return mark?.client === 'codex' ? null : CODEX_HOOK_NOTICE;
 }
 
 /**

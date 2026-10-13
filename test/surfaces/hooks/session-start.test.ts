@@ -160,6 +160,24 @@ describe('the session line', () => {
   });
 });
 
+describe('the Codex session mark', () => {
+  gitTest('a Codex session start records the transcript its payload reveals, by session id, so its server knows the hook ran; a Claude Code one leaves no Codex mark', async ({ world }) => {
+    const root = world.a.dir;
+    await installed(root);
+    const { MachineLocalStore } = await import('../../../src/machine-local');
+    const { revealedRoot } = await import('../../../src/capture/transcript-roots');
+    const store = new MachineLocalStore(path.join(root, '.git'));
+    const codex = readFixtureJson<{ session_id: string; transcript_path: string }>(CODEX[0]!);
+    const claude = readFixtureJson<{ session_id: string }>(CLAUDE[0]!);
+
+    expect(await sessionStart(readFixture(CODEX[0]!), { startDir: root })).toBe('');
+    expect(await sessionStart(readFixture(CLAUDE[0]!), { startDir: root })).toBe('');
+
+    expect(await revealedRoot(store, codex.session_id)).toMatchObject({ client: 'codex', session: codex.session_id, transcript_path: codex.transcript_path });
+    expect(await revealedRoot(store, claude.session_id)).toBeUndefined();
+  });
+});
+
 describe('the skill fast path', () => {
   const folders = ['.grimoire/skills/release-notes', '.claude/skills/grimoire-release-notes', '.agents/skills/grimoire-release-notes'];
   const exists = async (file: string) => (await stat(file).catch(() => null)) !== null;
