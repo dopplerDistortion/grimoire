@@ -6,6 +6,8 @@
 // through a pass-through spy on node:child_process, the push held at sync's
 // network seam.
 import * as childProcess from 'node:child_process';
+import { readdir } from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect, vi } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import { runNetworkGit } from '../../src/tracker/remote';
@@ -125,5 +127,60 @@ describe('a purge while a sync pushes', () => {
     const pushed = (await remoteTracker(world.a))!;
     expect(await world.a.git(['rev-list', '-1', pushed, '--', attemptPath(id, attempt)])).toBe('');
     expect(pushed).toBe(await world.a.git(['rev-parse', TRACKER_REF]));
+  });
+});
+
+describe('a purge after a push whose outcome sync never learned', () => {
+  coreTest('a push that timed out after it landed still counts as pushed: the purge never says “never pushed”, nor rewrites what the remote holds', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const { id, attempt } = await endedAttempt(core, ctx);
+    // A single-branch clone: git's push leaves the remote-tracking tracker alone, so only sync could move it.
+    await world.a.git(['config', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main']);
+
+    const synced = await withTracker(world.a, (tracker) =>
+      tracker.sync({
+        author: { name: 'Alice', email: 'alice@example.com' },
+        actor: { kind: 'human', nonce: 'n' },
+        timeoutMs: 30_000,
+        // The push lands, but its git is killed at the timeout before sync hears so.
+        network: async (cwd, args, options) => {
+          const run = await runNetworkGit(cwd, args, options);
+          return args[0] === 'push' ? { ...run, code: null, timedOut: true } : run;
+        },
+      }),
+    );
+    expect(synced).toMatchObject({ state: 'pending', reason: 'failed' });
+    const pushed = (await remoteTracker(world.a))!;
+    expect(await world.a.git(['rev-list', '-1', pushed, '--', attemptPath(id, attempt)])).not.toBe('');
+
+    const purged = await core.call('purge_trace', { attempt, reason: 'secret' }, terminal(ctx));
+
+    expect(purged).toMatchObject({ ok: true, result: { attempt, changed: true, history: { pushed: true, unpushed_rewritten: 0 } } });
+    expect((await world.a.gitResult(['merge-base', '--is-ancestor', pushed, TRACKER_REF])).code).toBe(0);
+  });
+
+  coreTest('the next sync, which reads what the remote holds, settles it', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    await endedAttempt(core, ctx);
+    await world.a.git(['config', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main']);
+    const records = path.join(world.a.dir, '.git', 'grimoire', 'coordination', 'tracker-push');
+    const sync = (timedOut: boolean) =>
+      withTracker(world.a, (tracker) =>
+        tracker.sync({
+          author: { name: 'Alice', email: 'alice@example.com' },
+          actor: { kind: 'human', nonce: 'n' },
+          timeoutMs: 30_000,
+          network: async (cwd, args, options) => {
+            const run = await runNetworkGit(cwd, args, options);
+            return timedOut && args[0] === 'push' ? { ...run, code: null, timedOut: true } : run;
+          },
+        }),
+      );
+    await sync(true);
+    expect((await readdir(records)).filter((name) => name.endsWith('.json'))).toHaveLength(1);
+
+    expect(await sync(false)).toMatchObject({ state: 'in-sync' });
+
+    expect((await readdir(records)).filter((name) => name.endsWith('.json'))).toEqual([]);
   });
 });

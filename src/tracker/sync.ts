@@ -114,13 +114,24 @@ export interface SyncHost {
   fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }>;
   /**
    * The local tip to push, recorded as a push under way until `done` (a purge
-   * meanwhile counts it as pushed: it is landing). With `policy`, when the
+   * meanwhile counts it as pushed: it is landing); `unsettled` keeps the
+   * record past the push, owned by no process, when its outcome is unknown. With `policy`, when the
    * local tip's merged mode forbids text, the local commits `pushed` (the
    * remote's tip, null: none) lacks are rewritten first, so that no session
    * record they carry has text the remote doesn't hold already. The record
    * lapses after `ttlMs`. Null when there is no local tracker.
    */
-  preparePush(pushed: string | null, policy: TextPolicy | undefined, ttlMs: number): Promise<{ readonly tip: string; done(): Promise<void> } | null>;
+  preparePush(
+    pushed: string | null,
+    policy: TextPolicy | undefined,
+    ttlMs: number,
+  ): Promise<{ readonly tip: string; done(): Promise<void>; unsettled(): Promise<void> } | null>;
+  /**
+   * Lets go of the records of pushes whose outcome was never learned (see
+   * `unsettled`) that ended before `before` (epoch ms): the remote-tracking
+   * ref now holds what the remote held after that.
+   */
+  settlePushes(before: number): Promise<void>;
 }
 
 export interface TrackerRefs {
@@ -306,6 +317,7 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
   let raced = false;
   for (let round = 1; ; round++) {
     // 1. What the remote holds: its tracker tip, and whether it has a default branch.
+    const listedAt = Date.now();
     const listing = await net(['ls-remote', remote, 'HEAD', TRACKER_BRANCH]);
     if (listing.code !== 0 || listing.timedOut) return failed('ls-remote', listing);
     const { head, tracker } = parseListing(listing.stdout);
@@ -334,6 +346,9 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
       if (fetch.code !== 0 || fetch.timedOut) return failed('fetch', fetch);
       fetched = true;
     }
+    // The remote-tracking ref holds what the remote held after the listing began (or the remote holds no tracker):
+    // a push that ended unsettled before that and landed is in it now.
+    await host.settlePushes(listedAt).catch(() => {});
 
     // 3. A partial clone: backfill the objects the tips need.
     if (config.partial) {
@@ -413,25 +428,36 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
       return outcome({ state: 'in-sync' });
     }
     local = claim.tip;
+    // The push's record goes only once its outcome is known: the remote-tracking ref holds the commit, or the remote
+    // rejected it. Unknown (a timeout, an unparsed failure), it stays unsettled: a purge still counts it as pushed.
     let push: NetworkGitRun & { limitMs: number };
     try {
       push = await net(['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-recurse-submodules', remote, `${local}:${TRACKER_BRANCH}`]);
-      if (push.code === 0 && !push.timedOut) {
-        // git updates the remote-tracking ref only when a fetch refspec maps the branch. A
-        // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile. It is
-        // only a record of what the remote holds, which the next fetch sets right, so a git
-        // stuck on it takes nothing from the push, which landed. Only then does the push's
-        // record go: a purge in between still sees the commit as pushed.
-        await host.updateRef(tracking, local, tracked).catch(() => {});
-        remoteTip = local;
-        return outcome({ state: 'pushed' });
-      }
-    } finally {
-      await claim.done();
+    } catch (error) {
+      await claim.unsettled();
+      throw error;
     }
-    if (push.timedOut) return failed('push', push);
-    const pushed = pushedRef(push.stdout.toString('utf8'), TRACKER_BRANCH);
-    if (pushed?.flag !== '!') return failed('push', push);
+    if (push.code === 0 && !push.timedOut) {
+      // git updates the remote-tracking ref only when a fetch refspec maps the branch. A
+      // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile. It is
+      // only a record of what the remote holds, which the next fetch sets right, so a git
+      // stuck on it takes nothing from the push, which landed.
+      await host.updateRef(tracking, local, tracked).catch(() => {});
+      const held = await host
+        .trackerRefs()
+        .then((now) => now.remotes.get(remote) ?? null)
+        .then((now) => now !== null && isAncestor(git, local!, now))
+        .catch(() => false);
+      await (held ? claim.done() : claim.unsettled());
+      remoteTip = local;
+      return outcome({ state: 'pushed' });
+    }
+    const pushed = push.timedOut ? undefined : pushedRef(push.stdout.toString('utf8'), TRACKER_BRANCH);
+    if (pushed?.flag !== '!') {
+      await claim.unsettled();
+      return failed('push', push);
+    }
+    await claim.done();
     const race = lostRace(pushed, push.stderr);
     const reason = /\(([^)]*)\)\s*$/.exec(pushed.summary)?.[1] ?? pushed.summary;
     const said = remoteLines(push.stderr);

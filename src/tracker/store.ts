@@ -12,7 +12,7 @@ import { attemptDir, ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FIL
 import { FairnessLock, sleep, Turnstile } from './locks';
 import { countLateDrops } from './capture-stats';
 import { foldCommits, type FoldReport } from './fold';
-import { PushesUnderWay } from './pushes';
+import { PushesUnderWay, type PushRecordHandle } from './pushes';
 import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
 import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
 import { serializeSettings, settingLine } from './settings';
@@ -180,10 +180,9 @@ export interface UnpushedDrop {
   readonly unsure?: true;
 }
 
-/** A push under way: the tip it sends, and `done`, which lets go of its record. */
-interface PushClaim {
+/** A push under way: the tip it sends, and its record (see PushRecordHandle). */
+interface PushClaim extends PushRecordHandle {
   readonly tip: string;
-  done(): Promise<void>;
 }
 
 /** Whether pushed history keeps a purge's content (see UnpushedDrop). */
@@ -460,6 +459,7 @@ class GitTrackerStore implements TrackerStore {
         isShallow: async () => this.isShallow(await this.resolveTips()),
         fold: (foldSpec) => this.fold(foldSpec),
         preparePush: (pushed, policy, ttlMs) => this.preparePush(pushed, policy, ttlMs),
+        settlePushes: (before) => this.pushes.settle(before),
       },
       spec,
     );
@@ -544,7 +544,8 @@ class GitTrackerStore implements TrackerStore {
         return { excluded: [...(pushed ? [pushed] : []), ...(await this.pushesUnderWay())], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
       },
       async (tip) => {
-        claim = { tip, done: await this.pushes.begin(tip, ttlMs) };
+        const record = await this.pushes.begin(tip, ttlMs);
+        claim = { tip, done: () => record.done(), unsettled: () => record.unsettled() };
       },
     );
     return claim;
