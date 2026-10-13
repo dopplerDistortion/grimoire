@@ -60,10 +60,38 @@ describe('skill changes at the CLI', () => {
     expect(await grimoire.core.call('skill_read', { name: 'release-notes' }, personAtShell(a))).toMatchObject({ ok: true, result: { version: v1.version } });
   });
 
+  cliTest('at a terminal, skill delete and skill eject show the version they act on (eject its text) before the person types the name, and commit only against it', async ({
+    grimoire,
+    a,
+  }) => {
+    const human = atTerminal(personAtShell(a));
+    const notes = (await coreResult(grimoire.core, 'skill_edit', { name: 'release-notes', text: NOTES, base: null }, human)) as { version: string };
+    const ports = skillText('free-ports', 'Pick free ports in tests. Use when a test binds a port.', '# Free ports\n\nBind to port 0.\n');
+    const free = (await coreResult(grimoire.core, 'skill_edit', { name: 'free-ports', text: ports, base: null }, human)) as { version: string };
+
+    const deleted = await cliAtTerminal(bin, ['skill', 'delete', 'release-notes'], {
+      cwd: a.dir,
+      answers: [{ when: /Type release-notes to confirm/, type: 'release-notes' }],
+    });
+    expect(deleted.code, deleted.screen).toBe(0);
+    expect(deleted.screen.indexOf(`release-notes at ${notes.version.slice(0, 12)}`)).toBeGreaterThan(-1);
+    expect(deleted.screen.indexOf(`release-notes at ${notes.version.slice(0, 12)}`)).toBeLessThan(deleted.screen.indexOf('Type release-notes to confirm'));
+    expect(lastJsonOnScreen(deleted.screen)).toMatchObject({ name: 'release-notes', from: notes.version });
+
+    const ejected = await cliAtTerminal(bin, ['skill', 'eject', 'free-ports'], {
+      cwd: a.dir,
+      answers: [{ when: /Type free-ports to confirm/, type: 'free-ports' }],
+    });
+    expect(ejected.code, ejected.screen).toBe(0);
+    expect(ejected.screen).toContain(`free-ports at ${free.version.slice(0, 12)}`);
+    expect(ejected.screen.indexOf('Bind to port 0.')).toBeLessThan(ejected.screen.indexOf('Type free-ports to confirm'));
+    expect(lastJsonOnScreen(ejected.screen)).toMatchObject({ name: 'free-ports', version: free.version });
+  });
+
   cliTest('at a terminal, restoring a deleted skill says it lifts the name block; a restore that would pass the cap is refused before anything is asked', async ({ grimoire, a }) => {
     const human = atTerminal(personAtShell(a));
     const v1 = (await coreResult(grimoire.core, 'skill_edit', { name: 'release-notes', text: NOTES, base: null }, human)) as { version: string };
-    await coreResult(grimoire.core, 'skill_delete', { name: 'release-notes' }, human);
+    await coreResult(grimoire.core, 'skill_delete', { name: 'release-notes', base: v1.version }, human);
     const ports = skillText('free-ports', 'Pick free ports in tests. Use when a test binds a port.', '# Free ports\n\nBind to port 0.\n');
     await coreResult(grimoire.core, 'skill_edit', { name: 'free-ports', text: ports, base: null }, human);
     await coreResult(grimoire.core, 'settings_set', { key: 'skills.max_active', value: 1 }, human);

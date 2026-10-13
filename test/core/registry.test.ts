@@ -110,7 +110,9 @@ describe('the op registry', () => {
       for (const name of ['skill_restore', 'skill_delete', 'skill_eject', 'skill_acknowledge', 'skill_unblock']) {
         expect(byName[name], name).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
       }
-      expect(byName.skill_restore).toMatchObject({ inputSchema: { required: ['name', 'version'] } });
+      // Each commits only against the version the person saw.
+      expect(byName.skill_restore).toMatchObject({ inputSchema: { required: ['name', 'version', 'base'] } });
+      for (const name of ['skill_delete', 'skill_eject']) expect(byName[name]?.inputSchema.required, name).toContain('base');
       expect(byName.activity).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
       expect(byName.create).toMatchObject({
         kind: 'write',

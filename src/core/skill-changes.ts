@@ -50,9 +50,7 @@ import { scanned, servable } from './skills';
 const BASIS = 'human review';
 
 const nameInput = s.string({ ...oneLine, description: 'the evolved skill’s name' });
-const baseInput = s.optional(
-  s.nullable(s.string(oneLine), 'the version current when the person looked (null: none); the change commits only while it still is'),
-);
+const baseInput = s.nullable(s.string(oneLine), 'the version current when the person looked (null: none); the change commits only while it still is');
 
 /** One change of a skill's ledger, as a restore's confirmation lists it. */
 export interface PlannedChange {
@@ -103,9 +101,9 @@ function skillIn(book: SkillBook, name: string): SkillState {
   return state;
 }
 
-/** BASE_MOVED unless `base` (when given) is the version current now. */
-function checkBase(name: string, base: string | null | undefined, current: string | null): void {
-  if (base === undefined || base === current) return;
+/** BASE_MOVED unless `base` is the version current now. */
+function checkBase(name: string, base: string | null, current: string | null): void {
+  if (base === current) return;
   throw new GrimoireError('BASE_MOVED', `${name} changed since you looked: it is now at ${current ?? 'no version'}; look again before changing it`, {
     name,
     base,

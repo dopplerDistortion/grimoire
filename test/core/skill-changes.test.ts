@@ -151,11 +151,30 @@ describe('delete and unblock', () => {
     expect(ok(await next.call('skill_show', { name: 'release-notes' }, cli)).skills[0]).toMatchObject({ status: 'active', blocked: false });
   });
 
+  test('restore, delete and eject each commit only against the version the person saw: without a base they are refused', async ({ world, grimoire }) => {
+    const core = grimoire.makeCore();
+    const cli = human(grimoire.ctx);
+    const v1 = ok(await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, cli)).version;
+    const v2 = ok(await core.call('skill_edit', { name: 'release-notes', text: `${NOTES}${SEEDS}`, base: v1 }, cli)).version;
+    const tip = await trackerTip(world.a);
+    for (const [op, input] of [
+      ['skill_restore', { name: 'release-notes', version: v1 }],
+      ['skill_delete', { name: 'release-notes' }],
+      ['skill_eject', { name: 'release-notes' }],
+    ] as const) {
+      expect(await core.call(op, input, cli), op).toMatchObject({ ok: false, error: { code: 'INVALID', details: { fields: { base: expect.any(String) } } } });
+      // A base that is no longer current: BASE_MOVED, nothing written.
+      expect(await core.call(op, { ...input, base: v1 }, cli), op).toMatchObject({ ok: false, error: { code: 'BASE_MOVED', details: { current: v2 } } });
+    }
+    expect(await trackerTip(world.a)).toBe(tip);
+    await core.close();
+  });
+
   test('a proposal naming a deleted skill is invalid (blocked_name) until a human unblocks the name', async ({ world, grimoire }) => {
     const p = await proposer(grimoire, world);
     const cli = human(grimoire.ctx);
-    ok(await p.core.call('skill_edit', { name: 'free-ports', text: FREE_PORTS, base: null }, cli));
-    ok(await p.core.call('skill_delete', { name: 'free-ports' }, cli));
+    const ports = ok(await p.core.call('skill_edit', { name: 'free-ports', text: FREE_PORTS, base: null }, cli));
+    ok(await p.core.call('skill_delete', { name: 'free-ports', base: ports.version }, cli));
     expect(await p.core.call('skill_unblock', { name: SKILL }, cli)).toMatchObject({ ok: false, error: { code: 'INVALID' } });
 
     const body = '# Ports in tests\n\nAsk the operating system for a port: listen on port 0, then read the bound port back.\n';
@@ -180,19 +199,19 @@ describe('eject', () => {
     const core = grimoire.makeCore();
     const cli = human(grimoire.ctx);
     const notes = ok(await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, cli));
-    ok(await core.call('skill_edit', { name: 'free-ports', text: FREE_PORTS, base: null }, cli));
+    const ports = ok(await core.call('skill_edit', { name: 'free-ports', text: FREE_PORTS, base: null }, cli));
     await pinAndCommit(world.a);
     const b = await world.a.addWorktree('b');
     // A hand-written folder of free-ports already sits in one client folder of b.
     await writeInto(b.dir, '.agents/skills/free-ports/SKILL.md', 'hand-written\n');
 
     const tip = await trackerTip(world.a);
-    expect(await core.call('skill_eject', { name: 'free-ports', worktree: b.dir }, cli)).toMatchObject({
+    expect(await core.call('skill_eject', { name: 'free-ports', worktree: b.dir, base: ports.version }, cli)).toMatchObject({
       ok: false,
       error: { code: 'INVALID', details: { fields: { name: expect.stringContaining('.agents/skills/free-ports') } } },
     });
     expect(await existsIn(b, '.claude/skills/free-ports')).toBe(false);
-    expect(await core.call('skill_eject', { name: 'release-notes', worktree: path.dirname(world.a.dir) }, cli)).toMatchObject({
+    expect(await core.call('skill_eject', { name: 'release-notes', worktree: path.dirname(world.a.dir), base: notes.version }, cli)).toMatchObject({
       ok: false,
       error: { code: 'INVALID', details: { fields: { worktree: expect.any(String) } } },
     });
@@ -221,7 +240,7 @@ describe('eject', () => {
     expect(ok(await next.call('skill_show', { name: 'release-notes' }, cli)).skills[0]).toMatchObject({ status: 'ejected', blocked: true, served: null });
     expect(ok(await next.call('skill_list', {}, grimoire.ctx)).skills.map((skill) => skill.name)).toEqual(['free-ports']);
     // A hand-written skill from now on: grimoire won't restore over it.
-    expect(await next.call('skill_restore', { name: 'release-notes', version: notes.version }, cli)).toMatchObject({ ok: false, error: { code: 'INVALID' } });
+    expect(await next.call('skill_restore', { name: 'release-notes', version: notes.version, base: null }, cli)).toMatchObject({ ok: false, error: { code: 'INVALID' } });
   });
 });
 
@@ -357,9 +376,9 @@ describe('acknowledge', () => {
     const tip = await trackerTip(world.a);
     const marked: CallContext = { ...human(ctx), evidence: { agentMarkers: ['CLAUDECODE'] } };
     const calls: [string, Record<string, unknown>][] = [
-      ['skill_restore', { name: 'release-notes', version: v1 }],
-      ['skill_delete', { name: 'release-notes' }],
-      ['skill_eject', { name: 'release-notes' }],
+      ['skill_restore', { name: 'release-notes', version: v1, base: v1 }],
+      ['skill_delete', { name: 'release-notes', base: v1 }],
+      ['skill_eject', { name: 'release-notes', base: v1 }],
       ['skill_acknowledge', { name: 'release-notes', version: v1 }],
       ['skill_unblock', { name: 'release-notes' }],
     ];

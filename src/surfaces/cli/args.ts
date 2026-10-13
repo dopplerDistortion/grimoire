@@ -41,6 +41,10 @@ const POSITIONALS: Readonly<Record<string, readonly string[]>> = {
   skill_discard: ['stray'],
   // One issue's writes; none: every write.
   activity: ['issue'],
+  // The base is the version the confirmation showed, which the CLI fills in (`--base` to give it).
+  skill_restore: ['name', 'version'],
+  skill_delete: ['name'],
+  skill_eject: ['name'],
 };
 
 /**
