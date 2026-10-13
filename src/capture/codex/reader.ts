@@ -5,6 +5,7 @@ import * as zlib from 'node:zlib';
 import { grimoireTool, runsGrimoire } from '../grimoire-calls';
 import { jsonLines } from '../jsonl';
 import { stampOf, type Step, type Transcript } from '../steps';
+import { zstdFrameGuard } from './zstd-frames';
 
 // Grimoire's own tolerant reader for Codex transcripts (spec §14 Readers), built
 // against what Codex CLI 0.162.1 writes (spike E, GOK-130;
@@ -31,7 +32,7 @@ import { stampOf, type Step, type Transcript } from '../steps';
 // - Unparsable lines are skipped and counted anywhere (Codex can leave a torn
 //   fragment mid-file); a torn last line is ignored.
 // - `.jsonl.zst` is read through Node's zstd (22.15+); without it, or on a bad
-//   frame, the transcript is unreadable, never partly read.
+//   or cut-short frame, the transcript is unreadable, never partly read.
 
 export const CODEX_READER_VERSION = 1;
 
@@ -116,11 +117,11 @@ export async function readCodexTranscript(file: string): Promise<CodexReadResult
   };
 }
 
-/** A `.jsonl.zst` file's text, decoded as it streams. A bad frame fails the iteration. */
+/** A `.jsonl.zst` file's text, decoded as it streams. A bad or cut-short frame fails the iteration. */
 function decompressed(file: string): AsyncIterable<string> {
   const decoder = zlib.createZstdDecompress();
   decoder.setEncoding('utf8');
-  return pipeline(createReadStream(file), decoder, () => {}) as AsyncIterable<string>;
+  return pipeline(createReadStream(file), zstdFrameGuard(), decoder, () => {}) as AsyncIterable<string>;
 }
 
 /** The thread id at the end of a transcript's file name: `rollout-<time>-<thread>[_<rollout>].jsonl[.zst]`. */
