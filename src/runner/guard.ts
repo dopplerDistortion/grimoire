@@ -60,9 +60,14 @@ export interface Preflight {
 /**
  * The billing guard (and, for Codex, the MCP server list): refuses the run
  * unless the client would bill the plan, or API billing is allowed. `cwd` and
- * `env` are the child's own.
+ * `env` are the child's own; `signal` kills a client call under way (the runner stopping).
  */
-export async function preflight(config: Pick<RunnerConfig, 'kind' | 'binary' | 'allow_api_billing'>, cwd: string, env: NodeJS.ProcessEnv): Promise<Preflight> {
+export async function preflight(
+  config: Pick<RunnerConfig, 'kind' | 'binary' | 'allow_api_billing'>,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<Preflight> {
   if (!config.allow_api_billing) {
     const billed = BILLED_VARIABLES[config.kind].filter((name) => setIn(env, name));
     if (billed.length > 0) {
@@ -72,11 +77,11 @@ export async function preflight(config: Pick<RunnerConfig, 'kind' | 'binary' | '
       });
     }
   }
-  return config.kind === 'claude' ? claudePreflight(config, cwd, env) : codexPreflight(config, cwd, env);
+  return config.kind === 'claude' ? claudePreflight(config, cwd, env, signal) : codexPreflight(config, cwd, env, signal);
 }
 
-async function claudePreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_billing'>, cwd: string, env: NodeJS.ProcessEnv): Promise<Preflight> {
-  const run = await runProcess(config.binary, CLAUDE_AUTH_ARGS, { cwd, env, timeoutMs: PREFLIGHT_TIMEOUT_MS });
+async function claudePreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_billing'>, cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<Preflight> {
+  const run = await runProcess(config.binary, CLAUDE_AUTH_ARGS, { cwd, env, timeoutMs: PREFLIGHT_TIMEOUT_MS, signal });
   // Parsed whatever the exit code: `none` exits 1 with its JSON on stdout (P6).
   let method: unknown;
   try {
@@ -101,9 +106,9 @@ async function claudePreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_
   throw refused(`the runner's preflight failed: \`claude auth status\` reported an auth method this release doesn't know (${method.slice(0, 40)})`, { kind: 'claude', auth_method: method.slice(0, 40) });
 }
 
-async function codexPreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_billing'>, cwd: string, env: NodeJS.ProcessEnv): Promise<Preflight> {
+async function codexPreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_billing'>, cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<Preflight> {
   // Never logged: an API-key login prints the key, partly masked.
-  const login = await runProcess(config.binary, CODEX_LOGIN_ARGS, { cwd, env, timeoutMs: PREFLIGHT_TIMEOUT_MS });
+  const login = await runProcess(config.binary, CODEX_LOGIN_ARGS, { cwd, env, timeoutMs: PREFLIGHT_TIMEOUT_MS, signal });
   const said = `${login.stdout}\n${login.stderr}`;
   let method: string;
   if (/Logged in using ChatGPT/.test(said)) method = 'chatgpt';
@@ -114,7 +119,7 @@ async function codexPreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_b
   if (method === 'api_key' && !config.allow_api_billing) {
     throw refused(`the runner won't start codex: it is logged in with an API key, which bills outside your plan; ${ALLOW_HINT}`, { kind: 'codex', auth_method: method });
   }
-  return { auth_method: method, mcp_servers: await codexMcpServers(config.binary, cwd, env) };
+  return { auth_method: method, mcp_servers: await codexMcpServers(config.binary, cwd, env, signal) };
 }
 
 /**
@@ -122,8 +127,8 @@ async function codexPreflight(config: Pick<RunnerConfig, 'binary' | 'allow_api_b
  * the exec's overrides, in its cwd and env. Never logged: a server's `env` can
  * hold secrets. A list that fails refuses the run.
  */
-async function codexMcpServers(binary: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string[]> {
-  const run = await runProcess(binary, CODEX_MCP_LIST_ARGS, { cwd, env, timeoutMs: PREFLIGHT_TIMEOUT_MS });
+async function codexMcpServers(binary: string, cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string[]> {
+  const run = await runProcess(binary, CODEX_MCP_LIST_ARGS, { cwd, env, timeoutMs: PREFLIGHT_TIMEOUT_MS, signal });
   let names: string[] | null = null;
   if (run.code === 0) {
     try {
