@@ -63,8 +63,13 @@ async function withServedSkill(world: GitWorld): Promise<string> {
   return root;
 }
 
-/** Runs the verb as the client would, with a captured payload; its exit code and stdout. */
-async function hook(root: string, fixture: string): Promise<{ code: number; output: string }> {
+/**
+ * Runs the verb as the client would, with a captured payload; its exit code and stdout.
+ * The fast path's 7 s budget is measured from the hook's start, so on a loaded machine it
+ * would cut these tests' writes short: they run unbudgeted unless they name a budget.
+ * The real budget, through the real chain, is session-start.slow.test.ts's.
+ */
+async function hook(root: string, fixture: string, fastPathBudgetMs = Number.POSITIVE_INFINITY): Promise<{ code: number; output: string }> {
   let output = '';
   const stdout = new Writable({
     write(chunk: Buffer, _encoding, done) {
@@ -72,7 +77,7 @@ async function hook(root: string, fixture: string): Promise<{ code: number; outp
       done();
     },
   });
-  const code = await runHook('session-start', root, { stdin: Readable.from([readFixture(fixture)]), stdout });
+  const code = await runHook('session-start', root, { stdin: Readable.from([readFixture(fixture)]), stdout }, { fastPathBudgetMs });
   return { code, output };
 }
 
@@ -204,6 +209,16 @@ describe('the skill fast path', () => {
     // Nothing more to write: no reload, and the stray edit still waits for a human.
     expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: 'grimoire: stray edit to release-notes: Record or Discard\n' });
     expect(await hook(root, CODEX[0]!)).toEqual({ code: 0, output: 'grimoire: stray edit to release-notes: Record or Discard\n' });
+  });
+
+  gitTest('past its budget the fast path starts no writes and says nothing; the next session start within budget writes them', async ({ world }) => {
+    const root = await withServedSkill(world);
+
+    expect(await hook(root, CLAUDE[0]!, 0)).toEqual({ code: 0, output: '' });
+    for (const folder of folders) expect(await exists(path.join(root, folder)), folder).toBe(false);
+
+    expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: `${RELOAD}
+` });
   });
 
   gitTest('it writes nothing mid-merge', async ({ world }) => {
