@@ -9,3 +9,4 @@ export { runChores, storeAt, SPAWN_TIMEOUT_MS, type ChoreRunReport, type RunChor
 export { runnerStatus } from './status';
 export { readRunnerLogs, type RunnerLog } from './log';
 export { BUNDLE_HEADER, PROCEDURE } from './bundle';
+export { startRunnerTrigger, TRIGGER_EVERY_MS, TRIGGER_OPS, type RunnerTrigger, type RunnerTriggerOptions } from './trigger';
