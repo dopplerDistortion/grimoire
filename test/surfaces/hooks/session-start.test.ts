@@ -233,9 +233,12 @@ describe('the session line, by priority (spec §12)', () => {
 
   const pickup = (root: string, value: string) => putMachineSetting(path.join(root, '.git'), 'knowledge.pickup', value);
 
-  /** The line each client is given (no skills were written, so Claude Code gets it plain too). */
-  async function lines(root: string): Promise<string[]> {
-    return Promise.all([CLAUDE[0]!, CODEX[0]!].map((fixture) => sessionStart(readFixture(fixture), { startDir: root })));
+  /**
+   * The line each client is given (no skills were written, so Claude Code gets it plain too). Unbudgeted,
+   * like `hook()`: on a loaded machine the 7 s budget would drop the chore facts; the budget has its own tests.
+   */
+  async function lines(root: string, fixtures: readonly string[] = [CLAUDE[0]!, CODEX[0]!]): Promise<string[]> {
+    return Promise.all(fixtures.map((fixture) => sessionStart(readFixture(fixture), { startDir: root, fastPathBudgetMs: Number.POSITIVE_INFINITY })));
   }
 
   function expectLine(output: string[], line: string): void {
@@ -277,11 +280,49 @@ describe('the session line, by priority (spec §12)', () => {
     expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: `${ASK}\n` });
   });
 
-  gitTest('a pin mismatch outranks a due chore', async ({ world }) => {
-    const root = await setUp(world, '9.9.9');
-    await choreDue(world);
+  /** This test process, recorded as a `grimoire mcp` of `client` serving `worktree` on `pin` (as a server started before a pull records itself). */
+  async function serverRecorded(root: string, worktree: string, pin: string, client: string | null = null) {
+    return new MachineLocalStore(path.join(root, '.git')).processes.register({ role: 'mcp', client, worktree, pin, pathSource: null });
+  }
 
-    expectLine(await lines(root), `grimoire: this checkout pins 9.9.9, but this session runs grimoire ${VERSION}; restart it`);
+  const OLD_PIN = '0.9.0';
+  const MISMATCH = `grimoire: this checkout now pins ${VERSION}; this session runs ${OLD_PIN}; restart it`;
+  const CARRIED_OVER = ['clear', 'compact', 'resume'].map((name) => `claude-code/hook-payloads/session-start-${name}.json`);
+  const CODEX_RESUME = 'codex/hook-payloads/session-start-resume.json';
+
+  gitTest('a server still running an older pin in this worktree, carried over a clear, compact or resume, is the pin mismatch (§8’s notice); it outranks a due chore', async ({ world }) => {
+    const root = await setUp(world);
+    await choreDue(world);
+    const server = await serverRecorded(root, root, OLD_PIN);
+    try {
+      const fixtures = [...CARRIED_OVER, CODEX_RESUME];
+      expect(await lines(root, fixtures)).toEqual(fixtures.map(() => `${MISMATCH}
+`));
+      expect(MISMATCH.length).toBeLessThanOrEqual(200);
+      // A fresh start launches its own server on the checkout's pin: an old one belongs to another session.
+      expectLine(await lines(root), ASK);
+    } finally {
+      await server.unregister();
+    }
+    expectLine(await lines(root, [CARRIED_OVER[0]!, CODEX_RESUME]), ASK);
+  });
+
+  gitTest('a server on the checkout’s pin, one serving another worktree, or one another client runs, is no mismatch here', async ({ world }) => {
+    const root = await setUp(world);
+    const other = await world.a.addWorktree('elsewhere');
+    const servers = [
+      await serverRecorded(root, root, VERSION),
+      await serverRecorded(root, other.dir, OLD_PIN),
+      await serverRecorded(root, root, OLD_PIN, 'codex-mcp-client'),
+    ];
+    try {
+      expect(await lines(root, CARRIED_OVER)).toEqual(['', '', '']);
+      // The Codex server's own session does see it.
+      expect(await lines(root, [CODEX_RESUME])).toEqual([`${MISMATCH}
+`]);
+    } finally {
+      await Promise.all(servers.map((server) => server.unregister()));
+    }
   });
 
   gitTest('a due chore outranks stray edits and refreshed pointer files', async ({ world }) => {

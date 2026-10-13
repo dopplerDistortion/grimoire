@@ -14,7 +14,6 @@
 
 import { strayEditNotice } from '../../generated/stray';
 import { SESSION_LINE_MAX, sessionLine, type Pickup } from '../../knowledge/chores/offering';
-import { VERSION } from '../../version';
 import { hookFailed } from './debug';
 
 /** Which client ran the hook. */
@@ -105,9 +104,10 @@ async function compose(payload: unknown, ctx: SessionStartContext): Promise<Sess
   const store = root === null ? null : await locateMachineLocalStore(root);
   if (!store || root === null) return {};
   const deadline = started + (ctx.fastPathBudgetMs ?? FAST_PATH_BUDGET_MS);
+  const pin = (await readCheckoutConfig(root).catch(() => null))?.pin ?? null;
   // The knowledge facts read the tracker while the fast path writes the copies: neither waits for the other.
   // Past the same budget the hook stops waiting for them and says what it knows without.
-  const [fast, knowledge] = await Promise.all([
+  const [fast, knowledge, pinMismatch] = await Promise.all([
     sessionStartFastPath(store, root, { deadline }).catch((error: unknown) => {
       hookFailed(error);
       return null;
@@ -120,21 +120,52 @@ async function compose(payload: unknown, ctx: SessionStartContext): Promise<Sess
         }),
       deadline,
     ),
+    byDeadline(
+      () =>
+        pinMismatchNotice(store, root, pin, payload).catch((error: unknown) => {
+          hookFailed(error);
+          return null;
+        }),
+      deadline,
+    ),
   ]);
   await markCodexSession(store, payload).catch(() => {});
   const changed = fast?.changed === true;
-  const pin = (await readCheckoutConfig(root).catch(() => null))?.pin ?? null;
   const refreshed = await refreshedPointerFiles(store, root).catch(() => null);
   const own = await worktreeKey(root);
   const strays = await listStrayEdits(store).catch(() => []);
   const edits = await Promise.all(strays.map(async (edit) => ({ skill: edit.skill, where: (await worktreeKey(edit.worktree)) === own ? null : edit.worktree })));
   const line = sessionLine({
-    pinMismatch: pin !== null && pin !== VERSION ? `grimoire: this checkout pins ${pin}, but this session runs grimoire ${VERSION}; restart it` : null,
+    pinMismatch,
     choreDue: knowledge?.choreDue ?? null,
     proposalsPending: knowledge?.proposalsPending ?? 0,
     last: lastPriorityLine(strayEditsLine(edits), refreshed ? refreshNotice(refreshed.paths.length, null) : null),
   });
   return { ...(line ? { line } : {}), ...(changed ? { reloadSkills: true } : {}) };
+}
+
+/**
+ * The pin-mismatch notice (spec §8's wording): a `grimoire mcp` of this
+ * client still serves this worktree on another pin than the checkout's now.
+ * The hook itself always runs the checkout's pin (the launcher runs only
+ * that), but a server outlives a pull, merge or switch: a clear, compact or
+ * resume keeps the session's server. A fresh start launches its own server
+ * on the checkout's pin, so an old one then belongs to another session.
+ * Process records don't name their session: any such server of this client
+ * in this worktree counts.
+ */
+async function pinMismatchNotice(store: import('../../machine-local').MachineLocalStore, root: string, pin: string | null, payload: unknown): Promise<string | null> {
+  const fields = typeof payload === 'object' && payload !== null ? (payload as Record<string, unknown>) : {};
+  if (pin === null || fields.source === 'startup') return null;
+  const client = sessionStartClient(payload);
+  const { worktreeKey } = await import('../../upkeep/checkout');
+  const own = await worktreeKey(root);
+  const ofThisClient = (name: string | null) => name === null || client === null || name.startsWith('codex') === (client === 'codex');
+  const candidates = await store.processes.liveWhere((record) => record.role === 'mcp' && record.worktree !== null && record.pin !== pin && ofThisClient(record.client));
+  for (const record of candidates) {
+    if ((await worktreeKey(record.worktree!)) === own) return `grimoire: this checkout now pins ${pin}; this session runs ${record.pin}; restart it`;
+  }
+  return null;
 }
 
 /** `work`'s value, or null once `deadline` (epoch ms) passes first; past it already, the work never starts. */
