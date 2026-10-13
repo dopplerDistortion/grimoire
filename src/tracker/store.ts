@@ -434,6 +434,9 @@ class GitTrackerStore implements TrackerStore {
         updateRef: async (ref, next, old) => {
           await this.updateRefOnce(ref, next, old ?? zeroOid(this.location.objectFormat), 'grimoire: sync');
         },
+        deleteRef: async (ref, old) => {
+          await this.git(['update-ref', '-m', 'grimoire: sync', '-d', ref, old]);
+        },
         trackerRefs: () => this.trackerRefs(),
         isShallow: async () => this.isShallow(await this.resolveTips()),
         fold: (foldSpec) => this.fold(foldSpec),

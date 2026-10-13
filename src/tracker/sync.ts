@@ -104,6 +104,8 @@ export interface SyncHost {
    * stuck on it, and then throws.
    */
   updateRef(ref: string, next: string, old: string | null): Promise<void>;
+  /** Deletes `ref` while it still holds `old` (a compare-and-set); a lost one is no error. */
+  deleteRef(ref: string, old: string): Promise<void>;
   /** The local tracker tip and every remote-tracking tracker tip, by remote name, resolved fresh. */
   trackerRefs(): Promise<TrackerRefs>;
   /** Whether the tracker's history is shallow in this clone. */
@@ -365,6 +367,12 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     refs = await host.trackerRefs();
     local = refs.local;
     remoteTip = refs.remotes.get(remote) ?? null;
+    if (tracker === null && remoteTip !== null) {
+      // The remote holds no tracker: someone deleted it, and the remote-tracking ref is stale. Folded in, it would
+      // bring the deleted tracker back. It goes (as `git fetch --prune` drops it) while it still holds what was read.
+      await host.deleteRef(tracking, remoteTip);
+      remoteTip = (await host.trackerRefs()).remotes.get(remote) ?? null;
+    }
     /** The remote-tracking ref as this sync left it: the push moves it on only from there. */
     const tracked = remoteTip;
     if (local !== null && remoteTip !== null && local !== remoteTip) {

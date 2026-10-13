@@ -260,6 +260,33 @@ describe('a missing tracker', () => {
     expect(read).toMatchObject({ code: 'NOT_SYNCED', details: { tracker_root: root } });
     expect(read.details.remedy).toContain('grimoire init');
   });
+
+  test('a tracker deleted from the remote stays deleted: the stale remote-tracking ref is dropped, never folded in', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const start = (await trackerTip(world.a))!;
+    const { id: kept } = await ok(core.call('create', { title: 'Kept here' }, ctx));
+    const ours = (await trackerTip(world.a))!;
+    // The remote's tracker went another way, and this clone fetched it (no write here since)...
+    await world.a.git(['update-ref', 'refs/grimoire/tracker', start, ours]);
+    const { id: gone } = await ok(core.call('create', { title: 'Only on the deleted tracker' }, ctx));
+    await pushTracker(world.a);
+    await world.a.git(['fetch', '--quiet', 'origin', '+refs/heads/grimoire/tracker:refs/remotes/origin/grimoire/tracker']);
+    const stale = await world.a.git(['rev-parse', 'refs/remotes/origin/grimoire/tracker']);
+    await world.a.git(['update-ref', 'refs/grimoire/tracker', ours, stale]);
+    // ...and then someone deleted it.
+    await git(world.remote, ['update-ref', '-d', 'refs/heads/grimoire/tracker']);
+
+    const synced = await ok(core.call('sync', {}, ctx));
+
+    const local = (await trackerTip(world.a))!;
+    expect(synced).toMatchObject({ state: 'pushed', fold: null });
+    expect((await world.a.gitResult(['merge-base', '--is-ancestor', stale, local])).code).toBe(1);
+    expect(await remoteTracker(world.a)).toBe(local);
+    expect(await world.a.git(['rev-parse', 'refs/remotes/origin/grimoire/tracker'])).toBe(local);
+    const ids = (await ok(core.call('list', {}, ctx))).rows.map((row) => row.id);
+    expect(ids).toContain(kept);
+    expect(ids).not.toContain(gone);
+  });
 });
 
 describe('failures', () => {

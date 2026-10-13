@@ -501,7 +501,13 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     if (!listing.reachable) failure = listing.failure;
     else if (listing.tracker !== null) failure = await fetchTracker(root, remote.name, remotes);
   }
-  const tips = await trackerTips(root, remote.name);
+  let tips = await trackerTips(root, remote.name);
+  if (remote.name !== null && listing?.reachable && listing.tracker === null && tips.remote !== null) {
+    // The remote holds no tracker, but this clone still tracks one: someone deleted it. Adopted, or folded in by
+    // a sync, it would come back; the stale ref goes (as `git fetch --prune` drops it) while it holds what was read.
+    await dropStaleRemoteTracker(root, remote.name, tips.remote);
+    tips = await trackerTips(root, remote.name);
+  }
   const named = existing?.tracker_root ?? null;
 
   let trackerPlan: TrackerPlan;
