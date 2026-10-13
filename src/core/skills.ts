@@ -5,6 +5,7 @@ import { GrimoireError, invalid } from '../errors';
 import {
   normalizeSkillText,
   parseSkillText,
+  proposalStates,
   readSkills,
   restoreFates,
   serializeSkillText,
@@ -25,7 +26,9 @@ import { cloneTag, MachineLocalStore } from '../machine-local';
 import { checkHygiene, type SecretScanner } from '../scanner';
 import type { DeliveryState, OfferedSkill, TrackerView } from '../tracker';
 import { ledgerFile } from '../tracker/layout';
+import { readCopyState } from '../generated/copy-state';
 import { offeredSkills } from '../generated/offered';
+import { registeredWorktrees } from '../installer/worktrees';
 import { deriveScorecards, type AttentionFlag, type Scorecard, type TargetedPattern, type TraceFacts } from '../knowledge/scorecards';
 import { traceCapture } from './capture';
 import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } from './budget';
@@ -218,8 +221,27 @@ export interface ShownSkill {
   attention: AttentionFlag[];
   /** With `name`: the current version's text. */
   text?: string | null;
+  /** How many versions the ledger has made current. */
+  versions: number;
+  /** The latest record of the skill (by time), or null. */
+  last_change: ShownChange | null;
+  /** The pending proposal on this skill or name, or null. */
+  pending_proposal: string | null;
+  /** With `name`: this clone's worktrees, the ones an eject may write into. */
+  worktrees?: string[];
+  /** With `name`: the version each worktree's copy holds, against the served one. */
+  copies?: CopyStateRow[];
   /** With `name`: every record of the skill, each after the ones it follows. */
   history?: (ShownChange & { from: string | null; origin: SkillOrigin; proposal?: string; reason?: string; fate?: RestoreFate })[];
+}
+
+/** A worktree's copy of a skill (spec §20 Skills: per-worktree copy states). */
+export interface CopyStateRow {
+  worktree: string;
+  /** The version grimoire last put in (or found in) the copy; null for none. */
+  version: string | null;
+  /** `current`: the served version; `behind`: another version (a refresh puts the served one back); `none`: no copy. */
+  state: 'current' | 'behind' | 'none';
 }
 
 export interface SkillShowResult {
@@ -236,6 +258,12 @@ export interface SkillShowResult {
 
 function shownChange(record: LedgerEntry): ShownChange {
   return { record: record.id, kind: record.kind, version: record.to, by: record.by, at: record.at };
+}
+
+/** The latest of `records` by time (the last one listed at a tie), shown; null for none. */
+function latestOf(records: readonly LedgerEntry[]): ShownChange | null {
+  const latest = records.reduce<LedgerEntry | null>((found, record) => (found === null || record.at >= found.at ? record : found), null);
+  return latest === null ? null : shownChange(latest);
 }
 
 /**
@@ -301,6 +329,12 @@ export const skillShow = define({
     );
     const skills: ShownSkill[] = [];
     const traces = states.length === 0 ? [] : await traceFacts(view);
+    const pendingOf = new Map<string, string>();
+    for (const state of proposalStates(await view.proposals.records(), book.skills)) {
+      if (state.status === 'pending' && !pendingOf.has(state.record.skill)) pendingOf.set(state.record.skill, state.record.id);
+    }
+    const machine = new MachineLocalStore(tracker.location.commonDir);
+    const worktrees = input.name === undefined ? [] : (await registeredWorktrees(tracker.location.commonDir).catch(() => ({ worktrees: [] as string[] }))).worktrees;
     for (const state of states) {
       const descriptionOf = async (version: string | null) => {
         const text = version === null ? null : await book.text(version);
@@ -330,9 +364,19 @@ export const skillShow = define({
           : null,
         scorecards: deriveScorecards(state.name, state.records, traces, { patternOf: patternOf(await targetedPatterns(view, state.records)) }),
         attention: [],
+        versions: new Set(state.records.map((record) => record.to).filter((version) => version !== null)).size,
+        last_change: latestOf(state.records),
+        pending_proposal: pendingOf.get(state.name) ?? null,
       };
       shown.attention = [...(shown.scorecards.find((card) => card.version === state.version)?.attention ?? [])];
       if (input.name !== undefined) {
+        const served = shown.served;
+        shown.worktrees = [...worktrees];
+        shown.copies = [];
+        for (const worktree of worktrees) {
+          const version = (await readCopyState(machine, worktree).catch(() => ({}) as Record<string, string>))[state.name] ?? null;
+          shown.copies.push({ worktree, version, state: version === null ? 'none' : version === served ? 'current' : 'behind' });
+        }
         shown.text = state.version === null ? null : await book.text(state.version);
         const fates = restoreFates(state.records);
         shown.history = state.records.map((record) => ({
