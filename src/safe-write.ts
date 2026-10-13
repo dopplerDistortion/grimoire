@@ -6,6 +6,8 @@
 // save made after the re-check: a new file is a hard link that fails when the
 // name is taken, and a file it replaces is renamed aside and its bytes
 // compared before the new one is linked in (and put back when they differ).
+// A write killed while the file is aside leaves it there: the next safe write
+// on that path puts it back first, when its writer is dead and its place empty.
 // Renames and links are retried on EPERM and EBUSY (Windows sharing
 // violations).
 //
@@ -14,9 +16,10 @@
 // with the person's own text replaced, so it is left alone, and the
 // compare-and-swap compares bytes, never decoded text.
 import { randomBytes } from 'node:crypto';
-import { link, lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { retryTransient } from './machine-local';
+import { isPidAlive } from './machine-local/process-info';
 
 /** A checkout file as text: absent, UTF-8 text that encodes back to the very same bytes, or not text. */
 export type CheckoutText = { readonly state: 'absent' } | { readonly state: 'text'; readonly text: string } | { readonly state: 'not-text' };
@@ -154,6 +157,7 @@ export async function safeWrite(root: string, relative: string, before: string |
   if (linked !== null) return { reason: 'link', at: linked };
   const file = path.join(root, ...relative.split('/'));
   await mkdir(path.dirname(file), { recursive: true });
+  await restoreLeftAside(file);
 
   const temp = tempPathFor(file);
   const handle = await open(temp, 'wx');
@@ -201,7 +205,13 @@ async function replaceIfUnchanged(root: string, file: string, temp: string, expe
     const moved = await readBytesIfExists(aside);
     if (moved === undefined || !moved.equals(expected)) {
       if (await moveUnlessTaken(aside, file)) return await dropped(temp, { reason: 'changed' });
-      return await dropped(temp, { reason: 'changed', kept: path.relative(root, aside).split(path.sep).join('/') });
+      // Kept under a name no later write puts back (see restoreLeftAside): a save stands at its place.
+      const kept = tempPathFor(file, 'kept');
+      const at = await retryTransient(() => rename(aside, kept)).then(
+        () => kept,
+        () => aside,
+      );
+      return await dropped(temp, { reason: 'changed', kept: path.relative(root, at).split(path.sep).join('/') });
     }
     placed = await moveUnlessTaken(temp, file);
   } catch (error) {
@@ -212,6 +222,29 @@ async function replaceIfUnchanged(root: string, file: string, temp: string, expe
   // The bytes aside are the ones the caller saw; a save made at the empty place stands over them.
   await retryTransient(() => unlink(aside)).catch(() => {});
   return placed ? null : dropped(temp, { reason: 'changed' });
+}
+
+/** A file replaceIfUnchanged put aside: `.<name>.grimoire-<pid>-<hex>.replacing`. */
+const LEFT_ASIDE = /^\.(.+)\.grimoire-(\d+)-[0-9a-f]+\.replacing$/;
+
+/**
+ * Puts back a file a safe write on `file` left aside when it was killed
+ * between moving it aside and linking the new one in: only when that
+ * writer's process is gone and the place is still empty (a save made since
+ * stands). Best effort: it never fails the write.
+ */
+async function restoreLeftAside(file: string): Promise<void> {
+  const dir = path.dirname(file);
+  const name = comparable(path.basename(file));
+  const entries = await readdir(dir).catch(() => [] as string[]);
+  for (const entry of entries) {
+    const match = LEFT_ASIDE.exec(entry);
+    if (!match || comparable(match[1]!) !== name) continue;
+    const pid = Number(match[2]);
+    if (pid === process.pid || isPidAlive(pid)) continue;
+    if ((await lstat(file).catch(() => null)) !== null) return;
+    if (await moveUnlessTaken(path.join(dir, entry), file).catch(() => false)) return;
+  }
 }
 
 async function dropped(temp: string, skip: SafeWriteSkip): Promise<SafeWriteSkip> {

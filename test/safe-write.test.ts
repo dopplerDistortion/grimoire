@@ -2,6 +2,7 @@
 // a temp file, a re-check and a rename, never through a link. Seam 1: the
 // safe write called directly, with a plan that went stale before it ran, and
 // with a person's save landing between its re-check and its move.
+import { spawnSync } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -138,6 +139,34 @@ describe('a safe write', () => {
 
     expect(await readFile(path.join(root, 'AGENTS.md'), 'utf8')).toBe('saved just now\n');
     expect(await filesIn(root)).toEqual(['AGENTS.md']);
+  });
+
+  it('a file left aside by a write whose process died puts it back first: the write that finds its place empty is left alone as changed', async () => {
+    // A process that has exited: its write was killed with AGENTS.md aside, before the new one went in.
+    const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+    const aside = `.AGENTS.md.grimoire-${dead}-0badf00d.replacing`;
+    await writeFile(path.join(root, aside), 'the person’s file\n');
+
+    expect(await safeWrite(root, 'AGENTS.md', null, 'shipped\n')).toEqual({ reason: 'changed' });
+
+    expect(await readFile(path.join(root, 'AGENTS.md'), 'utf8')).toBe('the person’s file\n');
+    expect(await filesIn(root)).toEqual(['AGENTS.md']);
+  });
+
+  it('a file aside for a write still under way, or aside next to a file at its place, is left where it is', async () => {
+    const live = `.AGENTS.md.grimoire-${process.ppid}-0badf00d.replacing`;
+    await writeFile(path.join(root, live), 'aside by a live write\n');
+    const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+    const stale = `.rules.md.grimoire-${dead}-0badf00d.replacing`;
+    await writeFile(path.join(root, stale), 'older bytes\n');
+    await writeFile(path.join(root, 'rules.md'), 'saved since\n');
+
+    expect(await safeWrite(root, 'AGENTS.md', null, 'shipped\n')).toBeNull();
+    expect(await safeWrite(root, 'rules.md', 'saved since\n', 'shipped\n')).toBeNull();
+
+    expect(await readFile(path.join(root, 'AGENTS.md'), 'utf8')).toBe('shipped\n');
+    expect(await readFile(path.join(root, 'rules.md'), 'utf8')).toBe('shipped\n');
+    expect(await filesIn(root)).toEqual([live, stale, 'AGENTS.md', 'rules.md'].sort());
   });
 
   it('writes on a file system without hard links, creating and replacing', async () => {
