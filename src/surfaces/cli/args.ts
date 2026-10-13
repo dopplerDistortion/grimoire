@@ -341,6 +341,7 @@ export function verbHelp(op: OpDescriptor): Record<string, unknown> {
 const RUNTIME_VERBS = [
   { verb: 'init', kind: 'write', policy: 'human-only', description: 'Install grimoire into this host repo, or join this clone to the version its checkout pins.' },
   { verb: 'leave', kind: 'write', policy: 'human-only', description: 'Remove grimoire from this clone on this machine: generated output, the machine-local store, version copies and launcher, and the local tracker ref once the remote holds its tip.' },
+  { verb: 'uninstall', kind: 'write', policy: 'human-only', description: 'Remove grimoire from this repo through this checkout, for you to commit: what the manifest says grimoire wrote, then .grimoire/; it also leaves the clone when no other worktree is installed. The remote tracker stays as an archive.' },
   { verb: 'status', kind: 'read', policy: 'agent', description: 'What to know about this checkout now: sync, refreshed pointer files, Node, stale claims, the excerpt mode, the Codex hook. Writes nothing.' },
   { verb: 'runner enable', kind: 'write', policy: 'human-only', description: 'Let grimoire start your own claude -p or codex exec to do due knowledge chores unattended on this machine (claude or codex; --allow-api-billing).' },
   { verb: 'runner disable', kind: 'write', policy: 'human-only', description: 'Turn the runner off on this machine.' },

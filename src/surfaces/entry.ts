@@ -49,6 +49,10 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
     const { runLeaveVerb } = await import('./cli/leave');
     return runLeaveVerb(withFrom(rest.slice(1)));
   }
+  if (rest[0] === 'uninstall') {
+    const { runUninstallVerb } = await import('./cli/uninstall');
+    return runUninstallVerb(withFrom(rest.slice(1)));
+  }
   if (rest[0] === 'status' || rest[0] === 'doctor') {
     const { runHealthVerb } = await import('./cli/health');
     // Through the shell shim the repo is the shim's own checkout, whatever the cwd, unless the command names a --from.
