@@ -37,6 +37,7 @@ import { sortedUnique, type CitedItem, type CitedTrace, type ProposalClaims, typ
 import type { SkillBook } from '../book';
 import { changeLines, diffLines, linesOf, normalizedLines, similarity } from '../line-diff';
 import { proposalStates } from '../proposals';
+import { undoneChanges } from '../restore';
 import { normalizeSkillText, parseSkillText, RESERVED_SKILL_NAMES, skillNameProblem, skillVersionOf, SkillTextError } from '../skill-text';
 import { Problems, type Rejection } from './compile';
 import type { OpenRun, ServedLog } from './runs';
@@ -334,11 +335,11 @@ async function negativeEvidence(name: string, cx: ProposeContext): Promise<{ cha
     const refused = reject.saw.at(-1);
     if (refused !== undefined) versions.add(refused);
   }
-  for (const restore of records.filter((record) => record.kind === 'restore' && record.from !== null)) {
-    const maker = records.find((record) => record.to === restore.from && record.kind !== 'restore');
-    if (!maker) continue;
-    const after = await textOf(maker.to);
-    changes.push(changeLines(await textOf(maker.from), after));
+  // An undone delete removed text, which the deleted texts below already hold.
+  for (const { undone } of undoneChanges(records)) {
+    if (undone.to === null) continue;
+    const after = await textOf(undone.to);
+    changes.push(changeLines(await textOf(undone.from), after));
     texts.push(normalizedLines(linesOf(after)));
   }
   for (const removal of records.filter((record) => (record.kind === 'delete' || record.kind === 'eject') && record.from !== null)) {

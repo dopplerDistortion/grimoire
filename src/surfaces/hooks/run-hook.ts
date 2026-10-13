@@ -35,7 +35,8 @@ export async function runHook(event: string | undefined, startDir: string, io: H
       const { preToolUse } = await import('./pre-tool-use');
       output = await preToolUse(await readAll(io.stdin), { startDir });
     }
-    if (output !== '') io.stdout.write(output);
+    // Flushed before the hook returns: its process may end right after (../entry.ts exitWith).
+    if (output !== '') await new Promise<void>((resolve) => io.stdout.write(output, () => resolve()));
   } catch (error) {
     // Never a failed hook: say nothing instead.
     hookFailed(error);

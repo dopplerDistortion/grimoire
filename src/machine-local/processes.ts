@@ -133,6 +133,15 @@ export class ProcessRecords {
       .map(({ record }) => record);
   }
 
+  /** Live processes among the records `match` picks; only those are checked for liveness (cheap when none match). */
+  async liveWhere(match: (record: ProcessRecord) => boolean): Promise<ProcessRecord[]> {
+    const entries = (await this.read()).filter((e) => match(e.record));
+    const local = entries.filter((e) => e.record.host === this.host);
+    const verdicts = await liveProcesses(local.map((e) => e.record));
+    const gone = new Set(local.filter((_, i) => !verdicts[i]).map((e) => e.file));
+    return entries.filter((e) => !gone.has(e.file)).map((e) => e.record);
+  }
+
   /** Records whose process is gone. */
   async stale(): Promise<ProcessRecord[]> {
     return (await this.list()).filter((e) => !e.live).map((e) => e.record);

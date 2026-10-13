@@ -40,7 +40,7 @@ const RANK: ReadonlyMap<string, number> = new Map([
 ]);
 const REMOVES: ReadonlySet<string> = new Set(['delete', 'eject']);
 /** The skill changes a human makes with the skill in front of them: one that follows a contested decision settles it. */
-const SETTLES: ReadonlySet<string> = new Set(['acknowledge', 'edit', 'record', 'restore', 'delete', 'eject']);
+export const SETTLES: ReadonlySet<string> = new Set(['acknowledge', 'edit', 'record', 'restore', 'delete', 'eject']);
 
 export type SkillStatus = 'active' | 'deleted' | 'ejected' | 'none';
 

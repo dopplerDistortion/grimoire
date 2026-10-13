@@ -34,6 +34,7 @@ import { parseIssue } from '../../tracker/record';
 import { readSkills } from '../book';
 import { parseLedgerRecord } from '../ledger';
 import { diffLines } from '../line-diff';
+import { undoneChanges } from '../restore';
 import { proposalStates, targetedPatterns } from '../proposals';
 import { deriveScorecards, type TraceFacts } from '../scorecards';
 import type { ChorePair } from './due';
@@ -383,12 +384,11 @@ export class Serving {
         lines.push(`### rejected proposal ${proposal.record.id} (${reason}): ${proposal.record.action} of ${proposal.record.skill}`);
         lines.push(await change(await textOf(proposal.record.base), proposal.record.text));
       }
-      for (const restore of state.records.filter((record) => record.kind === 'restore' && record.from !== null)) {
-        const maker = state.records.find((record) => record.to === restore.from && record.kind !== 'restore');
-        if (!maker) continue;
+      for (const { restore, undone: made } of undoneChanges(state.records)) {
+        if (made.to === null) continue;
         undone++;
-        lines.push(`### undone change ${(maker.from ?? 'none').slice(0, 12)} -> ${maker.to!.slice(0, 12)} (restored ${restore.at})`);
-        lines.push(await change(await textOf(maker.from), await textOf(maker.to)));
+        lines.push(`### undone change ${(made.from ?? 'none').slice(0, 12)} -> ${made.to.slice(0, 12)} (restored ${restore.at})`);
+        lines.push(await change(await textOf(made.from), await textOf(made.to)));
       }
       for (const record of state.records) {
         if (record.kind === 'reject' && record.proposal !== undefined) continue;

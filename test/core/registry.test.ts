@@ -10,6 +10,8 @@ describe('the op registry', () => {
       expect(Object.keys(byName).sort()).toEqual([
         'activity',
         'assign',
+        'attempt_show',
+        'attention',
         'chore_abandon',
         'chore_read',
         'chore_start',
@@ -40,13 +42,18 @@ describe('the op registry', () => {
         'settings_get',
         'settings_set',
         'show',
+        'skill_acknowledge',
+        'skill_delete',
         'skill_discard',
         'skill_edit',
+        'skill_eject',
         'skill_list',
         'skill_read',
         'skill_record',
+        'skill_restore',
         'skill_show',
         'skill_strays',
+        'skill_unblock',
         'sync',
         'sync_status',
         'unquarantine',
@@ -102,7 +109,16 @@ describe('the op registry', () => {
       expect(byName.skill_strays).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
       expect(byName.skill_record).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false, inputSchema: { required: ['stray'] } });
       expect(byName.skill_discard).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
+      // Restore, delete, eject, acknowledge and unblock (spec §18): forward-only changes by a human only.
+      for (const name of ['skill_restore', 'skill_delete', 'skill_eject', 'skill_acknowledge', 'skill_unblock']) {
+        expect(byName[name], name).toMatchObject({ kind: 'write', policy: 'human-only', mcp: false });
+      }
+      // Each commits only against the version the person saw.
+      expect(byName.skill_restore).toMatchObject({ inputSchema: { required: ['name', 'version', 'base'] } });
+      for (const name of ['skill_delete', 'skill_eject']) expect(byName[name]?.inputSchema.required, name).toContain('base');
       expect(byName.activity).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      expect(byName.attention).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false });
+      expect(byName.attempt_show).toMatchObject({ kind: 'read', policy: 'human-read', mcp: false, inputSchema: { required: ['attempt'] } });
       expect(byName.create).toMatchObject({
         kind: 'write',
         policy: 'agent',

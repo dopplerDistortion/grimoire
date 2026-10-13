@@ -12,6 +12,7 @@ import type { ResolveResult } from './resolve';
 import type { SettingsResult, SettingsSetResult } from './settings';
 import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult } from './skills';
 import type { SkillDiscardResult, SkillRecordResult, SkillStraysResult } from './stray-edits';
+import type { SkillAcknowledgeResult, SkillDeleteResult, SkillEjectResult, SkillRestoreResult, SkillUnblockResult } from './skill-changes';
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
 import type { PurgeListResult, PurgeSessionResult, PurgeTraceResult } from './purge';
@@ -20,6 +21,8 @@ import type { SyncResult, SyncStatusResult } from './sync';
 import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
 import type { ChoreSubmitResult } from './chore-submit';
 import type { ActivityResult } from './activity';
+import type { AttentionResult } from './attention';
+import type { AttemptShowResult } from './attempt-show';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -137,6 +140,11 @@ export interface OpResults {
   skill_strays: SkillStraysResult;
   skill_record: SkillRecordResult;
   skill_discard: SkillDiscardResult;
+  skill_restore: SkillRestoreResult;
+  skill_delete: SkillDeleteResult;
+  skill_eject: SkillEjectResult;
+  skill_acknowledge: SkillAcknowledgeResult;
+  skill_unblock: SkillUnblockResult;
   wiki_list: WikiListResult;
   wiki_show: WikiShowResult;
   wiki_edit: WikiEditResult;
@@ -159,4 +167,6 @@ export interface OpResults {
   sync: SyncResult;
   sync_status: SyncStatusResult;
   activity: ActivityResult;
+  attention: AttentionResult;
+  attempt_show: AttemptShowResult;
 }

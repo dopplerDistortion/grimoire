@@ -8,6 +8,8 @@
 // script or style: every style lives in styles.css.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, BlockedEvent, blocks, instance, read, session, signedOut, signIn, signOut, storeBlocked, type ApiErrorBody, type InstanceInfo, type SessionInfo } from './api';
+import { AttemptScreen } from './attempt';
+import { AttentionScreen } from './attention';
 import { IssuesScreen } from './issues';
 import { connectLive, type LiveState } from './live';
 import { interceptLinks, usePath } from './router';
@@ -79,9 +81,21 @@ const SECTIONS = [
   { path: '/settings', label: 'Settings' },
 ];
 
+/** The sidebar section a path belongs to; an attempt page belongs to none. */
 function sectionOf(path: string): string {
   const top = `/${path.split('/')[1] ?? ''}`;
+  if (top === '/attempts') return top;
   return SECTIONS.some((section) => section.path === top) ? top : '/';
+}
+
+/** The screen a path shows: Attention at home, Issues, an attempt page, Settings; the other sections come with their slices. */
+function Screen({ path, section, session }: { path: string; section: string; session: SessionInfo }) {
+  if (section === '/issues') return <IssuesScreen path={path} />;
+  if (section === '/') return <AttentionScreen />;
+  if (section === '/settings') return <SettingsScreen session={session} />;
+  const attempt = /^\/attempts\/([^/]+)$/.exec(path);
+  if (attempt) return <AttemptScreen key={attempt[1]} id={decodeURIComponent(attempt[1]!)} />;
+  return <h1>{SECTIONS.find((entry) => entry.path === section)?.label ?? 'grimoire'}</h1>;
 }
 
 /** How often a full page checks whether the store became usable (besides every live update). */
@@ -158,13 +172,7 @@ function Shell({ session: who, instance: running }: { session: SessionInfo; inst
         ))}
       </nav>
       <main class={section === '/issues' ? 'content issues-content' : 'content'}>
-        {section === '/issues' ? (
-          <IssuesScreen path={path} />
-        ) : section === '/settings' ? (
-          <SettingsScreen session={who} />
-        ) : (
-          <h1>{SECTIONS.find((entry) => entry.path === section)?.label ?? 'grimoire'}</h1>
-        )}
+        <Screen path={path} section={section} session={who} />
       </main>
       <footer class="footer">
         <span class={`live live-${live}`}>{live === 'live' ? 'live' : live === 'reconnecting' ? 'reconnecting…' : 'connecting…'}</span>

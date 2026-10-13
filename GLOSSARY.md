@@ -150,6 +150,10 @@ _Avoid_: Merge conflict, collision
 The local web page a running grimoire serves to the person at the machine for one host repo; it shows the live store and, together with human-only CLI commands, is the only place a human-only operation can be done.
 _Avoid_: UI, web app, admin panel, console
 
+**Attention**:
+The dashboard's home: only what a human must unblock (stale claims, fold conflicts, id collisions, sync failures a person must fix, stray edits and the knowledge items), each with its action inline; nothing an agent can settle on its own.
+_Avoid_: Inbox, notifications, alerts
+
 **Human-only operation**:
 An operation grimoire never offers to agents, available only in the dashboard and in CLI commands that need an interactive terminal, such as reopening an issue, purging a trace or deciding a skill proposal.
 _Avoid_: Admin action, privileged operation
@@ -240,6 +244,10 @@ _Avoid_: Optimizer, skill writer, skill generator
 One pickup of a due knowledge chore by one context, from its start until its result is accepted or it fails, is abandoned or expires; it records what grimoire served it and what it consumed.
 _Avoid_: Job, lease, execution, invocation
 
+**Chore carrier**:
+A content pointer file, or the `chores` MCP prompt, that hands an agent client grimoire's one shipped chore procedure, so a due knowledge chore runs in an isolated context: the `grimoire-chores` skill and subagent in Claude Code, the `grimoire-chores` skill and role in Codex.
+_Avoid_: Chore skill file, chore prompt template
+
 **Runner**:
 A per-machine opt-in that lets grimoire itself start an agent client's headless mode to do due knowledge chores unattended, on that person's own login.
 _Avoid_: Worker, daemon, background agent, bot
@@ -291,6 +299,14 @@ _Avoid_: Revision, snapshot, release
 **Restore**:
 A human's forward change that makes an earlier skill version of an evolved skill current again, recorded as a new change rather than by undoing git history.
 _Avoid_: Rollback, revert
+
+**Undone**:
+What a restore makes of the change it restores away from: negative evidence, so the Skill Proposer may not propose it again; a skill proposal whose accepted version a restore left reads `undone`.
+_Avoid_: Reverted, rolled back
+
+**Dropped**:
+What a restore makes of the later skill versions it removes on the way back, between the restored version and the undone change: no negative evidence, and proposable again; the restore's confirmation lists and diffs them first.
+_Avoid_: Discarded, lost, reverted
 
 **Skill ledger**:
 The append-only record, written only by grimoire's own code, of every skill proposal, every decision on one, every change to an evolved skill, and every quarantine mark and clear.
