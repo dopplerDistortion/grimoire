@@ -4,6 +4,9 @@
 // only), the op, the issue and the attempt. An `update` or `resolve` also
 // names the issue fields it changed, read from the issue record before and
 // after. The issue timeline reads one issue's; the activity feed reads all.
+//
+// It reads the history the view beside it shows (ADR 0007): both tips of a
+// fold, not the local tip alone.
 import { invalid } from '../errors';
 import { runGit } from '../git/run';
 import { issueFile } from '../tracker/layout';
@@ -99,49 +102,63 @@ function parsed(blob: Buffer | null | undefined): IssueRecord | null {
   }
 }
 
-/**
- * The tracker's writes from `tip` back, newest first, as their trailers
- * record them (no field names): `skip` and `max` page through the commits;
- * `grep` keeps only commits whose message holds `<name>: <value>`. The grep
- * matches the text anywhere, so callers check the entry's own field.
- */
-export async function logEntries(
-  root: string,
-  tip: string,
-  options: { skip?: number; max?: number; grep?: readonly [string, string] } = {},
-): Promise<ActivityEntry[]> {
+type LogOptions = { skip?: number; max?: number; grep?: readonly [string, string] };
+
+/** One write as `git log` gives it: the entry, and its commit's parents. */
+interface LogRecord {
+  readonly entry: ActivityEntry;
+  readonly parents: readonly string[];
+}
+
+async function logRecords(root: string, tips: readonly string[], options: LogOptions): Promise<LogRecord[]> {
   const grep = options.grep;
   const run = await runGit(root, [
     'log',
     '--date-order',
     '--no-color',
-    `--format=${RECORD}%H${FIELD}%ae${FIELD}%cI${FIELD}%B${FIELD}`,
+    `--format=${RECORD}%H${FIELD}%P${FIELD}%ae${FIELD}%cI${FIELD}%B${FIELD}`,
     ...(options.skip ? [`--skip=${options.skip}`] : []),
     ...(options.max !== undefined ? [`--max-count=${options.max}`] : []),
     ...(grep === undefined ? [] : ['--fixed-strings', `--grep=${grep[0]}: ${grep[1]}`]),
-    tip,
+    ...tips,
     '--',
   ]);
   if (run.code !== 0) throw new Error(`git log failed reading the tracker's activity: ${run.stderr.trim()}`);
-  const entries: ActivityEntry[] = [];
-  for (const [commit, person, at, message] of run.stdout
+  const records: LogRecord[] = [];
+  for (const [commit, parents, person, at, message] of run.stdout
     .toString('utf8')
     .split(RECORD)
     .map((record) => record.split(FIELD))
-    .filter(([commit, , , message]) => commit && message !== undefined)) {
+    .filter(([commit, , , , message]) => commit && message !== undefined)) {
     const trailers = trailersOf(message!);
-    entries.push({
-      commit: commit!,
-      at: at ?? '',
-      op: trailers.get('Grimoire-Op') ?? '',
-      issue: trailers.get('Grimoire-Issue') ?? null,
-      attempt: trailers.get('Grimoire-Attempt') ?? null,
-      person: person ?? '',
-      actor: actorOf(trailers.get('Grimoire-Actor')),
+    records.push({
+      entry: {
+        commit: commit!,
+        at: at ?? '',
+        op: trailers.get('Grimoire-Op') ?? '',
+        issue: trailers.get('Grimoire-Issue') ?? null,
+        attempt: trailers.get('Grimoire-Attempt') ?? null,
+        person: person ?? '',
+        actor: actorOf(trailers.get('Grimoire-Actor')),
+      },
+      parents: (parents ?? '').split(' ').filter(Boolean),
     });
   }
-  return entries;
+  return records;
 }
+
+/**
+ * The tracker's writes from `tips` back (a view's `parents`: its tip, or both
+ * tips of a fold), newest first, as their trailers record them (no field
+ * names): `skip` and `max` page through the commits; `grep` keeps only
+ * commits whose message holds `<name>: <value>`. The grep matches the text
+ * anywhere, so callers check the entry's own field.
+ */
+export async function logEntries(root: string, tips: readonly string[], options: LogOptions = {}): Promise<ActivityEntry[]> {
+  return (await logRecords(root, tips, options)).map((record) => record.entry);
+}
+
+const isCommitId = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(value);
 
 export const activity = define({
   name: 'activity',
@@ -158,37 +175,41 @@ export const activity = define({
     const view = await tracker.read();
     const issue = input.issue === undefined ? null : view.resolveRead(input.issue, 'issue');
     const limit = input.limit ?? 50;
-    let tip: string | null;
+    // The view's parents: its tip, or both tips of a fold. The cursor pins them, so later writes don't shift the pages.
+    let tips: readonly string[];
     let skip = 0;
     if (input.cursor !== undefined) {
       const state = decodeCursor(input.cursor, 'activity') as { t?: unknown; s?: unknown; i?: unknown } | null;
-      if (!state || typeof state.t !== 'string' || typeof state.s !== 'number' || (state.i ?? null) !== issue) {
+      const pinned = state && Array.isArray(state.t) && state.t.length > 0 && state.t.every(isCommitId) ? (state.t as string[]) : null;
+      if (!state || !pinned || typeof state.s !== 'number' || (state.i ?? null) !== issue) {
         throw invalid({ cursor: 'is not a cursor from this activity read; pass the cursor a previous result returned' });
       }
-      tip = state.t;
+      tips = pinned;
       skip = state.s;
     } else {
-      const tips = await tracker.tips();
-      tip = tips.local ?? tips.remote;
+      tips = view.parents;
     }
-    if (tip === null) return { entries: [], cursor: null };
+    if (tips.length === 0) return { entries: [], cursor: null };
 
     const root = tracker.location.root;
-    const records = await logEntries(root, tip, { skip, max: limit + 1, ...(issue === null ? {} : { grep: ['Grimoire-Issue', issue] as const }) });
+    const records = await logRecords(root, tips, { skip, max: limit + 1, ...(issue === null ? {} : { grep: ['Grimoire-Issue', issue] as const }) });
     const more = records.length > limit;
     // The grep matches the text anywhere; the trailer must name the issue.
-    const page = records.slice(0, limit).filter((entry) => issue === null || entry.issue === issue);
-    const compared = page.filter((entry) => entry.issue !== null && FIELD_OPS.has(entry.op));
+    const page = records.slice(0, limit).filter(({ entry }) => issue === null || entry.issue === issue);
+    const compared = page.filter(({ entry }) => entry.issue !== null && FIELD_OPS.has(entry.op));
+    const spec = (commit: string, id: string) => `${commit}:${issueFile(id)}`;
     const blobs = await readBlobs(
       root,
-      compared.flatMap((entry) => [`${entry.commit}:${issueFile(entry.issue!)}`, `${entry.commit}^:${issueFile(entry.issue!)}`]),
+      compared.flatMap(({ entry, parents }) => [entry.commit, ...parents].map((commit) => spec(commit, entry.issue!))),
     );
-    for (const entry of compared) {
-      const after = parsed(blobs.get(`${entry.commit}:${issueFile(entry.issue!)}`));
-      const before = parsed(blobs.get(`${entry.commit}^:${issueFile(entry.issue!)}`));
-      if (!after || !before) continue;
-      entry.fields = COMPARED.filter((field) => JSON.stringify(before[field]) !== JSON.stringify(after[field])).sort();
+    for (const { entry, parents } of compared) {
+      const after = parsed(blobs.get(spec(entry.commit, entry.issue!)));
+      const befores = parents.map((parent) => parsed(blobs.get(spec(parent, entry.issue!))));
+      if (!after || befores.length === 0 || !befores.every((before) => before !== null)) continue;
+      // A write on a fold commits with both tips as parents: what one side changed came in with the fold. The write
+      // changed a field only when its record differs from every parent's.
+      entry.fields = COMPARED.filter((field) => befores.every((before) => JSON.stringify(before![field]) !== JSON.stringify(after[field]))).sort();
     }
-    return { entries: page, cursor: more ? encodeCursor('activity', { t: tip, s: skip + limit, i: issue }) : null };
+    return { entries: page.map(({ entry }) => entry), cursor: more ? encodeCursor('activity', { t: tips, s: skip + limit, i: issue }) : null };
   },
 });

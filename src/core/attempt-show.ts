@@ -110,10 +110,14 @@ export interface AttemptShowResult {
 
 const NO_CAPTURE: AttemptShowResult['capture'] = { contexts: [], facts_complete: false, wiki_exposed: { exposed: false, at_start: false, at_end: null, hits: [] }, commits: [] };
 
-/** Each version the outcome record of `record` held, oldest first. */
-async function outcomeHistory(root: string, tip: string, record: AttemptRecord): Promise<ShownOutcome[]> {
+/**
+ * Each version the outcome record of `record` held, oldest first, over the
+ * history of `tips` (the view's parents: both tips of a fold). The full
+ * history: simplifying at a fold's merge would drop one side's verdicts.
+ */
+async function outcomeHistory(root: string, tips: readonly string[], record: AttemptRecord): Promise<ShownOutcome[]> {
   const file = outcomeFile(record.issue, record.id);
-  const run = await runGit(root, ['log', '--format=%H', tip, '--', file]);
+  const run = await runGit(root, ['log', '--full-history', '--date-order', '--format=%H', ...tips, '--', file]);
   if (run.code !== 0) return [];
   const commits = run.stdout.toString('utf8').split('\n').filter(Boolean).reverse();
   const blobs = await readBlobs(root, commits.map((commit) => `${commit}:${file}`));
@@ -130,8 +134,8 @@ async function outcomeHistory(root: string, tip: string, record: AttemptRecord):
 }
 
 /** The writes that bound to `handle` from a chore-exposed session or process, oldest first. */
-async function exposureHits(root: string, tip: string, handle: string): Promise<ExposureHit[]> {
-  const entries = await logEntries(root, tip, { grep: ['Grimoire-Attempt', handle] });
+async function exposureHits(root: string, tips: readonly string[], handle: string): Promise<ExposureHit[]> {
+  const entries = await logEntries(root, tips, { grep: ['Grimoire-Attempt', handle] });
   return entries
     .filter((entry) => entry.attempt === handle && entry.actor.chore_exposure !== undefined)
     .reverse()
@@ -239,7 +243,7 @@ export const attemptShow = define({
       }
     }
     const { contexts, facts_complete, referenced } = await contextsOf(view, handle);
-    const hits = await exposureHits(root, view.tip, handle);
+    const hits = await exposureHits(root, view.parents, handle);
     const atEnd = record.end ? record.end.wiki_exposed : null;
     const marks = (await activeQuarantine(view)).traces.get(handle) ?? [];
     const mark = marks.at(-1);
@@ -272,7 +276,7 @@ export const attemptShow = define({
           }
         : null,
       outcome: record.outcome ? { verdict: record.outcome.verdict, reason: record.outcome.reason, set_by: record.outcome.set_by, at: record.outcome.at } : null,
-      outcome_history: record.outcome ? await outcomeHistory(root, view.tip, record) : [],
+      outcome_history: record.outcome ? await outcomeHistory(root, view.parents, record) : [],
       last_activity_at: lastActivity,
       stale,
       set_aside: record.setAside.length,
