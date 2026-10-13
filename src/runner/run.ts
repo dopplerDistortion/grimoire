@@ -111,8 +111,9 @@ export async function runChores(options: RunChoresOptions): Promise<ChoreRunRepo
     const why = 'a runner run is already in progress on this machine';
     throw new GrimoireError('NOT_DUE', `no chore to run: ${why}`, { why });
   }
-  const tracker = await openTracker(options.root, { clock: now });
+  let tracker: TrackerStore | undefined;
   try {
+    tracker = await openTracker(options.root, { clock: now });
     const ctx = await runnerContext(options.root, config.kind, options.env);
     const runs: RunnerRun[] = [];
     let why: string | undefined;
@@ -137,8 +138,12 @@ export async function runChores(options: RunChoresOptions): Promise<ChoreRunRepo
         : runs.map((run) => run.summary).join('\n');
     return { runner: config.kind, runs, ...(runs.length === 0 && why !== undefined ? { why } : {}), summary, caps };
   } finally {
-    await tracker.close();
-    await acquired.lock.release();
+    // The lock goes whatever failed after it was taken, so a long-lived process can trigger again.
+    try {
+      await tracker?.close();
+    } finally {
+      await acquired.lock.release();
+    }
   }
 }
 
