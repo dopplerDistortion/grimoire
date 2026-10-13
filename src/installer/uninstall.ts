@@ -378,8 +378,9 @@ export async function runUninstall(options: UninstallOptions): Promise<Uninstall
       if (withText > 0) {
         purge = yes(await prompter.ask(`${plural(withText, 'unpushed commit')} ${withText === 1 ? 'carries' : 'carry'} excerpt text. Purge it first? [y/N] `));
       }
+      // Leave's preflight says it on the other path.
+      say('Excerpts already pushed stay in the history of grimoire/tracker on the remote.');
     }
-    say('Excerpts already pushed stay in the history of grimoire/tracker on the remote.');
 
     const answer = await prompter.ask(`grimoire uninstall is a human-only operation. Type ${UNINSTALL_CONFIRMATION} to confirm (anything else cancels): `);
     if (answer === null || answer.trim() !== UNINSTALL_CONFIRMATION) {

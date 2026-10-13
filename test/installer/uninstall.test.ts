@@ -96,7 +96,7 @@ describe('uninstall in the clone’s only installed worktree', () => {
     expect(report.commit?.pr).toContain('`npx @goksening/grimoire leave`');
     expect(report.commit?.message).toContain('`npx @goksening/grimoire leave`');
     expect(said.join('\n')).toMatch(/stays on the remote as an archive/);
-    expect(said.join('\n')).toMatch(/Excerpts already pushed stay in the history of grimoire\/tracker/);
+    expect(said.join('\n')).toMatch(/Pushed excerpts stay in the remote’s history/);
   });
 
   gitTest('a fresh first install afterwards adopts the archived tracker', async ({ world }) => {
@@ -190,6 +190,24 @@ describe('uninstall while another worktree is still installed', () => {
     expect(existsSync(store.dir)).toBe(true);
     expect(await tip(world.a, 'refs/grimoire/tracker')).not.toBeNull();
     expect(said.join('\n')).toMatch(/run grimoire leave/);
+    expect(said.join('\n')).toMatch(/Excerpts already pushed stay in the history of grimoire\/tracker/);
+  });
+});
+
+describe('the push, while another worktree is still installed', () => {
+  gitTest('with auto-sync off it asks, and pushes the unpushed tracker commits only after the typed confirmation', async ({ world }) => {
+    await installedRepo(world.a);
+    await world.a.addWorktree('feature');
+    await unpushedCommit(world.a);
+    const local = await tip(world.a, 'refs/grimoire/tracker');
+    expect(await remoteTip(world.a)).not.toBe(local);
+
+    const { report, asked } = await uninstall(world.a, ['y', 'uninstall']);
+
+    expect(asked[0]).toMatch(/^Push 1 unpushed tracker commit once you confirm\? \[y\/N\]/);
+    expect(report.sync).toMatchObject({ pushed: true });
+    expect(await remoteTip(world.a)).toBe(local);
+    expect(report.uninstalled).toBe(true);
   });
 });
 
