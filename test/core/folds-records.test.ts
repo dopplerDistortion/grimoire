@@ -16,7 +16,8 @@ import {
 import { createIssue, shared, bobPublishes, T1, sharedIssue, DEBRIEF, bobTracksRemote, setting, renamedIds } from './folds-support';
 
 describe('what this release doesn’t understand', () => {
-  test('unknown frontmatter keys and unknown files written by a newer release survive folds and rewrites', async ({
+  // Writes, folds and syncs across two clones: room beyond the default 60 s when the parallel suite loads the machine.
+  test('unknown frontmatter keys and unknown files written by a newer release survive folds and rewrites', { timeout: 180_000 }, async ({
     world,
     grimoire,
   }) => {

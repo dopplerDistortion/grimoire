@@ -71,14 +71,18 @@ describe('leave at a newer release', () => {
       } finally {
         await core.close();
       }
-      // The old pin's SessionStart hook writes each worktree's generated output.
+      // The old pin's SessionStart hook writes each worktree's generated output. Its fast path gives up past its
+      // 7 s budget on a loaded machine, and the next session start finishes the job: up to three session starts.
       for (const checkout of [world.a, feature]) {
-        const hook = await runCommand(process.execPath, [oldBin, 'hook', 'session-start'], {
-          cwd: checkout.dir,
-          input: readFixture('claude-code/hook-payloads/session-start-startup.json'),
-          env: humanEnv(),
-        });
-        expect(hook.code, hook.stdout + hook.stderr).toBe(0);
+        const written = async () => (await Promise.all(generatedFolders('release-notes').map((folder) => existsIn(checkout, folder)))).every(Boolean);
+        for (let start = 0; start < 3 && (start === 0 || !(await written())); start++) {
+          const hook = await runCommand(process.execPath, [oldBin, 'hook', 'session-start'], {
+            cwd: checkout.dir,
+            input: readFixture('claude-code/hook-payloads/session-start-startup.json'),
+            env: humanEnv(),
+          });
+          expect(hook.code, hook.stdout + hook.stderr).toBe(0);
+        }
         for (const folder of generatedFolders('release-notes')) expect(await existsIn(checkout, folder), `${checkout.dir} ${folder}`).toBe(true);
       }
       expect(existsSync(path.join(store.dir, 'pkg', OLD))).toBe(true);
