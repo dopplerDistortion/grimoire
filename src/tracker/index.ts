@@ -74,7 +74,7 @@ export {
   type TrackerRefTips,
   type TreeInspection,
 } from './check';
-export { isKnownOp, opEffect, type OpEffect } from './ops';
+export { commitTrailers, isKnownOp, opEffect, type OpEffect } from './ops';
 export {
   CHORE_KINDS,
   randomRunId,
