@@ -217,6 +217,9 @@ describe('the chore carriers', () => {
     expect(text, where).toContain('never refer to pattern pages or the wiki');
     expect(text, where).toContain('never use `apply_patch` or `web_search`');
     expect(text, where).toContain('Never ask for approval');
+    // A user's request always works (§16): the run is manual when its invoker says the user asked.
+    expect(text, where).toContain('Pass `manual: true` only when the user explicitly asked for this run');
+    expect(text, where).toContain('your arguments or your task message say `manual`');
   }
 
   gitTest('init writes the four carrier files, each as a manifest file entry, carrying the one shipped procedure', async ({ world }) => {
@@ -234,8 +237,17 @@ describe('the chore carriers', () => {
 
     // Claude Code (spike C): the skill forks into the subagent in the background, and has no allowed-tools (it made the Skill call itself need approval).
     const skill = frontmatter(await read(root, '.claude/skills/grimoire-chores/SKILL.md'));
-    expect(skill.fields).toEqual({ name: 'grimoire-chores', description, context: 'fork', agent: 'grimoire-chores', background: 'true' });
+    // The fork sees no conversation: the main context passes `manual` as the skill's argument when the user asked, and the body carries it.
+    expect(skill.fields).toEqual({
+      name: 'grimoire-chores',
+      description: `${description} When the user asked for this run, pass manual as the argument.`,
+      'argument-hint': 'manual',
+      context: 'fork',
+      agent: 'grimoire-chores',
+      background: 'true',
+    });
     expectProcedure(skill.body, 'Claude Code skill');
+    expect(skill.body).toContain("This run's arguments: $ARGUMENTS");
     // The subagent: the 4 chore tools plus ToolSearch (C2), and no CLAUDE.md.
     const agent = frontmatter(await read(root, '.claude/agents/grimoire-chores.md'));
     expect(agent.fields).toMatchObject({
@@ -249,7 +261,15 @@ describe('the chore carriers', () => {
     // Codex (spike F): the skill spawns the role with a fresh context, and runs in place when it can't.
     const codexSkill = frontmatter(await read(root, '.agents/skills/grimoire-chores/SKILL.md'));
     expect(codexSkill.fields).toEqual({ name: 'grimoire-chores', description });
-    for (const part of ['`spawn_agent`', '`agent_type` set to `grimoire-chores`', '`fork_context` set to `false`', '`fork_turns: "none"`', 'If spawning is unavailable, run the chore here']) {
+    for (const part of [
+      '`spawn_agent`',
+      '`agent_type` set to `grimoire-chores`',
+      '`fork_context` set to `false`',
+      '`fork_turns: "none"`',
+      'If spawning is unavailable, run the chore here',
+      // The role starts fresh: the spawn message is how it learns the user asked.
+      'If the user explicitly asked for this run, give it the message "Run the grimoire chore; the user asked for this run: manual." instead',
+    ]) {
       expect(codexSkill.body, part).toContain(part);
     }
     expectProcedure(codexSkill.body, 'Codex skill');

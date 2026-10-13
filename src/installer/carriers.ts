@@ -31,12 +31,16 @@ export function claudeChoreSkillText(): string {
   return markdown(
     [
       ['name', CHORES_NAME],
-      ['description', CHORES_SKILL_DESCRIPTION],
+      // The fork sees none of the conversation: the user's request reaches it only as the skill's argument (§16: a user's request always works).
+      ['description', `${CHORES_SKILL_DESCRIPTION} When the user asked for this run, pass manual as the argument.`],
+      ['argument-hint', 'manual'],
       ['context', 'fork'],
       ['agent', CHORES_NAME],
       ['background', 'true'],
     ],
-    CHORE_PROCEDURE,
+    `${CHORE_PROCEDURE}
+
+This run's arguments: $ARGUMENTS`,
   );
 }
 
@@ -56,7 +60,7 @@ export function claudeChoreAgentText(): string {
 /** `.agents/skills/grimoire-chores/SKILL.md`. */
 export function codexChoreSkillText(): string {
   const body = [
-    'Spawn a subagent with `spawn_agent`: `agent_type` set to `grimoire-chores` and `fork_context` set to `false` (on the v2 tool: `fork_turns: "none"`). Give it the message "Run the due grimoire chore." Wait for it, then return its final message verbatim, and nothing else.',
+    'Spawn a subagent with `spawn_agent`: `agent_type` set to `grimoire-chores` and `fork_context` set to `false` (on the v2 tool: `fork_turns: "none"`). Give it the message "Run the due grimoire chore." If the user explicitly asked for this run, give it the message "Run the grimoire chore; the user asked for this run: manual." instead: the subagent sees none of this conversation. Wait for it, then return its final message verbatim, and nothing else.',
     '',
     'If spawning is unavailable, run the chore here instead, with this procedure:',
     '',

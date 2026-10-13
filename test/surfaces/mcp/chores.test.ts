@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect } from 'vitest';
 import { readFixtureJson } from '#harness';
 import type { Core } from '../../../src/core';
+import { claudeChoreSkillText, codexChoreSkillText } from '../../../src/installer/carriers';
 import { CHORE_PROCEDURE, CHORES_PROMPT_TEXT } from '../../../src/knowledge/chores/offering';
 import { preToolUse } from '../../../src/surfaces/hooks/pre-tool-use';
 import { grimoireServerFactory } from '../../../src/surfaces/mcp/server';
@@ -103,6 +104,43 @@ describe('the chore surface of grimoire mcp', () => {
       expect(answer).toMatch(/^grimoire chores: compile done, 1 trace, 0 pages \(0 created, 0 updated\); run \S+$/);
       expect(answer).not.toContain('STUB-REASON');
       expect(answer).not.toContain(fail);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a user’s request when nothing is due: the main context’s `manual` reaches the isolated chore context through each carrier, and the run is admitted', async ({ world, grimoire }) => {
+    const clock = new Clock(T0);
+    const core = grimoire.makeCore({ clock: clock.now });
+    // One settled failing trace, below the default 5: nothing is due.
+    await workPair(core, grimoire.ctx, 'fail');
+    clock.advance(25);
+    const { client, close } = await serve(core, world.a.dir, 'modern');
+
+    let calls = 0;
+    const call = async (tool: string, input: Record<string, unknown>): Promise<Record<string, any>> => {
+      const toolUseId = `toolu_manual_${++calls}`;
+      const payload = { ...readFixtureJson<Record<string, unknown>>('claude-code/hook-payloads/pre-tool-use-chore-subagent.json'), tool_name: `mcp__grimoire__${tool}`, tool_input: input, tool_use_id: toolUseId };
+      const hooked = JSON.parse(await preToolUse(JSON.stringify(payload), { startDir: tmpdir() })) as { hookSpecificOutput: { updatedInput: Record<string, unknown> } };
+      const result = await client.callTool({ name: tool, arguments: hooked.hookSpecificOutput.updatedInput, _meta: { 'claudecode/toolUseId': toolUseId } });
+      return result.structuredContent as Record<string, any>;
+    };
+
+    /** What the isolated context is given: Claude Code substitutes the skill's argument into its body; Codex's role gets the spawn message the skill names. */
+    const claudeTask = (argument: string) => claudeChoreSkillText().replace(/^---\n[\s\S]*?\n---\n/, '').replace('$ARGUMENTS', argument);
+    const codexMessage = (asked: boolean) => [...codexChoreSkillText().matchAll(/give it the message "([^"]+)"/gi)][asked ? 1 : 0]![1]!;
+
+    /** The stub agent's step 1, as the procedure words it: manual only when its arguments or task message say `manual`. */
+    const start = (task: string) => call('chore_start', /\bmanual\b/.test(task.replace(CHORE_PROCEDURE, '')) ? { manual: true } : {});
+
+    try {
+      for (const task of [claudeTask(''), codexMessage(false)]) {
+        expect((await start(task)).error, task.slice(-80)).toMatchObject({ code: 'NOT_DUE' });
+      }
+      const brief = await start(claudeTask('manual'));
+      expect(brief, JSON.stringify(brief)).toMatchObject({ kind: 'wiki-maintainer', origin: 'manual' });
+      expect((await call('chore_abandon', { run: brief.run, reason: 'stub done' })).error).toBeUndefined();
+      expect(await start(codexMessage(true))).toMatchObject({ kind: 'wiki-maintainer', origin: 'manual' });
     } finally {
       await close();
     }

@@ -19,7 +19,7 @@ export const CHORE_TOOLS = ['chore_start', 'chore_read', 'chore_submit', 'chore_
 
 /** The seven steps (spec §16 Carriers). */
 const STEPS = [
-  '1. Start: call `chore_start`. Pass `manual: true` only when the user explicitly asked for this run. It returns the run handle, the chore, why it is due, and the `output_schema` your result must match. If it answers NOT_DUE, return its message verbatim and stop.',
+  '1. Start: call `chore_start`. Pass `manual: true` only when the user explicitly asked for this run: you see their request, or your arguments or your task message say `manual`. It returns the run handle, the chore, why it is due, and the `output_schema` your result must match. If it answers NOT_DUE, return its message verbatim and stop.',
   '2. Page the inputs: call `chore_read` with the `run` until it returns no `cursor`. Pass `item` to read one served item again.',
   '3. Reason: work out the result from the served items alone. Cite only items `chore_read` served you.',
   '4. Submit: call `chore_submit` with the `run` and a `result` in the shape of `output_schema`.',
