@@ -168,7 +168,7 @@ Within one major, reverting an upgrade's commit undoes it. There is no update ch
 
 The package has no runtime dependencies (`npm run check:deps` fails on any `dependencies`, `optionalDependencies`, `peerDependencies` or `bundleDependencies`); everything is bundled from devDependencies, and the bundled packages' licenses ship in `dist/THIRD_PARTY_LICENSES.md`.
 
-**Follow-up from 1.0.1 on: provenance.** 1.0.0 is published from a maintainer's machine, which can't produce npm provenance (it needs a CI OIDC identity), so `publishConfig` sets only `"access": "public"`. From 1.0.1 on, publish from GitHub Actions with npm trusted publishing, which adds provenance. 1.0.0 was checked on Windows with Node 24; CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) now runs `npm run check` on Windows, macOS and Linux at the Node floor (22) and the current LTS (24).
+**Follow-up from 1.0.1 on: provenance.** 1.0.0 is published from a maintainer's machine, which can't produce npm provenance (it needs a CI OIDC identity), so `publishConfig` sets only `"access": "public"`. From 1.0.1 on, publish from GitHub Actions with npm trusted publishing, which adds provenance. 1.0.0 was checked on Windows with Node 24; CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) now runs the `npm run check` steps on Windows, macOS and Linux at the Node floor (22) and the current LTS (24); on Windows the tests are split across three jobs.
 
 ## Contributing
 
