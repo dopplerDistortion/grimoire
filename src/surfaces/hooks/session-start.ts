@@ -104,16 +104,22 @@ async function compose(payload: unknown, ctx: SessionStartContext): Promise<Sess
   const root = await findHostRoot(ctx.startDir).catch(() => null);
   const store = root === null ? null : await locateMachineLocalStore(root);
   if (!store || root === null) return {};
+  const deadline = started + (ctx.fastPathBudgetMs ?? FAST_PATH_BUDGET_MS);
   // The knowledge facts read the tracker while the fast path writes the copies: neither waits for the other.
+  // Past the same budget the hook stops waiting for them and says what it knows without.
   const [fast, knowledge] = await Promise.all([
-    sessionStartFastPath(store, root, { deadline: started + (ctx.fastPathBudgetMs ?? FAST_PATH_BUDGET_MS) }).catch((error: unknown) => {
+    sessionStartFastPath(store, root, { deadline }).catch((error: unknown) => {
       hookFailed(error);
       return null;
     }),
-    knowledgeFacts(store, root).catch((error: unknown) => {
-      hookFailed(error);
-      return null;
-    }),
+    byDeadline(
+      () =>
+        knowledgeFacts(store, root).catch((error: unknown) => {
+          hookFailed(error);
+          return null;
+        }),
+      deadline,
+    ),
   ]);
   await markCodexSession(store, payload).catch(() => {});
   const changed = fast?.changed === true;
@@ -129,6 +135,21 @@ async function compose(payload: unknown, ctx: SessionStartContext): Promise<Sess
     last: lastPriorityLine(strayEditsLine(edits), refreshed ? refreshNotice(refreshed.paths.length, null) : null),
   });
   return { ...(line ? { line } : {}), ...(changed ? { reloadSkills: true } : {}) };
+}
+
+/** `work`'s value, or null once `deadline` (epoch ms) passes first; past it already, the work never starts. */
+async function byDeadline<T>(work: () => Promise<T | null>, deadline: number): Promise<T | null> {
+  if (!Number.isFinite(deadline)) return work();
+  if (Date.now() >= deadline) return null;
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+  });
+  try {
+    return await Promise.race([work(), late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

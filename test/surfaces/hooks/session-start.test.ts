@@ -269,6 +269,14 @@ describe('the session line, by priority (spec §12)', () => {
     expectLine(await lines(root), 'grimoire: a maintenance chore is due; 1 skill proposal awaits review');
   });
 
+  gitTest('past the hook’s budget it stops waiting for the chore facts: no chore line, and the hook still answers', async ({ world }) => {
+    const root = await setUp(world);
+    await choreDue(world);
+
+    expect(await hook(root, CLAUDE[0]!, 0)).toEqual({ code: 0, output: '' });
+    expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: `${ASK}\n` });
+  });
+
   gitTest('a pin mismatch outranks a due chore', async ({ world }) => {
     const root = await setUp(world, '9.9.9');
     await choreDue(world);
