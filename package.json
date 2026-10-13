@@ -1,18 +1,45 @@
 {
   "name": "@goksening/grimoire",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "An agent-native issue tracker that lives in your git repo, runs fully locally and syncs only through git.",
+  "keywords": [
+    "issue-tracker",
+    "git",
+    "mcp",
+    "agents",
+    "claude-code",
+    "codex",
+    "cli",
+    "local-first"
+  ],
+  "homepage": "https://github.com/dopplerDistortion/grimoire#readme",
+  "bugs": {
+    "url": "https://github.com/dopplerDistortion/grimoire/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dopplerDistortion/grimoire.git"
+  },
+  "license": "MIT",
+  "author": "Göksenin Güngör",
   "type": "module",
   "bin": {
     "grimoire": "dist/grimoire.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "prepack": "node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "build:cli": "node scripts/build.mjs cli",
     "build:dashboard": "node scripts/build.mjs dashboard",

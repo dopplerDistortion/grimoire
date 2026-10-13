@@ -5,6 +5,7 @@ import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import type { GitWorld } from '#harness';
 import { openTracker } from '../../src/tracker';
+import { VERSION } from '../../src/version';
 import {
   agentContext,
   commitToTracker,
@@ -73,7 +74,7 @@ describe('wiki edit', () => {
     expect(await trackerFile(world.a, tip, 'knowledge/wiki/index.md')).toBe(
       [
         '---',
-        'generated-by: "0.0.0"',
+        `generated-by: "${VERSION}"`,
         '---',
         '# Wiki index',
         '',
@@ -84,7 +85,7 @@ describe('wiki edit', () => {
     expect(await trackerFile(world.a, tip, 'knowledge/wiki/log.md')).toBe(
       [
         '---',
-        'generated-by: "0.0.0"',
+        `generated-by: "${VERSION}"`,
         '---',
         '# Wiki log',
         '',

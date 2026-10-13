@@ -74,7 +74,7 @@ export function reportOf(result: RunResult): Report {
 }
 
 /** npm's own CLI script, run with this node (no shell, no PATH lookup). */
-function npmCli(): string {
+export function npmCli(): string {
   const candidates = [
     process.env.npm_execpath,
     path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),

@@ -3,12 +3,13 @@
 //   dist/launch.mjs    a version copy's entry: the launcher imports it (spec §11, frozen)
 //   dist/chunks/       their lazily imported chunks (one verb's code loads only for that verb)
 //   dist/dashboard/    the Preact dashboard, built by Vite into hashed static assets
+//   dist/THIRD_PARTY_LICENSES.md  the license notices of every package bundled into the above
 //
 //   node scripts/build.mjs [cli|dashboard] [--out-dir <dir>] [--version <semver>]   (default: both, into dist/)
 //
 //   --version builds the package as another version than package.json's (tests
 //   pack copies of several versions to exercise pins, joins and upgrades).
-import { readFile, rm } from 'node:fs/promises';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,17 +91,63 @@ async function buildCli(dir) {
       }
     }
   }
+  return Object.keys(result.metafile.inputs);
 }
 
 /** @param {string} dir */
 async function buildDashboard(dir) {
-  await viteBuild({
+  const result = await viteBuild({
     configFile: path.join(repoRoot, 'vite.config.ts'),
     logLevel: 'warn',
     build: { outDir: dir, emptyOutDir: true },
   });
+  const outputs = (Array.isArray(result) ? result : [result]).flatMap((build) => ('output' in build ? build.output : []));
+  return outputs.flatMap((output) => (output.type === 'chunk' ? output.moduleIds : []));
+}
+
+/**
+ * The package folder (`…/node_modules/<name>` or `…/node_modules/@scope/<name>`)
+ * a bundled module came from, or null for grimoire's own code.
+ * @param {string} file
+ */
+function packageDirOf(file) {
+  const parts = path.resolve(repoRoot, file.replace(/^\0/, '').replace(/\?.*$/, '')).split(path.sep);
+  const at = parts.lastIndexOf('node_modules');
+  const name = at < 0 ? undefined : parts[at + 1];
+  if (name === undefined) return null;
+  return parts.slice(0, at + (name.startsWith('@') ? 3 : 2)).join(path.sep);
+}
+
+/**
+ * `dist/THIRD_PARTY_LICENSES.md`: every package bundled into dist/, with its
+ * version, its declared license and its license (and NOTICE) files whole. The
+ * bundles carry other packages' code, and their licenses ask for the notices.
+ * @param {Iterable<string>} modules  the bundled modules' paths
+ */
+async function writeNotices(modules) {
+  const dirs = new Set();
+  for (const file of modules) {
+    const dir = packageDirOf(file);
+    if (dir) dirs.add(dir);
+  }
+  const sections = [];
+  for (const dir of dirs) {
+    const { name, version, license } = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'));
+    const files = (await readdir(dir)).filter((entry) => /^(licen[cs]e|copying|notice)(\.(md|txt))?$/i.test(entry)).sort();
+    const texts = await Promise.all(files.map(async (entry) => (await readFile(path.join(dir, entry), 'utf8')).replace(/\r\n/g, '\n').trim()));
+    const declared = typeof license === 'string' ? license : 'see its license file';
+    const body = texts.length > 0 ? texts.join('\n\n') : `${name} ships no license file; its package.json declares ${declared}.`;
+    sections.push({ name, text: `## ${name}@${version} (${declared})\n\n${body}\n` });
+  }
+  sections.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const head = '# Third-party licenses\n\ngrimoire bundles the code of these packages into `dist/`. Each one is listed with its version and license, followed by its license text.\n';
+  await writeFile(path.join(outDir, 'THIRD_PARTY_LICENSES.md'), [head, ...sections.map((section) => section.text)].join('\n'));
 }
 
 if (target === 'all') await rm(outDir, { recursive: true, force: true });
-if (target === 'all' || target === 'cli') await buildCli(outDir);
-if (target === 'all' || target === 'dashboard') await buildDashboard(path.join(outDir, 'dashboard'));
+/** Every bundled module, for the license notices. */
+const bundled = [];
+if (target === 'all' || target === 'cli') bundled.push(...(await buildCli(outDir)));
+if (target === 'all' || target === 'dashboard') bundled.push(...(await buildDashboard(path.join(outDir, 'dashboard'))));
+// A dashboard-only build leaves the notices alone: they would lose the CLI's packages.
+if (target !== 'dashboard') await writeNotices(bundled);

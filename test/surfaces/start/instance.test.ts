@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect } from 'vitest';
 import { putMachineSetting } from '../../../src/core/settings';
 import { cloneId, defaultDashboardPort, MachineLocalStore } from '../../../src/machine-local';
 import { callControl, ControlError, controlPaths } from '../../../src/surfaces/start/control';
+import { VERSION } from '../../../src/version';
 import { coreTest } from '../../core/support';
 import { cli, cliAtTerminal, lastJsonOnScreen } from '../cli/support';
 import { buildFull, codeOf, exchange, request, signedIn, spawnStart, startEnv, startLockOf, stopStart, type StartProcess } from './support';
@@ -78,7 +79,7 @@ describe('start: one instance per clone', () => {
 
     expect(second.code).toBe(0);
     expect(second.json).toMatchObject({
-      running: { url: `http://127.0.0.1:${first.port}/`, port: first.port, version: '0.0.0', pid: first.child.pid },
+      running: { url: `http://127.0.0.1:${first.port}/`, port: first.port, version: VERSION, pid: first.child.pid },
       signed_in: true,
       version_differs: false,
     });
@@ -101,9 +102,9 @@ describe('start: one instance per clone', () => {
     });
 
     expect(run.code).toBe(0);
-    expect(run.screen).toContain('grimoire start 0.0.0 already serves this clone');
+    expect(run.screen).toContain(`grimoire start ${VERSION} already serves this clone`);
     expect(run.screen).toMatch(/Sign in: http:\/\/127\.0\.0\.1:\d+\/login#code=/);
-    expect(lastJsonOnScreen(run.screen)).toMatchObject({ running: { port: first.port, version: '0.0.0' }, version_differs: true });
+    expect(lastJsonOnScreen(run.screen)).toMatchObject({ running: { port: first.port, version: VERSION }, version_differs: true });
     expect((await startLockOf(clone.commonDir))?.pid).toBe(first.child.pid);
   });
 
@@ -159,7 +160,7 @@ describe('start: one instance per clone', () => {
     const code = await stopStart(start, clone.commonDir, clone.env);
 
     expect(secretWhileServing).toBe(true);
-    expect(recordWhileServing).toEqual([expect.objectContaining({ pid: start.child.pid, role: 'start', worktree: clone.dir, pin: '0.0.0' })]);
+    expect(recordWhileServing).toEqual([expect.objectContaining({ pid: start.child.pid, role: 'start', worktree: clone.dir, pin: VERSION })]);
     expect(code).toBe(0);
     expect(await startLockOf(clone.commonDir)).toBeNull();
     expect(existsSync(paths.secretFile)).toBe(false);

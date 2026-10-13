@@ -6,6 +6,7 @@ import path from 'node:path';
 import { autoSync, type CallContext, type Core } from '../../src/core';
 import { openTracker, type NetworkGit, type TrackerStore } from '../../src/tracker';
 import { runNetworkGit, type NetworkGitRun } from '../../src/tracker/remote';
+import { VERSION } from '../../src/version';
 import { agentContext, type Grimoire } from './support';
 import { git, type Checkout, type GitWorld } from '#harness';
 
@@ -81,7 +82,7 @@ export async function errorOf(
 /** Writes `.grimoire/config.yml` naming tracker root `root` into `dir` (what `init` will commit). */
 export async function nameRoot(dir: string, root: string): Promise<void> {
   await mkdir(path.join(dir, '.grimoire'), { recursive: true });
-  await writeFile(path.join(dir, '.grimoire', 'config.yml'), `version: "0.0.0"\ninstall_format: 1\ntracker_root: "${root}"\n`);
+  await writeFile(path.join(dir, '.grimoire', 'config.yml'), `version: "${VERSION}"\ninstall_format: 1\ntracker_root: "${root}"\n`);
 }
 
 /** The root commit R of `checkout`'s tracker. */

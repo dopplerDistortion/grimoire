@@ -2,6 +2,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
+import { VERSION } from '../../../src/version';
 import { coreTest } from '../../core/support';
 import { cli } from '../cli/support';
 import { buildFull, request, signedIn, spawnStart, SseClient, startEnv, stopStart, type StartProcess } from './support';
@@ -88,8 +89,8 @@ describe('start: live events', () => {
     const after = await request(port, { path: '/api/instance', headers: { cookie } });
     events.close();
 
-    expect(before.json()).toMatchObject({ version: '0.0.0', pin: null, pin_differs: false, notice: null, port });
+    expect(before.json()).toMatchObject({ version: VERSION, pin: null, pin_differs: false, notice: null, port });
     expect(change.data).toMatchObject({ instance: true, issues: [] });
-    expect(after.json()).toMatchObject({ version: '0.0.0', pin: '9.9.9', pin_differs: true, notice: 'this worktree now pins 9.9.9; restart `start`' });
+    expect(after.json()).toMatchObject({ version: VERSION, pin: '9.9.9', pin_differs: true, notice: 'this worktree now pins 9.9.9; restart `start`' });
   });
 });
