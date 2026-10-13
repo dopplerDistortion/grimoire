@@ -1,7 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect } from 'vitest';
-import { gitTest as test } from '#harness';
+import { gitTest as test, makeUnlistable, permissionsApply } from '#harness';
 import {
   locateMachineLocalStore,
   MachineLocalStore,
@@ -183,6 +183,21 @@ describe('process records', () => {
         'worktree',
       ].sort(),
     );
+  });
+
+  test.runIf(permissionsApply)('a records folder that can’t be listed is an error, never “no processes”; a missing one is none', async ({ world }) => {
+    const store = await storeOf(world.a.dir);
+    expect(await store.processes.live()).toEqual([]);
+    const registration = await store.processes.register({ role: 'mcp', client: null, worktree: world.a.dir, pin: '1.0.0', pathSource: null });
+    const undo = await makeUnlistable(path.join(store.dir, 'processes'));
+    try {
+      await expect(store.processes.live()).rejects.toMatchObject({ code: expect.stringMatching(/^(EPERM|EACCES)$/) });
+      await expect(store.processes.liveWhere(() => true)).rejects.toMatchObject({ code: expect.stringMatching(/^(EPERM|EACCES)$/) });
+    } finally {
+      await undo();
+    }
+    expect(await store.processes.live()).toEqual([registration.record]);
+    await registration.unregister();
   });
 });
 

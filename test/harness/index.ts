@@ -28,6 +28,6 @@ export {
   readFixtureBytes,
   readFixtureJson,
 } from './fixtures';
-export { makeUnwritable, permissionsApply } from './permissions';
+export { makeUnlistable, makeUnwritable, permissionsApply } from './permissions';
 export { trackPidFile } from './children';
 export { fakeExecutable } from './fake-exe';

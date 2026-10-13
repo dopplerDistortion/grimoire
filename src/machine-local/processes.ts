@@ -154,8 +154,18 @@ export class ProcessRecords {
     return stale.map((e) => e.record);
   }
 
+  /**
+   * Every readable record. No folder means no records; a folder that can't be
+   * listed (EACCES, EMFILE, EBUSY) is an error, never "nothing runs": a caller
+   * that acts on the answer (pruning copies) must not act on an empty one.
+   * Callers that only report may catch it.
+   */
   private async read(): Promise<{ file: string; record: ProcessRecord }[]> {
-    const names = await readdir(this.dir).catch(() => [] as string[]);
+    const names = await readdir(this.dir).catch((error: unknown) => {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return [] as string[];
+      throw error;
+    });
     const entries: { file: string; record: ProcessRecord }[] = [];
     for (const name of names.sort()) {
       if (isTempName(name) || !name.endsWith('.json')) continue;
