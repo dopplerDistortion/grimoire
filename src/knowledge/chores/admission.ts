@@ -52,7 +52,9 @@ function notIsolated(message: string, hint: string): GrimoireError {
  * The context a call comes from, as chore runs key it: the Claude subagent
  * (session and agent id), the Codex thread, the runner, or the server process
  * of a caller nothing identifies. Null for a caller that can never hold a run
- * (a Claude main context or shell, a CLI call with no session, the dashboard).
+ * (a Claude main context or shell, a CLI call with no session, a Codex call
+ * naming neither session nor thread, the dashboard). Admission keys a run with
+ * this same function, so a run's context and its later calls always agree.
  */
 export function choreContextKey(ctx: CallContext): string | null {
   const evidence = observedEvidence(ctx);
@@ -60,7 +62,7 @@ export function choreContextKey(ctx: CallContext): string | null {
     case 'runner':
       return `runner/${ctx.nonce}`;
     case 'mcp':
-      if (evidence.source === 'hint') return `claude/${evidence.session}/${evidence.context ?? MAIN_CONTEXT}`;
+      if (evidence.source === 'hint') return evidence.session === undefined ? null : `claude/${evidence.session}/${evidence.context ?? MAIN_CONTEXT}`;
       if (evidence.source === 'meta') {
         const thread = evidence.context ?? evidence.session;
         return thread === undefined ? null : `codex/${thread}`;
@@ -80,12 +82,14 @@ export function choreContextKey(ctx: CallContext): string | null {
 /** Places the caller in the admission table, or NOT_ISOLATED for a row that never admits. */
 export function classifyCaller(ctx: CallContext): ChoreCaller {
   const evidence = observedEvidence(ctx);
-  if (ctx.surface === 'runner') return { isolation: 'runner', key: `runner/${ctx.nonce}` };
+  // The run's key comes from choreContextKey, the same function later calls are matched with.
+  const key = choreContextKey(ctx);
+  if (ctx.surface === 'runner' && key !== null) return { isolation: 'runner', key };
   if (ctx.surface === 'mcp') {
     if (evidence.source === 'hint') {
       const { session, context } = evidence;
-      if (evidence.agentType === CHORE_AGENT_TYPE && context !== undefined && context !== MAIN_CONTEXT) {
-        return { isolation: 'claude-chore-agent', key: `claude/${session}/${context}`, session: session!, context };
+      if (evidence.agentType === CHORE_AGENT_TYPE && key !== null && session !== undefined && context !== undefined && context !== MAIN_CONTEXT) {
+        return { isolation: 'claude-chore-agent', key, session, context };
       }
       throw notIsolated(
         context === undefined || context === MAIN_CONTEXT
@@ -100,23 +104,26 @@ export function classifyCaller(ctx: CallContext): ChoreCaller {
     }
     if (evidence.source === 'meta') {
       const { session, context } = evidence;
-      if (session !== undefined && context !== undefined && context !== session) {
-        return { isolation: 'codex-subagent', key: `codex/${context}`, session, context };
+      const root = session ?? context;
+      // Fails closed: a Codex call naming neither its session nor its thread (a call id alone) can't be told apart.
+      if (key === null || root === undefined) {
+        throw notIsolated("this Codex call names no session or thread, so grimoire can't tell its context apart", USE_THE_SKILL);
       }
-      const root = (session ?? context)!;
-      return { isolation: 'codex-root', key: `codex/${root}`, session: root, context: root, rootSession: root };
+      if (session !== undefined && context !== undefined && context !== session) {
+        return { isolation: 'codex-subagent', key, session, context };
+      }
+      return { isolation: 'codex-root', key, session: root, context: root, rootSession: root };
     }
-    return { isolation: 'unidentified', key: `process/${ctx.nonce}`, process: ctx.nonce };
+    if (key !== null) return { isolation: 'unidentified', key, process: ctx.nonce };
   }
   if (ctx.surface === 'cli') {
     if (ctx.client?.name === 'claude-code') {
       throw notIsolated('a Claude Code shell is never the chore subagent', USE_THE_SKILL);
     }
-    if (evidence.session === undefined) {
+    if (key === null || evidence.session === undefined) {
       throw notIsolated('this shell names no agent session, so there is nothing to mark', 'ask an agent to run the grimoire-chores skill, or use `grimoire chore run`');
     }
-    const thread = evidence.context ?? evidence.session;
-    return { isolation: 'codex-root', key: `codex/${thread}`, session: evidence.session, context: thread, rootSession: evidence.session };
+    return { isolation: 'codex-root', key, session: evidence.session, context: evidence.context ?? evidence.session, rootSession: evidence.session };
   }
   throw notIsolated(`chores aren't run from the ${ctx.surface}`, 'ask an agent to run the grimoire-chores skill, or use `grimoire chore run`');
 }

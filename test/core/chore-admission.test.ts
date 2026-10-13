@@ -81,6 +81,15 @@ describe('the admission table', () => {
     expect(await core.call('chore_start', {}, codexRoot(grimoire.ctx, 'nonce-other'))).toMatchObject(notIsolated);
   });
 
+  test('a Codex call whose _meta names only a callId (no session, no thread) is refused, and starts no run', async ({ grimoire }) => {
+    const core = await dueCore(grimoire);
+    const real = codexRoot(grimoire.ctx);
+    const callIdOnly: CallContext = { ...real, mcp: { ...real.mcp!, meta: { callId: String(real.mcp!.meta!.callId) } } };
+    expect(await core.call('chore_start', {}, callIdOnly)).toMatchObject(notIsolated);
+    // Nothing was left open: an identifiable Codex caller still finds the chore due.
+    expect(await core.call('chore_start', {}, codexSubagent(grimoire.ctx))).toMatchObject({ ok: true, result: { isolation: 'codex-subagent' } });
+  });
+
   test('a context that is itself bound to an open attempt is always refused, even a Codex subagent', async ({ grimoire }) => {
     const core = await dueCore(grimoire);
     const subagent = codexSubagent(grimoire.ctx);
