@@ -175,3 +175,48 @@ export const purgeSession = define({
     return { ...write.result, history: historyOf(write.history) };
   },
 });
+
+/** One purge as the dashboard's Settings lists it. */
+export interface PurgedRecord {
+  kind: 'trace' | 'session' | 'proposal';
+  /** The attempt handle (a trace or one of its session records) or the proposal id. */
+  id: string;
+  /** A session record's key. */
+  key?: string;
+  /** A session record's: whether its facts were kept. */
+  facts?: PurgedFacts;
+  by: string;
+  at: string;
+  reason: string;
+}
+
+export interface PurgeListResult {
+  /** Newest first. */
+  purged: PurgedRecord[];
+  /** The history caveat. */
+  note: string;
+}
+
+const KEPT_NOTE =
+  'Pushed git history keeps purged content: grimoire never rewrites pushed history, so the remote and every clone that fetched it keep it until someone rewrites that history.';
+
+export const purgeList = define({
+  name: 'purge_list',
+  description: 'List the purged traces, session records and proposals: who purged each, when and why. Pushed history keeps their content. For people: the dashboard’s Settings.',
+  kind: 'read',
+  policy: 'human-read',
+  replay: 'none',
+  input: s.object({}),
+  async run(_input, { tracker }): Promise<PurgeListResult> {
+    const index = (await tracker.read()).purgeIndex();
+    const purged: PurgedRecord[] = [];
+    for (const [id, tombstone] of index.traces) purged.push({ kind: 'trace', id, ...tombstoneFields(tombstone) });
+    for (const [id, keys] of index.sessions) {
+      for (const [key, tombstone] of keys) purged.push({ kind: 'session', id, key, facts: tombstone.facts ?? 'purged', ...tombstoneFields(tombstone) });
+    }
+    for (const [id, tombstone] of index.proposals) purged.push({ kind: 'proposal', id, ...tombstoneFields(tombstone) });
+    const order = (r: PurgedRecord) => `${r.kind}\0${r.id}\0${r.key ?? ''}`;
+    purged.sort((x, y) => (x.at === y.at ? (order(x) < order(y) ? -1 : 1) : x.at < y.at ? 1 : -1));
+    return { purged, note: KEPT_NOTE };
+  },
+});

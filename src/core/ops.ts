@@ -14,7 +14,7 @@ import type { SkillEditResult, SkillListResult, SkillReadResult, SkillShowResult
 import type { SkillDiscardResult, SkillRecordResult, SkillStraysResult } from './stray-edits';
 import type { WikiEditResult, WikiListResult, WikiShowResult } from './wiki';
 import type { QuarantineResult } from './quarantine';
-import type { PurgeSessionResult, PurgeTraceResult } from './purge';
+import type { PurgeListResult, PurgeSessionResult, PurgeTraceResult } from './purge';
 import type { ProposalAcceptResult, ProposalDecisionResult, ProposalListResult, ProposalPurgeResult, ProposalRejectResult, ProposalShowResult } from './proposals';
 import type { SyncResult, SyncStatusResult } from './sync';
 import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
@@ -144,6 +144,7 @@ export interface OpResults {
   unquarantine: QuarantineResult;
   purge_trace: PurgeTraceResult;
   purge_session: PurgeSessionResult;
+  purge_list: PurgeListResult;
   proposal_list: ProposalListResult;
   proposal_show: ProposalShowResult;
   proposal_accept: ProposalAcceptResult;

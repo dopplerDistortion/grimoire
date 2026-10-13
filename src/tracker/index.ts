@@ -19,7 +19,7 @@ export {
 export type { NetworkGit, SyncOutcome, SyncSpec, SyncFailure, TextPolicy } from './sync';
 export { stripUserinfo, type SyncFailureClass } from './remote';
 export type { TrackerView, TrackerDraft, NewComment, NewAttempt, NewEnd, NewOutcome, NewPurge } from './view';
-export { parsePurge, serializePurge, type PurgeTombstone, type PurgedFacts } from './purge';
+export { parsePurge, serializePurge, type PurgeIndex, type PurgeTombstone, type PurgedFacts } from './purge';
 export type { IssueComment, CommentEntry } from './comment';
 export type { IssueRecord, IssueLink } from './record';
 export type {

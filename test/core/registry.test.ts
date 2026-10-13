@@ -29,6 +29,7 @@ describe('the op registry', () => {
         'proposal_reconsider',
         'proposal_reject',
         'proposal_show',
+        'purge_list',
         'purge_session',
         'purge_trace',
         'quarantine',
