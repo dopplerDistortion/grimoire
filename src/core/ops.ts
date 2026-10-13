@@ -20,6 +20,8 @@ import type { SyncResult, SyncStatusResult } from './sync';
 import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
 import type { ChoreSubmitResult } from './chore-submit';
 import type { ActivityResult } from './activity';
+import type { AttentionResult } from './attention';
+import type { AttemptShowResult } from './attempt-show';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -158,4 +160,6 @@ export interface OpResults {
   sync: SyncResult;
   sync_status: SyncStatusResult;
   activity: ActivityResult;
+  attention: AttentionResult;
+  attempt_show: AttemptShowResult;
 }

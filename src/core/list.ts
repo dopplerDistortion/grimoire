@@ -46,10 +46,10 @@ export interface ListResult {
   truncated?: true;
 }
 
-const VIEWS = ['open', 'ready', 'claimed', 'stale', 'blocked', 'conflicts', 'closed', 'all'] as const;
-type View = (typeof VIEWS)[number];
+export const VIEWS = ['open', 'ready', 'claimed', 'stale', 'blocked', 'conflicts', 'closed', 'all'] as const;
+export type View = (typeof VIEWS)[number];
 
-function inView(view: View, issue: IssueRecord, d: ReturnType<Derivations['of']>): boolean {
+export function inView(view: View, issue: IssueRecord, d: ReturnType<Derivations['of']>): boolean {
   switch (view) {
     case 'open':
       return issue.status === 'open';

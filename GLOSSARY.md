@@ -150,6 +150,10 @@ _Avoid_: Merge conflict, collision
 The local web page a running grimoire serves to the person at the machine for one host repo; it shows the live store and, together with human-only CLI commands, is the only place a human-only operation can be done.
 _Avoid_: UI, web app, admin panel, console
 
+**Attention**:
+The dashboard's home: only what a human must unblock (stale claims, fold conflicts, id collisions, sync failures a person must fix, stray edits and the knowledge items), each with its action inline; nothing an agent can settle on its own.
+_Avoid_: Inbox, notifications, alerts
+
 **Human-only operation**:
 An operation grimoire never offers to agents, available only in the dashboard and in CLI commands that need an interactive terminal, such as reopening an issue, purging a trace or deciding a skill proposal.
 _Avoid_: Admin action, privileged operation
