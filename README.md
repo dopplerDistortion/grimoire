@@ -45,11 +45,11 @@ In this README, `grimoire <verb>` means `node .grimoire/run.cjs <verb>` from any
 
 **Uninstall** with `grimoire uninstall` (human-only, typed confirmation, no `--yes`). It removes everything the manifest says grimoire wrote into the checkout, reporting what you edited and keeping files it doesn't know, then `.grimoire/`, and prints a commit and PR text. It never deletes the remote tracker branch: that stays as an archive, and it prints the commands to delete it or keep it under a tag. When no other worktree is still installed it also leaves the clone.
 
-**Leave** with `npx @goksening/grimoire leave` (or `grimoire leave`; human-only, no `--yes`). It removes grimoire from this clone on this machine: generated skill copies in every worktree, the machine-local store, the version copies and the launcher, and the local tracker ref once the remote holds its tip. Teammates run it after an uninstall lands. It refuses while grimoire processes still run in the clone, and lists them.
+**Leave** with `npx @goksening/grimoire leave` (or `grimoire leave`; human-only, no `--yes`). It removes grimoire from this clone on this machine: the generated output in every worktree, the machine-local store, the version copies and the launcher, and the local tracker ref once the remote holds its tip. Teammates run it after an uninstall lands. It refuses while grimoire processes still run in the clone, and lists them.
 
-### Generated skills and `git stash --all`
+### Generated output and `git stash --all`
 
-Evolved skills reach agents as generated files nobody commits: a copy of each skill in `.grimoire/skills/<name>/`, and a stub for each client in `.claude/skills/grimoire-<name>/` and `.agents/skills/grimoire-<name>/`. Every one of these folders ignores itself. **`git stash --all` is unsupported while copies exist**, because it stashes ignored files too; `git stash -u` is fine. An edit to a generated copy is set aside as a stray edit for a person to record or discard, and the served text is put back.
+Evolved skills reach agents as generated output, which nobody commits: a copy of each skill in `.grimoire/skills/<name>/`, and a stub for each client in `.claude/skills/grimoire-<name>/` and `.agents/skills/grimoire-<name>/`. Every one of these folders ignores itself. **`git stash --all` is unsupported while copies exist**, because it stashes ignored files too; `git stash -u` is fine. An edit to a generated copy is set aside as a stray edit for a person to record or discard, and the served text is put back.
 
 ## Trusting grimoire in your clients
 
@@ -110,7 +110,7 @@ A dependency bot may run `npx @goksening/grimoire@<new> init --upgrade --yes` in
 - **`grimoire doctor`** is a read-only report on the store (unparsable records, duplicate ids, conflicts, stale locks, sync ahead or behind), the install (the pinned copy and its integrity, the launcher, the shim, pointer and hook drift, client config conflicts, running servers against the pin) and capture statistics. **`grimoire doctor --fix`** makes the repairs that have a single answer: content pointer files and stale locks. `--readers` adds the transcript readers' structure statistics.
 - **"grimoire isn't set up on this machine"** (exit 3): this clone hasn't joined the pinned version. Run the `npx @goksening/grimoire@<pin> init` it names.
 - **A hook does nothing.** Hooks always exit 0 and swallow their own failures; set `GRIMOIRE_DEBUG=1` to see them on stderr. For Codex, check the `/hooks` approval above.
-- **`NOT_SYNCED`:** the tracker couldn't be fetched or pushed. `grimoire sync` retries now and returns the remote's message; `grimoire sync status` shows the last failure.
+- **`NOT_SYNCED`:** this clone can't use the tracker `.grimoire/config.yml` names: no ref here holds it (none fetched yet, or a different tracker; fetch it, or join with `init`), or the clone is shallow or partial and misses its history. `init` also gives it when it can't reach the remote it reads. A sync whose fetch or push failed is not `NOT_SYNCED`: `grimoire sync status` shows that failure with the remote's message, and `grimoire sync` retries now.
 
 ## Codex support, and how it was verified
 
