@@ -6,7 +6,7 @@
 // CLI-only in v1 (`grimoire wiki edit <slug>`).
 import { useState } from 'preact/hooks';
 import { read } from './api';
-import { ago, short } from './format';
+import { ago, hostOf, short } from './format';
 import { useKnowledgeRead } from './knowledge';
 import { Markdown } from './markdown';
 import { liftQuarantineDialog, quarantineDialog } from './trace-actions';
@@ -105,7 +105,7 @@ function WikiPage({ slug, onChanged }: { slug: string; onChanged: () => Promise<
             {page.kind} · knowledge/wiki/pages/{page.slug}.md{page.link ? ' · ' : ''}
             {page.link ? (
               <a href={page.link} target="_blank" rel="noreferrer noopener">
-                on the forge
+                on the forge ({hostOf(page.link) ?? 'link'})
               </a>
             ) : null}
           </div>
