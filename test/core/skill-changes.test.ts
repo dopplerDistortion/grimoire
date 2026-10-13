@@ -8,7 +8,7 @@ import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import type { GitWorld } from '#harness';
 import { terminal } from './chore-support';
-import { createResult, manualRun, ok, patchResult, proposer, readAll, SKILL, SKILL_V1, skillText, submit } from './proposer-support';
+import { createResult, manualRun, ok, patchResult, PORTS, proposer, readAll, SKILL, SKILL_V1, skillText, submit } from './proposer-support';
 import { agentContext, coreTest as test, fetchTracker, fetchTrackerFrom, pushTracker, TRACKER_REF, trackerTip } from './support';
 import { existsIn, expectNoOutput, fileIn, gitStatus, NOTES, NOTES_DESCRIPTION, pinAndCommit, writeInto } from '../generated/support';
 
@@ -303,6 +303,29 @@ describe('acknowledge', () => {
       expect(ok(await p.core.call('skill_show', { name: SKILL }, human(on))).skills[0]).toMatchObject({ current: p.base, contested: [] });
       expect(ok(await p.core.call('proposal_show', { id: proposal }, human(on)))).toMatchObject({ status: 'rejected', decision: { kind: 'reject', reason: 'suspicious' } });
     }
+  });
+
+  test('a contest settled by edits stays accepted when a later fork is acknowledged to a version other than the accepted one', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const { proposal } = ok(await submit(p, patchResult(p)));
+    await share(world);
+    const bob = agentContext(world.b);
+    ok(await p.core.call('proposal_reject', { id: proposal, reason: 'too-vague' }, human(bob)));
+    const accepted = ok(await p.core.call('proposal_accept', { id: proposal }, human(grimoire.ctx)));
+    await exchange(world);
+    expect(ok(await p.core.call('proposal_show', { id: proposal }, human(grimoire.ctx)))).toMatchObject({ status: 'contested' });
+
+    // Each clone edits on: either edit settles the contest in the accept's favour, and the two fork.
+    const text = `${SKILL_V1}${PORTS}`;
+    ok(await p.core.call('skill_edit', { name: SKILL, text: `${text}${SEEDS}`, base: accepted.version }, human(grimoire.ctx)));
+    ok(await p.core.call('skill_edit', { name: SKILL, text: `${text}${TIMEOUTS}`, base: accepted.version }, human(bob)));
+    await exchange(world);
+    expect(ok(await p.core.call('proposal_show', { id: proposal }, human(grimoire.ctx)))).toMatchObject({ status: 'accepted' });
+    const forked = ok(await p.core.call('skill_show', { name: SKILL }, human(grimoire.ctx))).skills[0]!;
+    const other = forked.superseded[0]!.version!;
+
+    ok(await p.core.call('skill_acknowledge', { name: SKILL, version: other }, human(grimoire.ctx)));
+    expect(ok(await p.core.call('proposal_show', { id: proposal }, human(grimoire.ctx)))).toMatchObject({ status: 'accepted', decision: { kind: 'accept' } });
   });
 
   test('every one of these ops from an agent surface gives HUMAN_ONLY', async ({ world, grimoire }) => {

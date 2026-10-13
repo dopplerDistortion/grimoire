@@ -17,7 +17,7 @@
 // - Otherwise it is `pending`, and holds the pending slot.
 import type { ProposalRecord, TrackerView } from '../tracker';
 import type { ProposalSignals } from './chores/due';
-import { deriveSkills, type SkillState } from './derive';
+import { deriveSkills, SETTLES, type SkillState } from './derive';
 import { parseLedgerRecord, type LedgerEntry } from './ledger';
 import type { TargetedPattern } from './scorecards';
 
@@ -49,6 +49,20 @@ function held(records: readonly LedgerEntry[], heads: readonly string[]): Set<st
   return seen;
 }
 
+/**
+ * The changes that settled a proposal's accepts and rejects: the earliest
+ * settling changes (more than one when clones settled it apart) that follow
+ * every one of them. Later changes, which follow those too, settled nothing.
+ */
+function settledBy(records: readonly LedgerEntry[], decisions: readonly LedgerEntry[]): LedgerEntry[] {
+  const decided = decisions.filter((entry) => entry.kind === 'accept' || entry.kind === 'reject');
+  const settling = records
+    .filter((entry) => SETTLES.has(entry.kind))
+    .map((entry) => ({ entry, before: held(records, entry.after) }))
+    .filter(({ before }) => decided.every((decision) => before.has(decision.id)));
+  return settling.filter((change) => !settling.some((other) => other !== change && change.before.has(other.entry.id))).map(({ entry }) => entry);
+}
+
 /** The status of every proposal, oldest first. `skills` is the skill book's states, by name. */
 export function proposalStates(proposals: readonly ProposalRecord[], skills: ReadonlyMap<string, SkillState>): ProposalState[] {
   return proposals.map((record) => {
@@ -61,16 +75,11 @@ export function proposalStates(proposals: readonly ProposalRecord[], skills: Rea
     if (accept) {
       if (skill?.contested.some((contest) => contest.proposal === record.id)) return decided('contested', accept);
       if (skill && [...skill.superseded, ...skill.lost].some((loser) => loser.id === accept.id)) return decided('superseded', accept);
-      // A human who acknowledged another version over a contested accept sided with its reject.
+      // A human whose change settled a contested accept by acknowledging another version sided with its reject.
       const reject = decisions.find((entry) => entry.kind === 'reject');
-      const sided =
-        reject &&
-        records.some((entry) => {
-          if (entry.kind !== 'acknowledge' || entry.to === accept.to) return false;
-          const before = held(records, entry.after);
-          return decisions.every((decision) => decision.kind !== 'accept' && decision.kind !== 'reject' ? true : before.has(decision.id));
-        });
-      if (sided) return decided('rejected', reject);
+      if (reject && settledBy(records, decisions).some((entry) => entry.kind === 'acknowledge' && entry.to !== accept.to)) {
+        return decided('rejected', reject);
+      }
       const undone = records.some(
         (entry) => entry.kind === 'restore' && accept.to !== null && entry.from === accept.to && held(records, entry.after).has(accept.id),
       );
