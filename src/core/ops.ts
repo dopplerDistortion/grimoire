@@ -19,6 +19,7 @@ import type { ProposalAcceptResult, ProposalDecisionResult, ProposalListResult, 
 import type { SyncResult, SyncStatusResult } from './sync';
 import type { ChoreAbandonResult, ChoreBrief, ChoreReadResult } from './chores';
 import type { ChoreSubmitResult } from './chore-submit';
+import type { ActivityResult } from './activity';
 
 export type { SurfacePolicy, OpDefinition, OpEnv } from './op';
 export type { ShowResult } from './show';
@@ -156,4 +157,5 @@ export interface OpResults {
   chore_abandon: ChoreAbandonResult;
   sync: SyncResult;
   sync_status: SyncStatusResult;
+  activity: ActivityResult;
 }
