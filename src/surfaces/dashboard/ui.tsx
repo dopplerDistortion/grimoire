@@ -87,6 +87,8 @@ export interface DialogSpec {
   readonly run?: (values: FormValues) => Promise<unknown> | void;
   /** Only an OK button: the dialog says something, it doesn't ask. */
   readonly notice?: boolean;
+  /** Runs when the person cancels (Cancel or Escape), never after the action ran. */
+  readonly onCancel?: () => void;
 }
 
 let dialog: DialogSpec | null = null;
@@ -130,11 +132,16 @@ function Dialog({ spec }: { spec: DialogSpec }) {
     const first = form.current?.querySelector<HTMLElement>('input[name="__typed"], textarea, input:not([type=radio]):not([type=checkbox]), select');
     (first ?? form.current?.querySelector<HTMLElement>('button.ok'))?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeDialog();
+      if (event.key === 'Escape') cancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, []);
+
+  const cancel = () => {
+    spec.onCancel?.();
+    closeDialog();
+  };
 
   const confirm = async () => {
     if (!form.current || busy) return;
@@ -179,7 +186,7 @@ function Dialog({ spec }: { spec: DialogSpec }) {
         </div>
         <div class="modal-actions">
           {spec.notice ? null : (
-            <button type="button" onClick={closeDialog}>
+            <button type="button" class="cancel" onClick={cancel}>
               Cancel
             </button>
           )}
