@@ -6,7 +6,7 @@ import path from 'node:path';
 import { describe, expect } from 'vitest';
 import { trackPidFile } from '#harness';
 import { isPidAlive } from '../../src/machine-local/process-info';
-import { runChores, storeAt } from '../../src/runner';
+import { capState, runChores, storeAt } from '../../src/runner';
 import { openTracker } from '../../src/tracker';
 import { coreTest as test } from '../core/support';
 import { dueCompile, enabled, expectError, noPatternAnswer } from './scenario';
@@ -34,8 +34,11 @@ describe('the runner: the kill timeout', () => {
     }
   });
 
-  test('stopping the runner (start stopping, Ctrl-C) kills the client, tree and all, at once, abandons the run consuming nothing, and frees the lock', async ({ world, grimoire }) => {
+  test('stopping the runner (start stopping, Ctrl-C) kills the client, tree and all, at once, abandons the run consuming nothing, frees the lock, and counts no failure', async ({ world, grimoire }) => {
     const d = await dueCompile(grimoire);
+    const store = await storeAt(world.a.dir);
+    // One failure already: a stop counted as a second would pause the runner for 6 h.
+    await store.coordination.update('runner', 'counters', () => ({ runs: [], consecutive_failures: 1, paused_until: null, last: null }));
     const fake = await enabled('claude', world.a.dir, { auth: authStatus('claude-ai'), answers: [{ ...claudeAnswer(noPatternAnswer(d.pairs)), sleepMs: 120_000 }] });
     const pidFile = path.join(fake.bin, 'claude.pid');
     trackPidFile(pidFile);
@@ -50,7 +53,8 @@ describe('the runner: the kill timeout', () => {
     expect(error.code).toBe('BUSY');
     for (let i = 0; i < 50 && isPidAlive(pid); i++) await new Promise((resolve) => setTimeout(resolve, 100));
     expect(isPidAlive(pid)).toBe(false);
-    const store = await storeAt(world.a.dir);
+    const caps = await capState(store, d.clock.now());
+    expect([caps.consecutive_failures, caps.paused_until]).toEqual([1, null]);
     const again = await store.locks.acquire('runner', { waitMs: 0 });
     expect(again.status).toBe('acquired');
     if (again.status === 'acquired') await again.lock.release();

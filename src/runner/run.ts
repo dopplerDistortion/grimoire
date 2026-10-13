@@ -289,8 +289,10 @@ async function iterate(
     // chore_submit ends a run at its second refusal: never reached.
     return await abandon('refused_twice', 2);
   } catch (error) {
-    // Something broke mid-run: the run consumes nothing, and counts as a failure.
+    // Something broke mid-run: the run consumes nothing, and counts as a failure,
+    // unless the runner was stopped: a stop someone asked for is no failure (spec §16 Caps).
     await core.call('chore_abandon', { run: brief.run, reason: 'runner: interrupted' }, ctx).catch(() => undefined);
+    if (options.signal?.aborted) throw error;
     await recordRun(store, now(), { at: now().toISOString(), run: brief.run, kind: brief.kind, result: 'error', reason: error instanceof GrimoireError ? error.code : 'error' }, false).catch(() => undefined);
     throw error;
   }
