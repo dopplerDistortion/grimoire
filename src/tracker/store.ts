@@ -12,6 +12,7 @@ import { attemptDir, ATTEMPTS_DIR, FORMAT_FILE, GITATTRIBUTES, GITATTRIBUTES_FIL
 import { FairnessLock, sleep, Turnstile } from './locks';
 import { countLateDrops } from './capture-stats';
 import { foldCommits, type FoldReport } from './fold';
+import { PushesUnderWay } from './pushes';
 import { checkTrackerMarker, parseMarker, serializeMarker, V1_MARKER } from './marker';
 import { BoundedMap, TrackerObjects, VirtualObjects } from './objects';
 import { serializeSettings, settingLine } from './settings';
@@ -179,6 +180,12 @@ export interface UnpushedDrop {
   readonly unsure?: true;
 }
 
+/** A push under way: the tip it sends, and `done`, which lets go of its record. */
+interface PushClaim {
+  readonly tip: string;
+  done(): Promise<void>;
+}
+
 /** Whether pushed history keeps a purge's content (see UnpushedDrop). */
 type PushedHeld = Pick<UnpushedDrop, 'pushed' | 'unsure'>;
 
@@ -298,6 +305,8 @@ class GitTrackerStore implements TrackerStore {
   private readonly bases = new BoundedMap<string, readonly string[]>(256);
   private readonly turnstile = new Turnstile();
   private readonly fairness: FairnessLock;
+  /** What syncs in this clone are pushing right now: pushed history, as far as a purge or a strip is concerned. */
+  private readonly pushes: PushesUnderWay;
   private readonly clock: () => Date;
   private readonly randomSuffix: (length: number) => string;
   private readonly budgetMs: number;
@@ -325,6 +334,7 @@ class GitTrackerStore implements TrackerStore {
     this.objects = new TrackerObjects(location.root, path.join(location.commonDir, 'objects'), location.objectFormat, stall);
     this.loader = new SnapshotLoader(this.objects);
     this.fairness = new FairnessLock(location.commonDir);
+    this.pushes = new PushesUnderWay(location.commonDir);
     this.updater = new RefUpdater(location, 'grimoire: write', this.updaterStalls());
     this.clock = options.clock ?? (() => new Date());
     this.randomSuffix = options.randomIdSuffix ?? randomIdSuffix;
@@ -449,7 +459,7 @@ class GitTrackerStore implements TrackerStore {
         trackerRefs: () => this.trackerRefs(),
         isShallow: async () => this.isShallow(await this.resolveTips()),
         fold: (foldSpec) => this.fold(foldSpec),
-        stripUnpushed: (pushed, policy) => this.stripUnpushed(pushed, policy),
+        preparePush: (pushed, policy, ttlMs) => this.preparePush(pushed, policy, ttlMs),
       },
       spec,
     );
@@ -483,7 +493,7 @@ class GitTrackerStore implements TrackerStore {
     const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
     const done = await this.rewriteUnpushed(async (local) => {
       if (local === pushed) return null;
-      return { excluded: pushed ? [pushed] : [], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
+      return { excluded: [...(pushed ? [pushed] : []), ...(await this.pushesUnderWay())], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
     });
     return done?.rewritten ?? 0;
   }
@@ -512,22 +522,48 @@ class GitTrackerStore implements TrackerStore {
   }
 
   /**
-   * Rewrites the unpushed segment (spec §4 Before every push, §3 Unpushed
-   * content): every local commit `pushed` lacks is written again, oldest
-   * first, with the same author, committer and message, its session records
-   * stripped of text wherever the remote's tip doesn't hold that very record,
-   * and its parents rewritten. Runs like a write (one at a time in this
-   * process, under the fairness lock) and moves the ref with a compare-and-set;
-   * the rewritten commits' reflog entries are expired. Null when the local
-   * tip's mode allows text or nothing carried any.
+   * Gets the local tip ready to push, and records the push as under way
+   * (spec §4 Before every push, §3 Unpushed content). With `policy`, when the
+   * local tip's merged mode forbids text, the unpushed segment is rewritten
+   * first: every local commit `pushed` (and every push under way) lacks is
+   * written again, oldest first, with the same author, committer and message,
+   * its session records stripped of text wherever the remote's tip doesn't
+   * hold that very record, and its parents rewritten; the ref moves with a
+   * compare-and-set and the rewritten commits' reflog entries are expired.
+   * The tip is read and recorded under the fairness lock, where a purge
+   * rewrites: either the purge came first and this tip holds it, or the purge
+   * sees this push. Null when there is no local tracker.
    */
-  private async stripUnpushed(pushed: string | null, policy: TextPolicy): Promise<string | null> {
-    const pushedTree = pushed ? (await this.objects.commit(pushed)).tree : null;
-    return this.rewriteUnpushed(async (local) => {
-      if (local === pushed) return null;
-      if (!policy.forbidsText(await this.snapshotAt(local))) return null;
-      return { excluded: pushed ? [pushed] : [], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
-    }).then((done) => (done && done.rewritten > 0 ? done.tip : null));
+  private async preparePush(pushed: string | null, policy: TextPolicy | undefined, ttlMs: number): Promise<PushClaim | null> {
+    const pushedTree = policy && pushed ? (await this.objects.commit(pushed)).tree : null;
+    let claim: PushClaim | null = null;
+    await this.rewriteUnpushed(
+      async (local) => {
+        if (!policy || local === pushed) return null;
+        if (!policy.forbidsText(await this.snapshotAt(local))) return null;
+        return { excluded: [...(pushed ? [pushed] : []), ...(await this.pushesUnderWay())], transform: (tree) => this.stripTree(tree, pushedTree, policy) };
+      },
+      async (tip) => {
+        claim = { tip, done: await this.pushes.begin(tip, ttlMs) };
+      },
+    );
+    return claim;
+  }
+
+  /** The commits syncs in this clone are pushing right now, that this clone holds. */
+  private async pushesUnderWay(): Promise<string[]> {
+    const held = await Promise.all(
+      (await this.pushes.commits()).map(async (commit) => {
+        try {
+          await this.objects.commit(commit);
+          return commit;
+        } catch (error) {
+          if (error instanceof GitStalledError) throw error;
+          return null;
+        }
+      }),
+    );
+    return held.filter((commit): commit is string => commit !== null);
   }
 
   /**
@@ -543,7 +579,8 @@ class GitTrackerStore implements TrackerStore {
     drops: { readonly paths: readonly string[]; readonly traces: readonly string[] },
   ): Promise<{ tip: string | null; rewritten: number; remotes: string[]; paths: string[] } | null> {
     if (drops.paths.length === 0 && drops.traces.length === 0) return null;
-    const remotes = [...new Set((await this.trackerRefs()).remotes.values())];
+    // Pushed history: the remote-tracking tips, and what a push under way is taking (it is landing).
+    const remotes = [...new Set([...(await this.trackerRefs()).remotes.values(), ...(await this.pushesUnderWay())])];
     const found = await this.tracePathsInHistory(drops.traces, [...(local ? [local] : []), ...remotes]);
     const paths = [...new Set([...drops.paths, ...found])];
     if (local === null || paths.length === 0) return { tip: local, rewritten: 0, remotes, paths };
@@ -621,11 +658,13 @@ class GitTrackerStore implements TrackerStore {
    * commits count as pushed (excluded with their history) and how each tree
    * changes. Runs like a write (one at a time in this process, under the
    * fairness lock) and moves the ref with a compare-and-set, then expires the
-   * reflog entries of the commits it rewrote. Null when there is no local
-   * tracker or `plan` says there is nothing to do.
+   * reflog entries of the commits it rewrote. `then` runs still under the
+   * lock with the local tip as it leaves it, whenever there is one. Null when
+   * there is no local tracker or `plan` says there is nothing to do.
    */
   private async rewriteUnpushed(
     plan: (local: string, refs: TrackerRefs) => Promise<{ excluded: readonly string[]; transform: (tree: string) => Promise<string> } | null>,
+    then: (tip: string) => Promise<void> = async () => {},
   ): Promise<{ tip: string; rewritten: number } | null> {
     const deadline = Date.now() + this.budgetMs;
     const turn = await this.turnstile.run(deadline, async () => {
@@ -637,12 +676,19 @@ class GitTrackerStore implements TrackerStore {
           const local = refs.local;
           if (local === null) return null;
           const planned = await plan(local, refs);
-          if (!planned) return null;
+          if (!planned) {
+            await then(local);
+            return null;
+          }
           const { tip, rewritten } = await this.rewriteSegment(local, planned.excluded, planned.transform);
-          if (tip === local) return { tip, rewritten: 0 };
+          if (tip === local) {
+            await then(local);
+            return { tip, rewritten: 0 };
+          }
           const move = await this.moveRef(local, tip);
           if (move.moved) {
             await this.expireReflog();
+            await then(tip);
             return { tip, rewritten };
           }
           if (move.staleLock) throw busy(`a stale lock blocks the tracker ref: ${move.staleLock.path}`, { stale_lock: move.staleLock });

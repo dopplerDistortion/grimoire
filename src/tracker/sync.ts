@@ -113,12 +113,14 @@ export interface SyncHost {
   /** Commits the fold of the local and the remote-tracking tracker, when they diverged. */
   fold(spec: Omit<WriteSpec, 'op' | 'idempotency'>): Promise<{ commit: string | null }>;
   /**
-   * When the local tip's merged mode forbids text, rewrites the local commits
-   * `pushed` (the remote's tip, null: none) lacks so that no session record
-   * they carry has text the remote doesn't hold already. Returns the new local
-   * tip, or null when nothing changed.
+   * The local tip to push, recorded as a push under way until `done` (a purge
+   * meanwhile counts it as pushed: it is landing). With `policy`, when the
+   * local tip's merged mode forbids text, the local commits `pushed` (the
+   * remote's tip, null: none) lacks are rewritten first, so that no session
+   * record they carry has text the remote doesn't hold already. The record
+   * lapses after `ttlMs`. Null when there is no local tracker.
    */
-  stripUnpushed(pushed: string | null, policy: TextPolicy): Promise<string | null>;
+  preparePush(pushed: string | null, policy: TextPolicy | undefined, ttlMs: number): Promise<{ readonly tip: string; done(): Promise<void> } | null>;
 }
 
 export interface TrackerRefs {
@@ -149,6 +151,8 @@ const RACE_PAUSE_MS = 100;
 const UNMOVED_REJECTIONS = 3;
 /** The least pause before a retry once a rejection may be a held lock: its holder had it for git's whole lock timeout already. */
 const LOCK_PAUSE_MS = 250;
+/** How long a push's record outlives its step timeout: the kill at the timeout takes a moment to land. */
+const PUSH_RECORD_SLACK_MS = 30_000;
 /** Missing objects in a partial clone are backfilled in at most this many rounds (spec §4). */
 const BACKFILL_ROUNDS = 2;
 
@@ -394,19 +398,32 @@ export async function syncTracker(host: SyncHost, spec: SyncSpec): Promise<SyncO
     // 5. Push, unless the remote holds the local tip already.
     if (local === null) return outcome({ state: 'in-sync' });
     if (tracker !== null && (await isAncestor(git, local, tracker))) return outcome({ state: 'in-sync' });
-    // The merged excerpt mode forbids text: the unpushed segment loses it before it leaves (spec §4, §14).
-    if (spec.text) local = (await host.stripUnpushed(tracker, spec.text)) ?? local;
     // Never the first branch of an empty remote: it would become the default branch.
     if (head === null) return outcome({ state: 'pending', reason: 'no-default-branch' });
-    const push = await net(['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-recurse-submodules', remote, `${local}:${TRACKER_BRANCH}`]);
-    if (push.code === 0 && !push.timedOut) {
-      // git updates the remote-tracking ref only when a fetch refspec maps the branch. A
-      // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile. It is
-      // only a record of what the remote holds, which the next fetch sets right, so a git
-      // stuck on it takes nothing from the push, which landed.
-      await host.updateRef(tracking, local, tracked).catch(() => {});
-      remoteTip = local;
-      return outcome({ state: 'pushed' });
+    // The tip to push, read and recorded as under way where a purge rewrites: a purge from here on counts it as
+    // pushed, and one before it is in it. The merged excerpt mode forbids text: the unpushed segment loses it
+    // before it leaves (spec §4, §14).
+    const claim = await host.preparePush(tracker, spec.text, spec.timeoutMs + PUSH_RECORD_SLACK_MS);
+    if (claim === null) {
+      local = null;
+      return outcome({ state: 'in-sync' });
+    }
+    local = claim.tip;
+    let push: NetworkGitRun & { limitMs: number };
+    try {
+      push = await net(['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-recurse-submodules', remote, `${local}:${TRACKER_BRANCH}`]);
+      if (push.code === 0 && !push.timedOut) {
+        // git updates the remote-tracking ref only when a fetch refspec maps the branch. A
+        // compare-and-set: a fetch elsewhere may have moved it past this push meanwhile. It is
+        // only a record of what the remote holds, which the next fetch sets right, so a git
+        // stuck on it takes nothing from the push, which landed. Only then does the push's
+        // record go: a purge in between still sees the commit as pushed.
+        await host.updateRef(tracking, local, tracked).catch(() => {});
+        remoteTip = local;
+        return outcome({ state: 'pushed' });
+      }
+    } finally {
+      await claim.done();
     }
     if (push.timedOut) return failed('push', push);
     const pushed = pushedRef(push.stdout.toString('utf8'), TRACKER_BRANCH);
