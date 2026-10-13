@@ -65,7 +65,7 @@ function actorOf(value: string | undefined): Record<string, string> {
 }
 
 /** Blobs by `<rev>:<path>` through one `git cat-file --batch`; a missing one maps to null. */
-async function readBlobs(root: string, specs: readonly string[]): Promise<Map<string, Buffer | null>> {
+export async function readBlobs(root: string, specs: readonly string[]): Promise<Map<string, Buffer | null>> {
   const found = new Map<string, Buffer | null>();
   if (specs.length === 0) return found;
   const run = await runGit(root, ['cat-file', '--batch'], { input: specs.map((spec) => `${spec}\n`).join('') });
@@ -99,6 +99,50 @@ function parsed(blob: Buffer | null | undefined): IssueRecord | null {
   }
 }
 
+/**
+ * The tracker's writes from `tip` back, newest first, as their trailers
+ * record them (no field names): `skip` and `max` page through the commits;
+ * `grep` keeps only commits whose message holds `<name>: <value>`. The grep
+ * matches the text anywhere, so callers check the entry's own field.
+ */
+export async function logEntries(
+  root: string,
+  tip: string,
+  options: { skip?: number; max?: number; grep?: readonly [string, string] } = {},
+): Promise<ActivityEntry[]> {
+  const grep = options.grep;
+  const run = await runGit(root, [
+    'log',
+    '--date-order',
+    '--no-color',
+    `--format=${RECORD}%H${FIELD}%ae${FIELD}%cI${FIELD}%B${FIELD}`,
+    ...(options.skip ? [`--skip=${options.skip}`] : []),
+    ...(options.max !== undefined ? [`--max-count=${options.max}`] : []),
+    ...(grep === undefined ? [] : ['--fixed-strings', `--grep=${grep[0]}: ${grep[1]}`]),
+    tip,
+    '--',
+  ]);
+  if (run.code !== 0) throw new Error(`git log failed reading the tracker's activity: ${run.stderr.trim()}`);
+  const entries: ActivityEntry[] = [];
+  for (const [commit, person, at, message] of run.stdout
+    .toString('utf8')
+    .split(RECORD)
+    .map((record) => record.split(FIELD))
+    .filter(([commit, , , message]) => commit && message !== undefined)) {
+    const trailers = trailersOf(message!);
+    entries.push({
+      commit: commit!,
+      at: at ?? '',
+      op: trailers.get('Grimoire-Op') ?? '',
+      issue: trailers.get('Grimoire-Issue') ?? null,
+      attempt: trailers.get('Grimoire-Attempt') ?? null,
+      person: person ?? '',
+      actor: actorOf(trailers.get('Grimoire-Actor')),
+    });
+  }
+  return entries;
+}
+
 export const activity = define({
   name: 'activity',
   description: 'The tracker’s writes, newest first, from their commit trailers: person, client and session, op, issue, attempt, and the fields an update changed. Pass `issue` for one issue’s. For people: the dashboard and a person’s terminal.',
@@ -130,41 +174,10 @@ export const activity = define({
     if (tip === null) return { entries: [], cursor: null };
 
     const root = tracker.location.root;
-    const run = await runGit(root, [
-      'log',
-      '--date-order',
-      '--no-color',
-      `--format=${RECORD}%H${FIELD}%ae${FIELD}%cI${FIELD}%B${FIELD}`,
-      `--skip=${skip}`,
-      `--max-count=${limit + 1}`,
-      ...(issue === null ? [] : ['--fixed-strings', `--grep=Grimoire-Issue: ${issue}`]),
-      tip,
-      '--',
-    ]);
-    if (run.code !== 0) throw new Error(`git log failed reading the tracker's activity: ${run.stderr.trim()}`);
-    const records = run.stdout
-      .toString('utf8')
-      .split(RECORD)
-      .map((record) => record.split(FIELD))
-      .filter(([commit, , , message]) => commit && message !== undefined);
+    const records = await logEntries(root, tip, { skip, max: limit + 1, ...(issue === null ? {} : { grep: ['Grimoire-Issue', issue] as const }) });
     const more = records.length > limit;
-    const page: ActivityEntry[] = [];
-    for (const [commit, person, at, message] of records.slice(0, limit)) {
-      const trailers = trailersOf(message!);
-      const named = trailers.get('Grimoire-Issue') ?? null;
-      // The grep matches the text anywhere; the trailer must name the issue.
-      if (issue !== null && named !== issue) continue;
-      page.push({
-        commit: commit!,
-        at: at ?? '',
-        op: trailers.get('Grimoire-Op') ?? '',
-        issue: named,
-        attempt: trailers.get('Grimoire-Attempt') ?? null,
-        person: person ?? '',
-        actor: actorOf(trailers.get('Grimoire-Actor')),
-      });
-    }
-
+    // The grep matches the text anywhere; the trailer must name the issue.
+    const page = records.slice(0, limit).filter((entry) => issue === null || entry.issue === issue);
     const compared = page.filter((entry) => entry.issue !== null && FIELD_OPS.has(entry.op));
     const blobs = await readBlobs(
       root,

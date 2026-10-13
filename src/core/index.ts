@@ -25,6 +25,7 @@ import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, 
 import { choreSubmit } from './chore-submit';
 import { activity } from './activity';
 import { attention } from './attention';
+import { attemptShow } from './attempt-show';
 import { checkSurface } from './op';
 import { bundledRules, createScanner, type SecretScanner } from '../scanner';
 import { parseInput } from './schema';
@@ -67,6 +68,7 @@ export type { ChoreBrief, ChoreReadResult, ChoreAbandonResult } from './chores';
 export type { ChoreSubmitResult } from './chore-submit';
 export type { ActivityEntry, ActivityResult } from './activity';
 export type { AttentionItem, AttentionResult, SyncFailureItem } from './attention';
+export type { AttemptShowResult, ShownContext, ShownOutcome, ExposureHit } from './attempt-show';
 export { choreThresholds, dueChores } from './chores';
 export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
 export { AUTO_SYNC_SETTING, autoSync, autoSyncOn, markSyncPending, readSyncStatus, syncNow, syncRequestOf } from './sync';
@@ -197,6 +199,7 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   syncStatus,
   activity,
   attention,
+  attemptShow,
 ];
 
 /**
