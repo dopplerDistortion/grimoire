@@ -91,8 +91,12 @@ describe('a first install into a checkout', () => {
       ['.claude/settings.json', 'json-array-item', true],
       ['.claude/settings.json', 'json-array-item', true],
       ['.claude/rules/grimoire.md', 'file', true],
+      ['.claude/skills/grimoire-chores/SKILL.md', 'file', true],
+      ['.claude/agents/grimoire-chores.md', 'file', true],
       ['.codex/config.toml', 'toml-table', true],
       ['AGENTS.md', 'marker-block', true],
+      ['.agents/skills/grimoire-chores/SKILL.md', 'file', true],
+      ['.codex/agents/grimoire-chores.toml', 'file', true],
       ['docs/agents/issue-tracker.md', 'marker-block', true],
       ['docs/agents/triage-labels.md', 'seeded-file', true],
     ]);
@@ -182,6 +186,98 @@ describe('a first install into a checkout', () => {
     expect(settings.hooks.SessionStart[0]).toEqual({ hooks: [{ type: 'command', command: 'echo hi' }] });
     const manifest = await readManifest(root);
     expect(manifest.entries.filter((entry) => ['AGENTS.md', '.codex/config.toml', '.claude/settings.json'].includes(entry.path)).every((entry) => !entry.created)).toBe(true);
+  });
+});
+
+describe('the chore carriers', () => {
+  /** A Markdown file's frontmatter, as `key: value` pairs, and its body. */
+  function frontmatter(text: string): { fields: Record<string, string>; body: string } {
+    const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
+    if (!match) throw new Error(`no frontmatter in ${text.slice(0, 80)}`);
+    const fields = Object.fromEntries(match[1]!.split('\n').map((line) => [line.slice(0, line.indexOf(':')), line.slice(line.indexOf(':') + 1).trim()]));
+    return { fields, body: match[2]! };
+  }
+
+  /** What every carrier must say: the seven steps, the rules and the Skill Proposer's authoring rules (spec §16 Carriers). */
+  function expectProcedure(text: string, where: string): void {
+    for (const step of [
+      '1. Start: call `chore_start`',
+      '2. Page the inputs: call `chore_read`',
+      '3. Reason',
+      '4. Submit: call `chore_submit`',
+      '5. At most one fix-up',
+      '6. After a Wiki Maintainer submit, run the Skill Proposer if it became due',
+      '7. Return the `summary` of the last',
+    ]) {
+      expect(text, `${where}: ${step}`).toContain(step);
+    }
+    expect(text, where).toContain('commands, conventions, pitfalls, where things live');
+    expect(text, where).toContain('Never model-specific workarounds');
+    expect(text, where).toContain('trigger words first in the description, which is at most 300 characters');
+    expect(text, where).toContain('never refer to pattern pages or the wiki');
+    expect(text, where).toContain('never use `apply_patch` or `web_search`');
+    expect(text, where).toContain('Never ask for approval');
+  }
+
+  gitTest('init writes the four carrier files, each as a manifest file entry, carrying the one shipped procedure', async ({ world }) => {
+    const root = world.a.dir;
+    await install(root);
+    const manifest = await readManifest(root);
+    const carriers = ['.claude/skills/grimoire-chores/SKILL.md', '.claude/agents/grimoire-chores.md', '.agents/skills/grimoire-chores/SKILL.md', '.codex/agents/grimoire-chores.toml'];
+    expect(manifest.entries.filter((entry) => carriers.includes(entry.path)).map((entry) => [entry.path, entry.kind, entry.client])).toEqual([
+      ['.claude/skills/grimoire-chores/SKILL.md', 'file', 'claude-code'],
+      ['.claude/agents/grimoire-chores.md', 'file', 'claude-code'],
+      ['.agents/skills/grimoire-chores/SKILL.md', 'file', 'codex'],
+      ['.codex/agents/grimoire-chores.toml', 'file', 'codex'],
+    ]);
+    const description = "Run grimoire's due maintenance chores in an isolated subagent. Use when grimoire's session notice says one is due and the user agrees, or when the user asks.";
+
+    // Claude Code (spike C): the skill forks into the subagent in the background, and has no allowed-tools (it made the Skill call itself need approval).
+    const skill = frontmatter(await read(root, '.claude/skills/grimoire-chores/SKILL.md'));
+    expect(skill.fields).toEqual({ name: 'grimoire-chores', description, context: 'fork', agent: 'grimoire-chores', background: 'true' });
+    expectProcedure(skill.body, 'Claude Code skill');
+    // The subagent: the 4 chore tools plus ToolSearch (C2), and no CLAUDE.md.
+    const agent = frontmatter(await read(root, '.claude/agents/grimoire-chores.md'));
+    expect(agent.fields).toMatchObject({
+      name: 'grimoire-chores',
+      tools: 'mcp__grimoire__chore_start, mcp__grimoire__chore_read, mcp__grimoire__chore_submit, mcp__grimoire__chore_abandon, ToolSearch',
+      omitClaudeMd: 'true',
+    });
+    expect(Object.keys(agent.fields).sort()).toEqual(['description', 'name', 'omitClaudeMd', 'tools']);
+    expectProcedure(agent.body, 'Claude Code subagent');
+
+    // Codex (spike F): the skill spawns the role with a fresh context, and runs in place when it can't.
+    const codexSkill = frontmatter(await read(root, '.agents/skills/grimoire-chores/SKILL.md'));
+    expect(codexSkill.fields).toEqual({ name: 'grimoire-chores', description });
+    for (const part of ['`spawn_agent`', '`agent_type` set to `grimoire-chores`', '`fork_context` set to `false`', '`fork_turns: "none"`', 'If spawning is unavailable, run the chore here']) {
+      expect(codexSkill.body, part).toContain(part);
+    }
+    expectProcedure(codexSkill.body, 'Codex skill');
+    // The role: the procedure as its developer instructions, the five features off, and no skills listing.
+    const role = parseToml(await read(root, '.codex/agents/grimoire-chores.toml')) as Record<string, any>;
+    expect(role).toMatchObject({
+      name: 'grimoire-chores',
+      features: { shell_tool: false, apps: false, plugins: false, memories: false, request_permissions_tool: false },
+      skills: { include_instructions: false },
+    });
+    expect(Object.keys(role).sort()).toEqual(['description', 'developer_instructions', 'features', 'name', 'skills']);
+    expectProcedure(role.developer_instructions, 'Codex role');
+  });
+
+  gitTest('only the configured client gets its carriers', async ({ world }) => {
+    await install(world.a.dir, { clients: ['codex'] });
+    const paths = (await readManifest(world.a.dir)).entries.map((entry) => entry.path);
+    expect(paths).toEqual(expect.arrayContaining(['.agents/skills/grimoire-chores/SKILL.md', '.codex/agents/grimoire-chores.toml']));
+    expect(paths.filter((file) => file.startsWith('.claude/'))).toEqual([]);
+  });
+
+  gitTest('a drifted carrier is shipped text: the next run rewrites it', async ({ world }) => {
+    const root = world.a.dir;
+    await install(root);
+    await writeFile(path.join(root, '.codex/agents/grimoire-chores.toml'), 'name = "mine"\n');
+    const { applied } = await install(root);
+    expect(applied.written).toEqual(['.codex/agents/grimoire-chores.toml']);
+    expect(await read(root, '.codex/agents/grimoire-chores.toml')).toContain('include_instructions = false');
   });
 });
 
@@ -315,7 +411,9 @@ describe('drift and conflicts on a later run', () => {
     const { plan, applied } = await install(root);
 
     const refused = plan.entries.filter((entry) => entry.action === 'conflict');
-    expect(new Set(refused.map((entry) => entry.path))).toEqual(new Set(['.mcp.json', '.claude/settings.json', '.claude/rules/grimoire.md']));
+    expect(new Set(refused.map((entry) => entry.path))).toEqual(
+      new Set(['.mcp.json', '.claude/settings.json', '.claude/rules/grimoire.md', '.claude/skills/grimoire-chores/SKILL.md', '.claude/agents/grimoire-chores.md']),
+    );
     expect(refused.find((entry) => entry.path === '.claude/settings.json')?.why).toMatch(/symlink/);
     expect(refused.find((entry) => entry.path === '.mcp.json')?.why).toMatch(/not valid JSON/);
     expect(existsSync(path.join(elsewhere, 'settings.json'))).toBe(false);
