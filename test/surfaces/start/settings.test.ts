@@ -212,7 +212,8 @@ describe('the Settings screen in a browser, under the CSP', () => {
     const positionBefore = await tab.evaluate<string>(text('.sync-position'));
 
     await tab.evaluate(`document.querySelector('.sync-panel .sync-now').click()`);
-    await tab.waitFor(`${text('.sync-chip')}.startsWith('in sync') && ${text('.sync-position')}.startsWith('in sync')`, 60_000);
+    // The position and the last-sync time come from two writes (the push, then the status record): wait for both to show.
+    await tab.waitFor(`${text('.sync-chip')}.startsWith('in sync') && ${text('.sync-position')}.startsWith('in sync') && ${text('.sync-last')}.includes('just now')`, 60_000);
     const last = await tab.evaluate<string>(text('.sync-last'));
 
     expect(chipBefore).toMatch(/^↑1/);
