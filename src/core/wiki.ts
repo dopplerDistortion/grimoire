@@ -270,13 +270,33 @@ export interface WikiListRow {
   flagged_by: string[];
 }
 
+/** One line of the wiki's log (spec §17: derived from human wiki edits and compile runs). */
+export interface WikiLogEntry {
+  at: string;
+  kind: 'edit' | 'compile';
+  /** An edit's `create` or `update`; `compile` for a run. */
+  action: string;
+  /** The person: an edit's author, a compile run's. */
+  by: string | null;
+  /** A compile's run id. */
+  run: string | null;
+  /** The pages it wrote. */
+  pages: string[];
+  /** A compile: the traces it consumed. */
+  traces: number;
+  /** The set-aside sides it reconciled. */
+  resolved: number;
+}
+
 export interface WikiListResult {
   pages: WikiListRow[];
+  /** The log, oldest first (at one instant, edits before compiles). */
+  log: WikiLogEntry[];
 }
 
 export const wikiList = define({
   name: 'wiki_list',
-  description: 'List the wiki’s pages: slug, title, kind, summary, sources, and whether each is conflicted or quarantined. Human-read.',
+  description: 'List the wiki’s pages (slug, title, kind, summary, sources, and whether each is conflicted or quarantined) and its log of human edits and compiles. Human-read.',
   kind: 'read',
   policy: 'human-read',
   replay: 'none',
@@ -302,7 +322,23 @@ export const wikiList = define({
         flagged_by: flagged.get(page.slug) ?? [],
       })),
     );
-    return { pages: rows };
+    const person = (actor: Readonly<Record<string, unknown>>) => (typeof actor.person === 'string' ? actor.person : null);
+    const entries = [
+      ...(await view.wiki.edits()).map((edit, i) => ({
+        rank: 0,
+        i,
+        entry: { at: edit.at, kind: 'edit' as const, action: edit.action, by: person(edit.actor), run: null, pages: [edit.slug], traces: 0, resolved: edit.resolved.length },
+      })),
+      ...(await view.choreRuns.records())
+        .filter((run) => run.kind === 'wiki-maintainer' && run.result === 'compiled')
+        .map((run, i) => ({
+          rank: 1,
+          i,
+          entry: { at: run.at, kind: 'compile' as const, action: 'compile', by: person(run.actor), run: run.id, pages: Object.keys(run.pages).sort(), traces: run.consumption.length, resolved: run.resolved.length },
+        })),
+    ];
+    entries.sort((x, y) => (x.entry.at < y.entry.at ? -1 : x.entry.at > y.entry.at ? 1 : x.rank - y.rank || x.i - y.i));
+    return { pages: rows, log: entries.map((item) => item.entry) };
   },
 });
 

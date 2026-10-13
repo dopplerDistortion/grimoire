@@ -215,6 +215,23 @@ describe('attention: the knowledge items', () => {
   });
 });
 
+describe('wiki_list: the Log tab', () => {
+  test('lists human wiki edits and compiles, oldest first, each with who or which run and the pages', async ({ world, grimoire }) => {
+    const human = dashboard(grimoire.ctx);
+    const page = { slug: 'port-clash', title: 'Port clash', kind: 'failure', summary: 'Two servers race for one port.', body: 'Bind to port 0.\n' };
+    ok(await grimoire.core.call('wiki_edit', { ...page, base: null }, terminal(grimoire.ctx)));
+    const later = new Date(T0.getTime() + 60_000).toISOString();
+    await commitChoreRun(world.a, world.a, compileRecord('cr-0000000001', later, [['at-aaaaaa', 'fail']], { 'port-clash': 'v' }));
+
+    const listed = ok(await grimoire.core.call('wiki_list', {}, human));
+
+    expect(listed.log).toEqual([
+      { at: T0.toISOString(), kind: 'edit', action: 'create', by: grimoire.ctx.person.email, run: null, pages: ['port-clash'], traces: 0, resolved: 0 },
+      { at: later, kind: 'compile', action: 'compile', by: 'alice@example.com', run: 'cr-0000000001', pages: ['port-clash'], traces: 1, resolved: 0 },
+    ]);
+  });
+});
+
 describe('skill_show for the Skills screens', () => {
   test('each skill carries its version count, last change and pending proposal; with a name, every worktree’s copy state and the worktrees eject may pick', async ({
     world,
