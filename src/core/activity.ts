@@ -9,6 +9,7 @@
 // fold, not the local tip alone.
 import { invalid } from '../errors';
 import { runGit } from '../git/run';
+import { foldIssue } from '../tracker/fold-records';
 import { issueFile } from '../tracker/layout';
 import { parseIssue, type IssueRecord } from '../tracker/record';
 import { decodeCursor, encodeCursor } from './budget';
@@ -158,6 +159,35 @@ export async function logEntries(root: string, tips: readonly string[], options:
   return (await logRecords(root, tips, options)).map((record) => record.entry);
 }
 
+/**
+ * The issue record a write's parents hold as one state: a parent's record, or
+ * for a write on a fold (both tips as parents) the fold of the two over their
+ * merge base, as the tracker folds an issue (spec §4, Fold rules). Null when
+ * no parent holds it or it can't be read.
+ */
+function foldedParents(base: Buffer | null, sides: readonly (Buffer | null)[]): IssueRecord | null {
+  if (sides.length === 1) return parsed(sides[0]);
+  if (sides.length !== 2) return null;
+  const [a, b] = sides as [Buffer | null, Buffer | null];
+  // One side added the issue (or deleted it while the other kept it): the write's own clone held that record.
+  if (!a || !b) return parsed(a ?? b);
+  if (a.equals(b) || (base && base.equals(b))) return parsed(a);
+  if (base && base.equals(a)) return parsed(b);
+  try {
+    return parseIssue(foldIssue(base, a, b).bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** The merge base of a fold's two tips (git's best one), or null. */
+async function mergeBaseOf(root: string, parents: readonly string[]): Promise<string | null> {
+  if (parents.length !== 2) return null;
+  const run = await runGit(root, ['merge-base', ...parents]);
+  const base = run.stdout.toString('utf8').trim();
+  return run.code === 0 && isCommitId(base) ? base : null;
+}
+
 const isCommitId = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(value);
 
 export const activity = define({
@@ -198,18 +228,22 @@ export const activity = define({
     const page = records.slice(0, limit).filter(({ entry }) => issue === null || entry.issue === issue);
     const compared = page.filter(({ entry }) => entry.issue !== null && FIELD_OPS.has(entry.op));
     const spec = (commit: string, id: string) => `${commit}:${issueFile(id)}`;
+    // A write on a fold commits with both tips as parents: what either side changed came in with the fold, so the
+    // write is compared with the fold of its parents (over their merge base), the state it was made on.
+    const bases = await Promise.all(compared.map(({ parents }) => mergeBaseOf(root, parents)));
     const blobs = await readBlobs(
       root,
-      compared.flatMap(({ entry, parents }) => [entry.commit, ...parents].map((commit) => spec(commit, entry.issue!))),
+      compared.flatMap(({ entry, parents }, at) =>
+        [entry.commit, ...parents, ...(bases[at] ? [bases[at]] : [])].map((commit) => spec(commit, entry.issue!)),
+      ),
     );
-    for (const { entry, parents } of compared) {
+    compared.forEach(({ entry, parents }, at) => {
       const after = parsed(blobs.get(spec(entry.commit, entry.issue!)));
-      const befores = parents.map((parent) => parsed(blobs.get(spec(parent, entry.issue!))));
-      if (!after || befores.length === 0 || !befores.every((before) => before !== null)) continue;
-      // A write on a fold commits with both tips as parents: what one side changed came in with the fold. The write
-      // changed a field only when its record differs from every parent's.
-      entry.fields = COMPARED.filter((field) => befores.every((before) => JSON.stringify(before![field]) !== JSON.stringify(after[field]))).sort();
-    }
+      const base = bases[at] ? (blobs.get(spec(bases[at], entry.issue!)) ?? null) : null;
+      const before = foldedParents(base, parents.map((parent) => blobs.get(spec(parent, entry.issue!)) ?? null));
+      if (!after || !before) return;
+      entry.fields = COMPARED.filter((field) => JSON.stringify(before[field]) !== JSON.stringify(after[field])).sort();
+    });
     return { entries: page.map(({ entry }) => entry), cursor: more ? encodeCursor('activity', { t: tips, s: skip + limit, i: issue }) : null };
   },
 });

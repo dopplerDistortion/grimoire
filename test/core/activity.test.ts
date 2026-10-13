@@ -80,6 +80,34 @@ describe('activity', () => {
     ]);
   });
 
+  test('a write on a fold is compared with the folded parent state: both sides’ set adds are not its change', async ({ grimoire, world }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const id = await sharedIssue(world, core, alice, { title: 'Shared', labels: ['a'] });
+    // Alice adds y and doesn't publish; Bob adds x and publishes; a fetches.
+    await ok(core.call('update', { id, labels_add: ['y'] }, alice));
+    await ok(core.call('update', { id, labels_add: ['x'] }, bob));
+    await bobPublishes(world);
+
+    // The fold holds {a, x, y}: unlike either tip's labels, yet not the retitle's change.
+    await ok(core.call('update', { id, title: 'Shared, retitled' }, alice));
+    const read = await ok(core.call('activity', { issue: id }, human(alice)));
+    expect(read.entries[0]).toMatchObject({ op: 'update', person: world.a.identity.email, fields: ['title'] });
+  });
+
+  test('a write on a fold to an issue only the other clone held names the fields it changed', async ({ grimoire, world }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    // a diverges with a write of its own; Bob creates an issue and publishes it.
+    await ok(core.call('create', { title: 'Alice’s' }, alice));
+    const created = await ok(core.call('create', { title: 'Bob’s', labels: ['a'] }, bob));
+    await bobPublishes(world);
+
+    await ok(core.call('update', { id: created.id, title: 'Bob’s, retitled' }, alice));
+    const read = await ok(core.call('activity', { issue: created.id }, human(alice)));
+    expect(read.entries[0]).toMatchObject({ op: 'update', person: world.a.identity.email, fields: ['title'] });
+  });
+
   test('is for people: an agent surface gets HUMAN_ONLY', async ({ grimoire }) => {
     const refused = await grimoire.core.call('activity', {}, grimoire.ctx);
     expect(refused.ok).toBe(false);
