@@ -6,6 +6,7 @@
 // reason codes and exactly one fix-up; a second failure ends the run `failed`.
 // Committed records carry no LLM free text.
 import { createHash } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, vi } from 'vitest';
 import type { CallContext, ChoreBrief, ChoreReadResult, Core } from '../../src/core';
@@ -382,6 +383,35 @@ describe('chore_submit: the fail-closed guards', () => {
       [2, false, null],
       [3, false, null],
     ]);
+    expect(JSON.stringify(shown)).not.toContain(token);
+  });
+
+  test('a secret in a field name of a refused result is kept nowhere on this machine: not in the problems, the open run or the ended run', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const token = ['ghp', 'R7xK2mQ9vL4tB8nW3pZ6cY1hJ5sD0fG2aE9u'].join('_');
+
+    // The unknown field's name is the secret, and the value under it holds it too.
+    const first = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: allTo(brief, 'x'), [token]: `use ${token}` } }, d.chores));
+    expect(first).toMatchObject({ result: 'invalid', reasons: expect.arrayContaining(['secret', 'shape']) });
+    expect(JSON.stringify(first)).not.toContain(token);
+    expect(JSON.stringify(await readRun(store(world), brief.run))).not.toContain(token);
+    // The second refusal ends the run; its outcome is kept with the ended run.
+    const second = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: [{ pair: brief.pairs[0]!.pair, [token]: 1 }] } }, d.chores));
+    expect(second).toMatchObject({ result: 'failed', reasons: expect.arrayContaining(['secret', 'shape']) });
+    expect(JSON.stringify(second)).not.toContain(token);
+
+    const files = await readdir(path.join(world.a.dir, '.git', 'grimoire'), { recursive: true, withFileTypes: true });
+    const held: string[] = [];
+    for (const file of files.filter((entry) => entry.isFile())) {
+      const at = path.join(file.parentPath, file.name);
+      if ((await readFile(at, 'utf8')).includes(token)) held.push(at);
+    }
+    expect(held).toEqual([]);
+
+    // An older record that kept problems beside matched rules: the reader shows none of them.
+    await keepInvalidResult(store(world), 3, { run: brief.run, at: T0.toISOString(), reasons: ['shape'], rules: ['github-pat'], problems: { [`result.${token}`]: 'is not a known field' } });
+    const shown = ok(await d.core.call('chore_runs', { run: brief.run }, dashboard(grimoire.ctx)));
     expect(JSON.stringify(shown)).not.toContain(token);
   });
 });

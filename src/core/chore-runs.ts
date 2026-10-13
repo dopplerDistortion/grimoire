@@ -95,13 +95,13 @@ async function keptResults(store: MachineLocalStore, withText: (run: string) => 
     const slash = key.lastIndexOf('/');
     const run = slash > 0 ? key.slice(0, slash) : (value.run ?? key);
     const n = Number(key.slice(slash + 1)) || 1;
-    // Fail closed: text kept beside matched rules or a secret-scan reason is never shown.
+    // Fail closed: text or problems kept beside matched rules or a secret-scan reason are never shown.
     const scanned = (value.rules ?? []).length === 0 && !(value.reasons ?? []).some((reason) => reason === 'secret' || reason === 'unscanned');
     const text = scanned && typeof value.text === 'string' ? value.text : null;
     const row: KeptResult = { n, at: value.at, reasons: [...(value.reasons ?? [])], rules: [...(value.rules ?? [])], text_kept: text !== null };
     if (withText(run)) {
       row.text = text;
-      if (value.problems) row.problems = { ...value.problems };
+      if (scanned && value.problems) row.problems = { ...value.problems };
     }
     kept.set(run, [...(kept.get(run) ?? []), row].sort((x, y) => x.n - y.n));
   }
