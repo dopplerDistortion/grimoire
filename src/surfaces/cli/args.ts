@@ -39,6 +39,8 @@ const POSITIONALS: Readonly<Record<string, readonly string[]>> = {
   unquarantine: ['page'],
   // One stray edit by its id; `--skill <name>` or `--all true` for many.
   skill_discard: ['stray'],
+  // One issue's writes; none: every write.
+  activity: ['issue'],
 };
 
 /**
