@@ -120,4 +120,22 @@ describe('the build', () => {
     expect(html).not.toMatch(/<style/);
     expect(html).not.toMatch(/\sstyle="/);
   });
+
+  it('ships the license notice of every package bundled into the CLI or the dashboard, and no source maps', () => {
+    const notices = readFileSync(path.join(packageRoot, 'dist', 'THIRD_PARTY_LICENSES.md'), 'utf8');
+    // The MCP server SDK and what it brings (CLI), and Preact (dashboard): each named with its version and
+    // license as its package.json declares them, then its license file's text, whole.
+    for (const name of ['@modelcontextprotocol/server', '@modelcontextprotocol/core', 'zod', 'preact']) {
+      const dir = path.join(repoRoot, 'node_modules', ...name.split('/'));
+      const declared = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { version: string; license: string };
+      const text = readFileSync(path.join(dir, 'LICENSE'), 'utf8').replace(/\r\n/g, '\n').trim();
+      expect(notices, name).toContain(`## ${name}@${declared.version} (${declared.license})\n\n${text}\n`);
+    }
+    // Only what is bundled: the test client and the toolchain are not.
+    for (const name of ['@modelcontextprotocol/client', 'vitest', 'esbuild', 'vite', 'typescript']) {
+      expect(notices, name).not.toMatch(new RegExp(`^## ${name.replace(/[/.]/g, '\\$&')}@`, 'm'));
+    }
+    const all = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? all(path.join(dir, entry.name)) : [entry.name]));
+    expect(all(path.join(packageRoot, 'dist')).filter((name) => name.endsWith('.map'))).toEqual([]);
+  });
 });
