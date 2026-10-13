@@ -114,6 +114,30 @@ export class Problems {
   }
 }
 
+/**
+ * The secret scan over every string the raw result holds, field names
+ * included, whatever its shape. Every chore check runs it before any check may
+ * return or skip: whatever else refuses the result, a secret still marks the
+ * rejection, so no result text is kept (spec §16 Failures).
+ */
+export function scanRaw(value: unknown, field: string, p: Problems, scanner: SecretScanner): void {
+  const scan = (text: string, at: string) => {
+    const found = scanner.scan(text);
+    if (found.status !== 'scanned') return p.add('unscanned', at, 'could not be scanned for secrets');
+    if (found.hits.length === 0) return;
+    for (const hit of found.hits) p.rules.add(hit.rule);
+    p.add('secret', at, `holds what looks like a secret (${sortedUnique(found.hits.map((hit) => hit.rule)).join(', ')})`);
+  };
+  if (typeof value === 'string') return scan(value, field === '' ? 'result' : field);
+  if (Array.isArray(value)) return value.forEach((item, i) => scanRaw(item, `${field}[${i}]`, p, scanner));
+  if (!isObject(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    const at = field === '' ? key : `${field}.${key}`;
+    scan(key, field === '' ? 'result' : field);
+    scanRaw(item, at, p, scanner);
+  }
+}
+
 /** The result's shape, as the output schema gives it; null (with `shape` problems) when it isn't. */
 function shapeOf(result: unknown, p: Problems): { pages: (CreateOp | UpdateOp)[]; map: MapEntry[]; client: string | null; model: string | null } | null {
   if (!isObject(result)) {
@@ -185,6 +209,8 @@ function scanText(text: string, field: string, p: Problems, scanner: SecretScann
 export async function checkCompile(result: unknown, cx: CompileContext): Promise<CompileCheck> {
   const p = new Problems();
   const shape = shapeOf(result, p);
+  // After the shape (which judges an empty Problems), before every check that may return or skip.
+  scanRaw(result, '', p, cx.scanner);
   if (!shape) return { ok: false, rejection: p.rejection() };
   const { draft, run, scanner } = cx;
   const served = new Set(cx.served.items.map((entry) => entry.item));
