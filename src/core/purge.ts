@@ -62,13 +62,15 @@ export interface PurgeSessionResult {
 }
 
 /** The words every purge says about history (spec §3: pushed history is never rewritten). */
-function historyNote({ pushed, rewritten, reflogExpired }: UnpushedDrop): string {
+function historyNote({ pushed, unsure, rewritten, reflogExpired }: UnpushedDrop): string {
   const reflog = reflogExpired
     ? 'and their reflog entries expired.'
     : 'but their reflog entries could not be expired, so the old commits may stay reachable through the tracker reflog until it expires them.';
   const unpushed =
     rewritten > 0 ? `${rewritten} unpushed tracker commit${rewritten === 1 ? ' was' : 's were'} rewritten without it, ${reflog}` : 'No unpushed tracker commit held it.';
-  const kept = pushed
+  const kept = unsure
+    ? 'It may have been pushed: grimoire couldn’t tell whether pushed history holds it, so take it that it does; grimoire never rewrites pushed history or runs gc, so the remote and every clone that fetched it may keep it.'
+    : pushed
     ? 'Pushed history still holds it: grimoire never rewrites pushed history or runs gc, so the remote and every clone that fetched it keep it.'
     : 'It was never pushed; grimoire never rewrites pushed history or runs gc.';
   return `${unpushed} ${kept}`;

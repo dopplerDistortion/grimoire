@@ -169,9 +169,18 @@ export interface UnpushedDrop {
   readonly rewritten: number;
   /** Whether the tracker reflog's entries for the rewritten commits were expired (true when nothing was rewritten). */
   readonly reflogExpired: boolean;
-  /** Whether pushed history (what a remote-tracking tracker holds) has any of the paths: it keeps them. */
+  /**
+   * Whether pushed history (what a remote-tracking tracker holds, or a push
+   * under way here is taking) has any of the paths: it keeps them. True too
+   * when that couldn't be read (`unsure`).
+   */
   readonly pushed: boolean;
+  /** Pushed history couldn't be read, so `pushed` says it may keep them. */
+  readonly unsure?: true;
 }
+
+/** Whether pushed history keeps a purge's content (see UnpushedDrop). */
+type PushedHeld = Pick<UnpushedDrop, 'pushed' | 'unsure'>;
 
 export interface InitializeOptions {
   /** Store settings the root commit holds, each set by the author at the commit's time. */
@@ -542,10 +551,15 @@ class GitTrackerStore implements TrackerStore {
     return { tip, rewritten, remotes, paths };
   }
 
-  /** After the purge commit's ref move: the rewritten commits' reflog entries expired, and whether pushed history keeps the content. */
-  private async droppedHistory(drop: { rewritten: number; remotes: string[]; paths: string[] }): Promise<UnpushedDrop> {
+  /**
+   * After the purge commit's ref move: the rewritten commits' reflog entries
+   * expired, with `held` (whether pushed history keeps the content, read
+   * before the move). Never fails: the purge landed, and an error would say
+   * nothing changed.
+   */
+  private async droppedHistory(drop: { rewritten: number }, held: PushedHeld): Promise<UnpushedDrop> {
     const reflogExpired = drop.rewritten === 0 || (await this.expireReflog());
-    return { rewritten: drop.rewritten, reflogExpired, pushed: await this.pushedHolds(drop.remotes, drop.paths) };
+    return { rewritten: drop.rewritten, reflogExpired, ...held };
   }
 
   /**
@@ -577,12 +591,21 @@ class GitTrackerStore implements TrackerStore {
     return run !== null && run.code === 0;
   }
 
-  /** Whether the history of any of `tips` (pushed history) ever held one of `paths`. */
-  private async pushedHolds(tips: readonly string[], paths: readonly string[]): Promise<boolean> {
-    if (tips.length === 0 || paths.length === 0) return false;
-    const run = await this.git(['rev-list', '-1', ...tips, '--', ...paths]);
-    // Unsure (git failed): say pushed history may keep it, never that it doesn't.
-    return run.code !== 0 || run.stdout.toString('utf8').trim() !== '';
+  /**
+   * Whether the history of any of `tips` (pushed history) ever held one of
+   * `paths`. Read before the purge's ref move, so nothing after it can fail;
+   * never throws. Unsure (git failed, or got stuck): pushed history may keep
+   * it, never that it doesn't.
+   */
+  private async pushedHolds(tips: readonly string[], paths: readonly string[]): Promise<PushedHeld> {
+    if (tips.length === 0 || paths.length === 0) return { pushed: false };
+    try {
+      const run = await this.git(['rev-list', '-1', ...tips, '--', ...paths]);
+      if (run.code !== 0) return { pushed: true, unsure: true };
+      return { pushed: run.stdout.toString('utf8').trim() !== '' };
+    } catch {
+      return { pushed: true, unsure: true };
+    }
   }
 
   /** `tree` without `paths` (the same tree when it holds none of them). */
@@ -756,8 +779,10 @@ class GitTrackerStore implements TrackerStore {
     const commitsFold = options.foldOnly === true && snapshot.parents.length > 1;
     // A purge drops its content from the unpushed segment under its commit, in this same compare-and-set (spec §3).
     const drop = await this.dropUnpushed(tips.local, draft.historyDrops());
+    // What pushed history holds is read before the ref moves: once it has, nothing may turn the purge into an error.
+    const held = drop ? await this.pushedHolds(drop.remotes, drop.paths) : null;
     if (edits.size === 0 && !commitsFold) {
-      if (!drop) return { result: outcome.result, commit: null, replayed: false, sealed: false };
+      if (!drop || !held) return { result: outcome.result, commit: null, replayed: false, sealed: false };
       // A purge done already whose content history still held: the rewrite alone moves the ref.
       if (drop.tip !== tips.local) {
         const moved = await this.moveRef(tips.local, drop.tip!);
@@ -766,7 +791,7 @@ class GitTrackerStore implements TrackerStore {
           return null;
         }
       }
-      return { result: outcome.result, commit: null, replayed: false, sealed: false, history: await this.droppedHistory(drop) };
+      return { result: outcome.result, commit: null, replayed: false, sealed: false, history: await this.droppedHistory(drop, held) };
     }
 
     // The fold's merged tree becomes real only now, in the write that commits it.
@@ -786,7 +811,7 @@ class GitTrackerStore implements TrackerStore {
       // The fold this write committed dropped late session records: counted in this machine's doctor stats.
       const drops = snapshot.virtual ? this.foldReports.get(snapshot)?.lateDrops : undefined;
       if (drops && drops.length > 0) await countLateDrops(this.location.commonDir, drops, now).catch(() => {});
-      const history = drop ? await this.droppedHistory(drop) : undefined;
+      const history = drop && held ? await this.droppedHistory(drop, held) : undefined;
       return {
         result: outcome.result,
         commit,
