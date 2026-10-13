@@ -401,3 +401,26 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
     expect(existsSync(path.join(store.dir, 'pkg', OLD, '.complete'))).toBe(true);
   });
 });
+
+describe('init meeting a newer marker', { timeout: 240_000 }, () => {
+  gitTest('a join on a tracker another release raised refuses UPGRADE_REQUIRED in the one details shape, with the core’s ordered remedies', async ({ world }) => {
+    await installOld(world.a);
+    // Another release raised the tracker past what this one understands.
+    const ref = 'refs/grimoire/tracker';
+    const tip = await world.a.git(['rev-parse', ref]);
+    const env = { GIT_INDEX_FILE: path.join(world.a.dir, '.git', 'grimoire-test-index') };
+    await world.a.git(['read-tree', tip], { env });
+    const oid = await world.a.git(['hash-object', '-w', '--stdin'], { input: 'format: 3\ncompat: 2\nrequires: "2.0.0"\n' });
+    await world.a.git(['update-index', '--add', '--cacheinfo', `100644,${oid},format`], { env });
+    const tree = await world.a.git(['write-tree'], { env });
+    await world.a.git(['update-ref', ref, await world.a.git(['commit-tree', tree, '-p', tip, '-m', 'a later release'])]);
+
+    const refused = initAt(world.a.dir, OLD);
+
+    await expect(refused).rejects.toMatchObject({ code: 'UPGRADE_REQUIRED' });
+    const details = ((await refused.catch((error: { details: Record<string, unknown> }) => error)) as { details: Record<string, unknown> }).details;
+    expect(Object.keys(details).sort()).toEqual(['marker', 'pin', 'remedies', 'requires', 'running', 'why']);
+    expect(details).toMatchObject({ marker: 'store', why: 'newer', running: OLD, pin: OLD, requires: '2.0.0' });
+    expect(details.remedies).toContainEqual({ kind: 'upgrade', command: 'npx @goksening/grimoire@2.0.0 init --upgrade', text: expect.any(String) });
+  });
+});

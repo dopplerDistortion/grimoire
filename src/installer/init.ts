@@ -221,16 +221,6 @@ type TrackerPlan =
 const DOCS = ['https://www.npmjs.com/package/@goksening/grimoire'];
 
 /** The canceled answer: a refusal before anything was written. */
-/** Runs `step`; an UPGRADE_REQUIRED it throws leaves with its details completed at `place` (the remedies, in order). */
-async function completingUpgrade<T>(place: UpgradePlace, step: () => Promise<T>): Promise<T> {
-  try {
-    return await step();
-  } catch (error) {
-    if (!(error instanceof GrimoireError) || error.code !== 'UPGRADE_REQUIRED') throw error;
-    throw new GrimoireError('UPGRADE_REQUIRED', error.message, { ...(await upgradeRequiredDetails(error.details, place)) });
-  }
-}
-
 function canceled(what: string): GrimoireError {
   return new GrimoireError('INVALID', `init was canceled at ${what}; nothing changed`, { fields: { confirmation: 'not given' } });
 }
@@ -446,8 +436,25 @@ function upgradeLines(upgrade: UpgradeReport, formats: ReleaseFormats): string[]
   return lines;
 }
 
-/** Runs init; refusals throw before anything is written. */
+/**
+ * Runs init; refusals throw before anything is written. Whichever marker a
+ * step meets (the tracker's on a join or adopt, the machine store's, the
+ * install's), UPGRADE_REQUIRED leaves in the one details shape the core gives
+ * (spec §5, §9): marker, why, running, pin, requires and the ordered remedies.
+ */
 export async function runInit(o: InitOptions): Promise<InitReport> {
+  try {
+    return await initSteps(o);
+  } catch (error) {
+    if (!(error instanceof GrimoireError) || error.code !== 'UPGRADE_REQUIRED' || Array.isArray(error.details.remedies)) throw error;
+    const dirs = await findGitDirs(o.root).catch(() => null);
+    const existing = await readInstallConfig(o.root).catch(() => null);
+    const place: UpgradePlace = { root: o.root, pin: existing?.version ?? null, commonDir: dirs?.commonDir ?? null, running: o.version };
+    throw new GrimoireError('UPGRADE_REQUIRED', error.message, { ...(await upgradeRequiredDetails(error.details, place)) });
+  }
+}
+
+async function initSteps(o: InitOptions): Promise<InitReport> {
   const { root, flags, version, prompter, say } = o;
   const dirs = await findGitDirs(root);
   if (!dirs) throw new GrimoireError('NO_REPO', `no git repository at ${root}`, { root });
@@ -604,9 +611,9 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     }
     const formats = o.formats ?? RELEASE_FORMATS;
     const from = inProgress && inProgress.to === version ? inProgress.from : existing!.version!;
-    // UPGRADE_REQUIRED here has the one details shape the core gives (spec §5, §9), with its ordered remedies.
+    // A marker's UPGRADE_REQUIRED leaves through runInit, which completes its details.
     const place = { root, pin: existing!.version, commonDir: dirs.commonDir, running: version };
-    const markers = await completingUpgrade(place, async () => [
+    const markers = [
       planMarker('store', await readStoreMarker(root, [tips.local, tips.remote]), formats.store, version, existing!.version),
       planMarker('machine', (await store.marker.read()) ?? null, formats.machine, version, existing!.version),
       planMarker(
@@ -616,7 +623,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
         version,
         existing!.version,
       ),
-    ]);
+    ];
     const raises = markers.filter((marker) => marker.verdict === 'compat-raise');
     if (raises.length > 0) {
       const which = raises.map((marker) => describeMarker(marker, formats[marker.marker])).join('; ');
