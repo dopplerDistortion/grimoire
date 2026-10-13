@@ -35,7 +35,7 @@ import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } f
 import { define, oneLine, writer, type OpEnv } from './op';
 import { s } from './schema';
 import { storeSetting } from './settings';
-import { restorePlan, type RestorePlan } from './skill-changes';
+import { acknowledgeable, restorePlan, type RestorePlan } from './skill-changes';
 
 /** The machine-local records kind of pending `skill_read` events (spec §6). */
 export const SKILL_READS = 'skill-reads';
@@ -221,6 +221,8 @@ export interface ShownSkill {
   attention: AttentionFlag[];
   /** With `name`: the current version's text. */
   text?: string | null;
+  /** The versions an acknowledgement may pick (a fork's sides, a contested decision's); empty when there is nothing to acknowledge. */
+  acknowledge: string[];
   /** How many versions the ledger has made current. */
   versions: number;
   /** The latest record of the skill (by time), or null. */
@@ -364,6 +366,7 @@ export const skillShow = define({
           : null,
         scorecards: deriveScorecards(state.name, state.records, traces, { patternOf: patternOf(await targetedPatterns(view, state.records)) }),
         attention: [],
+        acknowledge: state.status === 'deleted' || state.status === 'ejected' ? [] : [...acknowledgeable(state)].sort(),
         versions: new Set(state.records.map((record) => record.to).filter((version) => version !== null)).size,
         last_change: latestOf(state.records),
         pending_proposal: pendingOf.get(state.name) ?? null,

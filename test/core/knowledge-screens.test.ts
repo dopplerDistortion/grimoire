@@ -178,6 +178,7 @@ describe('attention: the knowledge items', () => {
     const [lower, higher] = [versionOf(fromAlice), versionOf(fromBob)].sort() as [string, string];
 
     const seen = ok(await core.call('attention', {}, dashboard(ctx)));
+    const forked = ok(await core.call('skill_show', { name: 'release-notes' }, dashboard(ctx)));
     ok(await core.call('skill_acknowledge', { name: 'release-notes', version: higher }, dashboard(ctx)));
     const after = ok(await core.call('attention', {}, dashboard(ctx)));
     const shown = ok(await core.call('skill_show', { name: 'release-notes' }, dashboard(ctx)));
@@ -192,8 +193,9 @@ describe('attention: the knowledge items', () => {
         choices: [lower, higher].map((version) => ({ version, standing: version === lower, kind: 'accept', by: expect.stringContaining('@'), at: expect.any(String) })),
       },
     ]);
+    expect(forked.skills[0]!.acknowledge).toEqual([lower, higher]);
     expect(after.items).toEqual([]);
-    expect(shown.skills[0]).toMatchObject({ current: higher, superseded: [] });
+    expect(shown.skills[0]).toMatchObject({ current: higher, superseded: [], acknowledge: [] });
   });
 
   test('a conflicted wiki page, and a page a quarantined trace flags, are items', async ({ world, grimoire }) => {
