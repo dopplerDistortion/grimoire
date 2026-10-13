@@ -151,19 +151,19 @@ function recordOf(entry: DesiredEntry, hash: string, created: boolean): Manifest
 
 
 /** Text as it is written back: the file's own byte order mark and line endings kept. */
-function inFileStyle(original: string | null, text: string): string {
+export function inFileStyle(original: string | null, text: string): string {
   if (original === null) return text;
   const crlf = original.includes('\r\n');
   const bom = original.startsWith('﻿');
   return `${bom ? '﻿' : ''}${crlf ? text.replace(/\n/g, '\r\n') : text}`;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** The indentation a JSON file uses (default two spaces). */
-function jsonIndent(text: string): string | number {
+export function jsonIndent(text: string): string | number {
   const match = /^\{\s*\n([ \t]+)\S/.exec(normalizedText(text));
   return match ? match[1]! : 2;
 }
@@ -298,7 +298,7 @@ function planJsonFile(
 }
 
 /** Where a marked block sits in a text: the lines of its markers. */
-function findBlock(lines: readonly string[], begin: string, end: string): { start: number; stop: number } | 'broken' | null {
+export function findBlock(lines: readonly string[], begin: string, end: string): { start: number; stop: number } | 'broken' | null {
   const starts = lines.flatMap((line, i) => (line.trim() === begin ? [i] : []));
   const stops = lines.flatMap((line, i) => (line.trim() === end ? [i] : []));
   if (starts.length === 0 && stops.length === 0) return null;
