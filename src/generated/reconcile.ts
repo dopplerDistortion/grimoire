@@ -53,8 +53,12 @@ export interface ReconcileReport {
   readonly removed: string[];
   /** Generated paths git tracks: left untouched. */
   readonly collisions: string[];
-  /** Untracked `grimoire-*` folders moved into the machine-local store, and where to. */
-  readonly movedAside: { path: string; to: string }[];
+  /**
+   * Untracked `grimoire-*` folders moved into the machine-local store, and
+   * where to. `partial`: it was copied there whole (across volumes), but part
+   * of it is still in the checkout, and why it couldn't be deleted.
+   */
+  readonly movedAside: { path: string; to: string; partial?: string }[];
   /** Skills whose output couldn't be placed here: they reach agents through skill_list / skill_read only. */
   readonly unplaced: { skill: string; path: string; why: string }[];
   /** Copies saved to the stray-edit store before grimoire replaced or removed them. */
@@ -185,6 +189,12 @@ export async function reconcileWorktree(
     }
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '');
     const to = path.join(store.dir, 'moved-aside', `${stamp}-${randomBytes(4).toString('hex')}`, ...folder.split('/'));
+    const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    /** Once its copy is whole, the move is recorded, so the person can find it: even when the checkout still holds part of it. */
+    const record = async (partial: string | null) => {
+      report.movedAside.push({ path: folder, to, ...(partial !== null ? { partial } : {}) });
+      await store.records.append(MOVED_ASIDE, { worktree, path: folder, to, at: new Date().toISOString(), ...(partial !== null ? { partial } : {}) }).catch(() => {});
+    };
     try {
       await mkdir(path.dirname(to), { recursive: true });
       try {
@@ -193,14 +203,18 @@ export async function reconcileWorktree(
         if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
         // Another volume than the common dir's: copy, then remove.
         await cp(from, to, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-        await rm(from, { recursive: true });
+        try {
+          await retryTransient(() => rm(from, { recursive: true }));
+        } catch (deleting) {
+          await record(`grimoire couldn't delete all of it (${messageOf(deleting)})`);
+          return false;
+        }
       }
     } catch (error) {
-      report.left.push({ path: folder, why: `grimoire couldn't move it aside (${error instanceof Error ? error.message : String(error)})` });
+      report.left.push({ path: folder, why: `grimoire couldn't move it aside (${messageOf(error)})` });
       return false;
     }
-    report.movedAside.push({ path: folder, to });
-    await store.records.append(MOVED_ASIDE, { worktree, path: folder, to, at: new Date().toISOString() }).catch(() => {});
+    await record(null);
     return true;
   };
 
