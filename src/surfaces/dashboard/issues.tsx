@@ -36,11 +36,18 @@ function rowFacts(row: ListRow) {
   };
 }
 
+/** The quick view a `?view=` query names; Open otherwise. */
+function viewOf(search: string): QuickView {
+  const named = new URLSearchParams(search).get('view');
+  return QUICK_VIEWS.find(([view]) => view === named)?.[0] ?? NO_FILTERS.view;
+}
+
 export function IssuesScreen({ path }: { path: string }) {
   const me = useMe();
   const match = /^\/issues\/([^/]+)$/.exec(path);
   const selected = match ? decodeURIComponent(match[1]!) : null;
-  const [filters, setFilters] = useState<Filters>(NO_FILTERS);
+  // A tile on the home links to a quick view: `/issues?view=ready`.
+  const [filters, setFilters] = useState<Filters>(() => ({ ...NO_FILTERS, view: viewOf(location.search) }));
   const [board, setBoard] = useState(false);
   const [rows, setRows] = useState<ListRow[] | null>(null);
   const [all, setAll] = useState<ListRow[]>([]);

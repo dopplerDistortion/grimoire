@@ -292,7 +292,8 @@ function LabelsEditor({ issue, labels, reload }: { issue: IssueDetail; labels: r
   );
 }
 
-function releaseAbandoned(issue: IssueDetail, attempt: ListedOpenAttempt, reload: () => Promise<void>) {
+/** The 🔒 Release as abandoned dialog for one open attempt on `issue` (the issue page, Attention). */
+export function releaseAbandoned(issue: { readonly id: string }, attempt: ListedOpenAttempt, reload: () => Promise<void>) {
   openDialog({
     title: `Release ${issue.id} as abandoned`,
     humanOnly: true,
@@ -321,14 +322,13 @@ function releaseAbandoned(issue: IssueDetail, attempt: ListedOpenAttempt, reload
   });
 }
 
-function ConflictBanners({ issue, reload }: { issue: IssueDetail; reload: () => Promise<void> }) {
+/** The 🔒 Resolve dialog for the field conflict on `issue` (the issue page, Attention): for each field, whose value stands. */
+export function resolveConflict(issue: IssueDetail, reload: () => Promise<void>) {
   const conflict = issue.conflict;
-  if (!conflict) return null;
+  if (!conflict) return;
   const fields = conflict.fields.filter((field) => field !== 'open_attempts');
-  const twoAttempts = conflict.fields.includes('open_attempts');
   const kept = (field: string): unknown => (field in issue ? (issue as unknown as Record<string, unknown>)[field] : null);
-  const resolve = () =>
-    openDialog({
+  openDialog({
       title: `Resolve the conflict on ${issue.id}`,
       humanOnly: true,
       ok: 'Resolve',
@@ -374,6 +374,15 @@ function ConflictBanners({ issue, reload }: { issue: IssueDetail; reload: () => 
         await reload();
       },
     });
+}
+
+function ConflictBanners({ issue, reload }: { issue: IssueDetail; reload: () => Promise<void> }) {
+  const conflict = issue.conflict;
+  if (!conflict) return null;
+  const fields = conflict.fields.filter((field) => field !== 'open_attempts');
+  const twoAttempts = conflict.fields.includes('open_attempts');
+  const kept = (field: string): unknown => (field in issue ? (issue as unknown as Record<string, unknown>)[field] : null);
+  const resolve = () => resolveConflict(issue, reload);
   return (
     <>
       {fields.length > 0 ? (
