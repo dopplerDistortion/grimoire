@@ -250,5 +250,93 @@ export interface AttemptShowResult {
     readonly pages: readonly { readonly slug: string; readonly title: string; readonly kind: string }[];
     readonly proposals: readonly { readonly id: string; readonly skill: string; readonly action: string; readonly at: string }[];
   };
-  readonly quarantine: { readonly by: string; readonly at: string; readonly reason: string } | null;
+  readonly quarantine: { readonly by: string; readonly at: string; readonly reason: string } | null;}
+
+// ---------- Settings (src/core/settings.ts, sync.ts, purge.ts) ----------
+
+export interface ShownSetting {
+  readonly value: unknown;
+  readonly default: boolean;
+  readonly at?: string;
+  readonly by?: string;
+  readonly description?: string;
+}
+
+export interface SettingsResult {
+  readonly store: Readonly<Record<string, ShownSetting>>;
+  readonly machine: Readonly<Record<string, ShownSetting>>;
+}
+
+export interface SettingsSetResult {
+  readonly key: string;
+  readonly scope: 'store' | 'machine';
+  readonly value: unknown;
+  readonly changed: boolean;
+  readonly disclosure?: readonly string[];
+  readonly warning?: string;
+  readonly stripped?: number;
+}
+
+export interface SyncPosition {
+  readonly state: 'none' | 'unpublished' | 'in-sync' | 'ahead' | 'behind' | 'diverged';
+  readonly local: string | null;
+  readonly remote_tip: string | null;
+  readonly ahead: number | null;
+  readonly behind: number | null;
+}
+
+export interface SyncStatus {
+  readonly remote: string | null;
+  readonly url: string | null;
+  readonly auto_sync: boolean | null;
+  readonly pending_since: string | null;
+  readonly last_attempt_at: string | null;
+  readonly last_success_at: string | null;
+  readonly last_result: string | null;
+  readonly failure: { readonly class: 'auth' | 'network' | 'rejected'; readonly message: string; readonly client: string; readonly surface: string; readonly at: string } | null;
+  readonly retry_at: string | null;
+  readonly fix: string | null;
+  readonly position: SyncPosition | null;
+  readonly summary: string;
+}
+
+export interface SyncResult {
+  readonly state: 'in-sync' | 'pushed' | 'pending';
+  readonly reason?: 'no-remote' | 'no-default-branch' | 'failed';
+  readonly failure?: { readonly class: string; readonly message: string };
+  readonly fold: string | null;
+}
+
+export interface PurgedRecord {
+  readonly kind: 'trace' | 'session' | 'proposal';
+  readonly id: string;
+  readonly key?: string;
+  readonly facts?: 'kept' | 'purged';
+  readonly by: string;
+  readonly at: string;
+  readonly reason: string;
+}
+
+export interface PurgeListResult {
+  readonly purged: readonly PurgedRecord[];
+  readonly note: string;
+}
+
+/** `GET /api/runner`: this machine's runner, status only. */
+export interface RunnerInfo {
+  readonly enabled: boolean;
+  readonly kind?: string;
+  readonly binary?: string;
+  readonly model?: string | null;
+  readonly allow_api_billing?: boolean;
+  readonly auth_method?: string | null;
+  readonly bills_api?: boolean;
+  readonly runs_today: number;
+  readonly runs_per_day: number;
+  readonly next_run_at?: string | null;
+  readonly paused_until?: string | null;
+  readonly last?: { readonly at: string; readonly kind: string | null; readonly result: string; readonly reason?: string } | null;
+  readonly lines: readonly string[];
+  readonly warnings: readonly string[];
+  readonly commands: { readonly enable: readonly string[]; readonly disable: string };
 }

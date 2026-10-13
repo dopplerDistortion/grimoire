@@ -58,3 +58,14 @@ export function opEffect(op: string): OpEffect {
 export function isKnownOp(op: string): boolean {
   return OP_EFFECTS.has(op);
 }
+
+/** The `Grimoire-*` trailers of a tracker commit's message: one per line in its last paragraph. */
+export function commitTrailers(message: string): Map<string, string> {
+  const trailers = new Map<string, string>();
+  const paragraphs = message.replace(/\r\n/g, '\n').trim().split(/\n{2,}/);
+  for (const line of (paragraphs.at(-1) ?? '').split('\n')) {
+    const match = /^(Grimoire-[A-Za-z]+): (.*)$/.exec(line);
+    if (match && !trailers.has(match[1]!)) trailers.set(match[1]!, match[2]!.trim());
+  }
+  return trailers;
+}

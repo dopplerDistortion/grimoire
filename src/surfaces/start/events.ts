@@ -26,7 +26,7 @@ import { readdir, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { runGit } from '../../git/run';
-import { opEffect, type TrackerTips } from '../../tracker';
+import { commitTrailers, opEffect, type TrackerTips } from '../../tracker';
 
 /** How often the tips are checked while a stream is open. */
 export const LIVE_CHECK_MS = 1_000;
@@ -290,7 +290,7 @@ export class LiveEvents {
     if (log.code !== 0) return null;
     const messages = log.stdout.toString('utf8').split('\x1e').slice(1);
     if (messages.length > largeJump) return null;
-    return messages.map(trailersOf);
+    return messages.map(commitTrailers);
   }
 }
 
@@ -305,17 +305,6 @@ function reloadOf(state: LiveState): Outgoing {
 function send(response: ServerResponse, event: string, id: string, data: unknown): void {
   if (response.destroyed || response.writableEnded) return;
   response.write(`event: ${event}\nid: ${id}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
-/** The `Grimoire-*` trailers of a commit message: one per line in its last paragraph. */
-function trailersOf(message: string): Map<string, string> {
-  const trailers = new Map<string, string>();
-  const paragraphs = message.replace(/\r\n/g, '\n').trim().split(/\n{2,}/);
-  for (const line of (paragraphs.at(-1) ?? '').split('\n')) {
-    const match = /^(Grimoire-[A-Za-z]+): (.*)$/.exec(line);
-    if (match && !trailers.has(match[1]!)) trailers.set(match[1]!, match[2]!.trim());
-  }
-  return trailers;
 }
 
 function actorKind(value: string | undefined): string | null {

@@ -23,7 +23,7 @@ import { define } from './op';
 import { s } from './schema';
 import { staleCutoff } from './stale';
 import { skillStrays, type ShownStrayEdit } from './stray-edits';
-import { syncStatus, type SyncStatusResult } from './sync';
+import { syncFix, syncStatus, type SyncStatusResult } from './sync';
 
 /** One sync failure as Attention shows it. */
 export interface SyncFailureItem {
@@ -68,15 +68,6 @@ export interface AttentionResult {
 
 const COUNTED = ['ready', 'claimed', 'stale', 'blocked', 'conflicts'] as const;
 
-/** The words that tell a person how to fix a failed sync. */
-function fixOf(failure: NonNullable<SyncStatusResult['failure']>, remote: string | null): string {
-  const where = remote ?? 'the remote';
-  if (failure.class === 'auth') {
-    return `Fix this clone's git credentials for ${where} (a plain \`git push ${where}\` from a terminal should work), then Sync now.`;
-  }
-  return `${where} refuses pushes to grimoire/tracker (a branch protection rule, a ruleset or a server hook): let this clone push the grimoire/tracker branch, or pick another remote with grimoire.remote, then Sync now.`;
-}
-
 function syncItems(status: SyncStatusResult): SyncFailureItem[] {
   const failure = status.failure;
   if (!failure || failure.class === 'network') return [];
@@ -90,7 +81,7 @@ function syncItems(status: SyncStatusResult): SyncFailureItem[] {
       client: failure.client,
       surface: failure.surface,
       at: failure.at,
-      fix: fixOf(failure, status.remote),
+      fix: status.fix ?? syncFix(failure, status.remote),
       pending_since: status.pending_since,
     },
   ];

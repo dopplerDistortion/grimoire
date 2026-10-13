@@ -8,6 +8,7 @@
 //   GET  /api/session                 who is signed in, since when
 //   DELETE /api/session               signs out
 //   GET  /api/instance                the running version, the launch worktree's pin, the port
+//   GET  /api/runner                  this machine's runner: status only, with the CLI commands
 //   GET  /api/events                  the live events (./events.ts)
 //   GET  /api/op/<name>?input=<JSON>  a read op
 //   POST /api/op/<name>               a write op, its input the JSON body
@@ -88,6 +89,8 @@ export interface DashboardServerOptions {
   readonly live: LiveEvents;
   /** What `GET /api/instance` answers. */
   readonly instance: () => Promise<Record<string, unknown>>;
+  /** What `GET /api/runner` answers (status only: the runner is enabled from a terminal). */
+  readonly runner: () => Promise<Record<string, unknown>>;
   /** Unexpected failures, for stderr. */
   readonly log: (line: string) => void;
 }
@@ -214,6 +217,7 @@ export function createDashboardServer(options: DashboardServerOptions): http.Ser
       }
     }
     if (url.pathname === '/api/instance' && method === 'GET') return json(response, 200, await options.instance());
+    if (url.pathname === '/api/runner' && method === 'GET') return json(response, 200, await options.runner());
     if (url.pathname === '/api/events' && method === 'GET') {
       const last = request.headers['last-event-id'];
       options.live.attach(request, response, typeof last === 'string' ? last : url.searchParams.get('last_event_id'));

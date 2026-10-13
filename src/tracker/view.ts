@@ -136,6 +136,8 @@ export interface TrackerView {
   tracePurge(handle: string): PurgeTombstone | undefined;
   /** Every purged trace's tombstone, by attempt handle. */
   purgedTraces(): ReadonlyMap<string, PurgeTombstone>;
+  /** Every purge tombstone: traces and proposals by id, session records by attempt handle and key. */
+  purgeIndex(): PurgeIndex;
   /** The tombstone of a purged skill proposal (`purges/<proposal-id>.md`), or undefined. A purged proposal is gone from every other read. */
   proposalPurge(id: string): PurgeTombstone | undefined;
   /**
@@ -497,6 +499,10 @@ export class Snapshot implements TrackerView {
     return this.purges.traces;
   }
 
+  purgeIndex(): PurgeIndex {
+    return this.purges;
+  }
+
   proposalPurge(id: string): PurgeTombstone | undefined {
     return this.purges.proposals.get(id);
   }
@@ -760,6 +766,13 @@ export class Draft implements TrackerDraft {
 
   proposalPurge(id: string): PurgeTombstone | undefined {
     return this.proposalPurgesHere.get(id) ?? this.base.proposalPurge(id);
+  }
+
+  purgeIndex(): PurgeIndex {
+    const base = this.base.purgeIndex();
+    const sessions = new Map(base.sessions);
+    for (const [handle, keys] of this.sessionPurgesHere) sessions.set(handle, new Map([...(base.sessions.get(handle) ?? []), ...keys]));
+    return { traces: this.purgedTraces(), sessions, proposals: new Map([...base.proposals, ...this.proposalPurgesHere]) };
   }
 
   async purgeProposal(id: string, tombstone: NewPurge): Promise<readonly string[]> {

@@ -29,7 +29,27 @@ export class ApiError extends Error {
 /** Fires when any call finds the browser signed out (401 NO_SESSION). */
 export const signedOut = new EventTarget();
 
-async function answer<T>(response: Response): Promise<T> {
+/** What `storeBlocked` fires with: the refusal that makes the dashboard a full page. */
+export class BlockedEvent extends Event {
+  constructor(readonly body: ApiErrorBody) {
+    super('blocked');
+  }
+}
+
+/**
+ * Fires when a call finds this clone's store unusable here (spec §20,
+ * Full-page states): a read answering NOT_SYNCED (no tracker, or not the one
+ * `config.yml` names), or any call answering UPGRADE_REQUIRED. A write's
+ * NOT_SYNCED (shallow history) stays the write's own error.
+ */
+export const storeBlocked = new EventTarget();
+
+/** Whether `body` makes the dashboard a full page, for a call made with `method`. */
+export function blocks(body: ApiErrorBody, method: string): boolean {
+  return body.code === 'UPGRADE_REQUIRED' || (body.code === 'NOT_SYNCED' && method === 'GET');
+}
+
+async function answer<T>(response: Response, method: string): Promise<T> {
   const text = await response.text();
   let value: unknown = null;
   try {
@@ -41,6 +61,7 @@ async function answer<T>(response: Response): Promise<T> {
   if (!response.ok || error) {
     const body = error ?? { code: 'INTERNAL', message: `the dashboard server answered ${response.status}`, retryable: false, details: {} };
     if (body.code === 'NO_SESSION') signedOut.dispatchEvent(new Event('signed-out'));
+    if (blocks(body, method)) storeBlocked.dispatchEvent(new BlockedEvent(body));
     throw new ApiError(body, response.status);
   }
   return value as T;
@@ -52,7 +73,7 @@ async function send<T>(method: string, url: string, body?: unknown): Promise<T> 
     init.headers = { accept: 'application/json', 'content-type': 'application/json', 'x-grimoire': '1' };
     if (body !== undefined) init.body = JSON.stringify(body);
   }
-  return answer<T>(await fetch(url, init));
+  return answer<T>(await fetch(url, init), method);
 }
 
 /** A read op. */
@@ -95,4 +116,9 @@ export function session(): Promise<SessionInfo> {
 
 export function instance(): Promise<InstanceInfo> {
   return send<InstanceInfo>('GET', '/api/instance');
+}
+
+/** This machine's runner: status only (it is enabled from a terminal). */
+export function runner<T>(): Promise<T> {
+  return send<T>('GET', '/api/runner');
 }

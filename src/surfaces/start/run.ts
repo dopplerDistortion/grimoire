@@ -1,7 +1,8 @@
 // `grimoire start` and `grimoire open` (spec §12, §10 Runtime, §20).
 //
 // `start` is one foreground process per clone, with no daemon: it serves the
-// dashboard, runs upkeep on its timers and syncs every 10 min, until Ctrl-C
+// dashboard, runs upkeep on its timers, syncs every 10 min and, while a
+// runner is configured, runs due chores with it (src/runner/trigger.ts), until Ctrl-C
 // or a control-channel `stop`. It refuses agent markers but needs no TTY (a
 // login item may run it), and prints the sign-in URL only at a terminal.
 // When the clone's `start` already runs, a second `start` signs a browser in
@@ -30,6 +31,7 @@ import { findHostRoot, readCheckoutConfig, readPerson } from '../../core/host';
 import { readMachineSetting } from '../../core/settings';
 import { GrimoireError, type ErrorBody } from '../../errors';
 import { cloneId as cloneIdOf, defaultDashboardPort, findGitDirs, MachineLocalStore, runningStart, START_LOCK, startStaleness, type RunningStart } from '../../machine-local';
+import { enableWarnings, readRunnerConfig, runChores, runnerStatus, startRunnerTrigger } from '../../runner';
 import { openTracker } from '../../tracker';
 import { startUpkeep, watchNewWorktrees } from '../../upkeep';
 import { VERSION } from '../../version';
@@ -341,6 +343,16 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
     signIns,
     live,
     instance,
+    runner: async () => {
+      const status = await runnerStatus(store, new Date());
+      const kind = (status.value as { kind?: unknown }).kind;
+      return {
+        ...(status.value as Record<string, unknown>),
+        lines: status.lines,
+        warnings: kind === 'claude' || kind === 'codex' ? enableWarnings(kind) : [],
+        commands: { enable: ['grimoire runner enable claude', 'grimoire runner enable codex'], disable: 'grimoire runner disable' },
+      };
+    },
     log: (line) => say(`grimoire start: ${line}`),
   });
   const closeServer = () =>
@@ -403,6 +415,15 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
   });
   // A worktree registered while start runs gets its upkeep (the generated output's reconcile) at once (spec §15).
   const worktrees = watchNewWorktrees({ commonDir: clone.commonDir, loop: upkeep });
+  // The runner (spec §16 Triggers): while one is configured, due chores run at launch, on trace writes,
+  // outcome changes and decisions, and every 30 min. A pin mismatch doesn't stop it.
+  const runner = startRunnerTrigger({
+    root,
+    tips: async () => (await tracker).tips(),
+    configured: async () => (await readRunnerConfig(store)) !== null,
+    run: () => runChores({ root, core, env: io.env, due: true }),
+    log: say,
+  });
   let syncing: Promise<void> | null = null;
   const syncTimer = setInterval(() => {
     if (syncing) return;
@@ -435,6 +456,7 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
   say('grimoire start: stopping');
   clearInterval(syncTimer);
   worktrees.stop();
+  await runner.stop();
   await closeServer();
   await control.close();
   await Promise.all([upkeep.stop(2_000), syncing]);

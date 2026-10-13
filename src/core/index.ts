@@ -21,7 +21,7 @@ import { skillDiscard, skillRecord, skillStrays } from './stray-edits';
 import { skillAcknowledge, skillDelete, skillEject, skillRestore, skillUnblock } from './skill-changes';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
-import { purgeSession, purgeTrace } from './purge';
+import { purgeList, purgeSession, purgeTrace } from './purge';
 import { proposalAccept, proposalDismiss, proposalList, proposalPurge, proposalReconsider, proposalReject, proposalShow } from './proposals';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
 import { choreSubmit } from './chore-submit';
@@ -85,7 +85,7 @@ export type { ActivityEntry, ActivityResult } from './activity';
 export type { AttentionItem, AttentionResult, SyncFailureItem } from './attention';
 export type { AttemptShowResult, ShownContext, ShownOutcome, ExposureHit } from './attempt-show';
 export { choreThresholds, dueChores } from './chores';
-export type { AutoSyncRequest, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
+export type { AutoSyncRequest, SyncPosition, SyncResult, SyncStatusResult, SyncRequest, SyncSkip, SyncStatusRecord } from './sync';
 export { AUTO_SYNC_SETTING, autoSync, autoSyncOn, markSyncPending, readSyncStatus, syncNow, syncRequestOf } from './sync';
 export { runBackgroundSync, spawnedAutoSync, type SyncChildCommand, type BackgroundSyncOptions } from './background-sync';
 export type { ErrorBody, ErrorCode } from '../errors';
@@ -211,6 +211,7 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   unquarantine,
   purgeTrace,
   purgeSession,
+  purgeList,
   proposalList,
   proposalShow,
   proposalAccept,

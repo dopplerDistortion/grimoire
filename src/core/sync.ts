@@ -389,9 +389,28 @@ export interface SyncStatusResult {
   failure: { class: SyncFailureClass; message: string; client: string; surface: string; at: string } | null;
   /** Automatic syncs wait until then after failures (exponential, up to an hour). */
   retry_at: string | null;
+  /** What a person does about the last failure, in words; null without one. */
+  fix: string | null;
+  /** The local tracker against the remote's as last fetched; null where `status` reads without the tracker. */
+  position: SyncPosition | null;
   /** One line for `status` and the dashboard. */
   summary: string;
 }
+
+/**
+ * Where the local tracker ref stands against the remote-tracking one, as last
+ * fetched: `unpublished` (no remote-tracking ref), `in-sync`, `ahead`,
+ * `behind` or `diverged` with the commit counts, `none` without either ref.
+ */
+export type SyncPosition = {
+  state: 'none' | 'unpublished' | 'in-sync' | 'ahead' | 'behind' | 'diverged';
+  local: string | null;
+  remote_tip: string | null;
+  /** Commits the local ref has that the remote's doesn't; null when there is no remote-tracking ref. */
+  ahead: number | null;
+  /** Commits the remote's has that the local ref doesn't. */
+  behind: number | null;
+};
 
 const iso = (ms: number | null | undefined): string | null => (typeof ms === 'number' ? new Date(ms).toISOString() : null);
 
@@ -408,6 +427,35 @@ const SURFACE_NOUNS: Readonly<Record<string, string>> = {
   hook: 'hook',
   runner: 'runner',
 };
+
+/** The words that tell a person how to fix a failed sync. */
+export function syncFix(failure: Pick<NonNullable<SyncStatusResult['failure']>, 'class'>, remote: string | null): string {
+  const where = remote ?? 'the remote';
+  if (failure.class === 'auth') {
+    return `Fix this clone's git credentials for ${where} (a plain \`git push ${where}\` from a terminal should work), then Sync now.`;
+  }
+  if (failure.class === 'network') return `Check that ${where} can be reached from this machine; automatic syncs try again on their own, or Sync now.`;
+  return `${where} refuses pushes to grimoire/tracker (a branch protection rule, a ruleset or a server hook): let this clone push the grimoire/tracker branch, or pick another remote with grimoire.remote, then Sync now.`;
+}
+
+/** Where `tracker`'s local ref stands against its remote-tracking ref. */
+export async function syncPosition(tracker: TrackerStore): Promise<SyncPosition> {
+  const { local, remote } = await tracker.tips();
+  const count = async (args: string[]): Promise<number[]> => {
+    const run = await runGit(tracker.location.root, ['rev-list', '--count', ...args, '--']);
+    if (run.code !== 0) throw new GrimoireError('INTERNAL', `git rev-list failed: ${String(run.stderr).trim()}`, {});
+    return run.stdout.toString('utf8').trim().split(/\s+/).map(Number);
+  };
+  if (local === null && remote === null) return { state: 'none', local, remote_tip: remote, ahead: null, behind: null };
+  if (remote === null) return { state: 'unpublished', local, remote_tip: null, ahead: null, behind: null };
+  if (local === null) {
+    const [behind] = await count([remote]);
+    return { state: 'behind', local, remote_tip: remote, ahead: 0, behind: behind! };
+  }
+  const [ahead, behind] = await count(['--left-right', `${local}...${remote}`]);
+  const state = ahead! > 0 && behind! > 0 ? 'diverged' : ahead! > 0 ? 'ahead' : behind! > 0 ? 'behind' : 'in-sync';
+  return { state, local, remote_tip: remote, ahead: ahead!, behind: behind! };
+}
 
 export function syncSummary(status: Omit<SyncStatusResult, 'summary'>): string {
   if (status.pending_since === null) {
@@ -441,7 +489,9 @@ export const syncStatus = define({
     } catch {
       auto = null;
     }
-    return readSyncStatus(tracker.location.commonDir, auto);
+    const status = await readSyncStatus(tracker.location.commonDir, auto);
+    // The position is the dashboard's: a failure to tell it hides it, never the rest.
+    return { ...status, position: await syncPosition(tracker).catch(() => null) };
   },
 });
 
@@ -465,6 +515,8 @@ export async function readSyncStatus(commonDir: string, autoSync: boolean | null
     last_result: record?.last_result ?? null,
     failure: record?.failure ? { ...record.failure, at: iso(record.failure.at)! } : null,
     retry_at: iso(record?.retry_at),
+    fix: record?.failure ? syncFix(record.failure, record.remote ?? null) : null,
+    position: null,
   };
   return { ...status, summary: syncSummary(status) };
 }

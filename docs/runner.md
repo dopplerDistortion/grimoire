@@ -59,7 +59,7 @@ At an interactive `runner enable`, a login that bills outside the plan asks whet
 
 - `npm run -s grimoire -- chore run --due` runs each due chore in turn: a compile, then a proposal if one became due. It is meant for OS schedulers. Nothing due is not an error: it exits 0 and starts nothing, not even the billing guard. It needs no terminal, but it refuses agent shells.
 - `npm run -s grimoire -- chore run wiki-maintainer` (or `skill-proposer`) runs that chore now, with the thresholds waived. Without a runner, it tells you to ask an agent to run the `grimoire-chores` skill.
-- `grimoire start` will also trigger the runner while one is configured. That comes with the dashboard's Settings screen.
+- `grimoire start` also drives the runner while one is configured: it evaluates due chores once at launch, whenever the tracker moves with a trace write, an outcome change or a proposal decision, and every 30 minutes, and runs what is due within the caps. It keeps doing so when the launch worktree comes to pin another version. The dashboard's Settings screen shows the runner's status and the commands to enable or disable it.
 
 ## Scheduler recipes
 
