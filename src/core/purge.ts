@@ -12,7 +12,7 @@ import { parseSessionRecord, serializeSessionRecord } from '../capture/session-r
 import { type PurgedFacts, type PurgeTombstone, type TrackerView, type UnpushedDrop } from '../tracker';
 import { parseHandle } from './attempts';
 import { define, oneLine, writer } from './op';
-import { citingProposals } from './proposals';
+import { citingPages, citingProposals } from './citing';
 import { s } from './schema';
 
 /** What a purge did to history: the unpushed segment rewritten, pushed history kept. */
@@ -80,12 +80,6 @@ function historyOf(drop: UnpushedDrop | undefined): PurgeHistory {
   return { unpushed_rewritten: done.rewritten, pushed: done.pushed, note: historyNote(done) };
 }
 
-/** The wiki pages whose sources cite the trace `handle`. */
-async function citingPages(view: TrackerView, handle: string): Promise<CitingPage[]> {
-  const pages = await view.wiki.pages();
-  return pages.filter((page) => page.sources.includes(handle)).map((page) => ({ slug: page.slug, edit: `grimoire wiki edit ${page.slug}` }));
-}
-
 const attemptInput = s.string({ ...oneLine, description: 'the attempt handle (at-…)' });
 const reasonInput = s.string({ nonBlank: true, description: 'why it is purged (required)' });
 
@@ -119,7 +113,11 @@ export const purgeTrace = define({
     });
     const history = historyOf(write.history);
     const view = await tracker.read();
-    return { ...write.result, cited_by: { pages: await citingPages(view, handle), proposals: await citingProposals(view, handle) }, history };
+    const cited_by = {
+      pages: (await citingPages(view, handle)).map((page) => ({ slug: page.slug, edit: `grimoire wiki edit ${page.slug}` })),
+      proposals: (await citingProposals(view, handle)).map((proposal) => proposal.id),
+    };
+    return { ...write.result, cited_by, history };
   },
 });
 

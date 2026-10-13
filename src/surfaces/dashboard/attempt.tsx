@@ -464,7 +464,7 @@ function KnowledgeUse({ shown }: { shown: AttemptShowResult }) {
           : proposals.map((proposal, k) => (
               <span key={proposal.id}>
                 {k > 0 ? ', ' : ''}
-                <a href={`/knowledge/proposals/${proposal.id}`}><code>{proposal.id}</code></a> <span class="mute">({proposal.action} {proposal.skill})</span>
+                <a href={`/knowledge/proposals/${proposal.id}`}><code>{proposal.id}</code></a> <span class="mute">({proposal.action} {proposal.skill}, {proposal.status})</span>
               </span>
             ))}
       </div>

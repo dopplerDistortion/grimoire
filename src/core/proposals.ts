@@ -714,11 +714,3 @@ export const purgeProposal = define({
   },
 });
 
-/** The live proposals that cite the trace `handle` (purge_trace's cited_by). */
-export async function citingProposals(view: TrackerView, handle: string): Promise<string[]> {
-  const citing = (proposal: ProposalRecord) =>
-    proposal.traces.some((trace) => trace.trace === handle) ||
-    proposal.citations.some((item) => item === `trace:${handle}` || item === `issue:${handle}` || item === `debrief:${handle}` || item.startsWith(`excerpt:${handle}/`));
-  return (await view.proposals.records()).filter(citing).map((proposal) => proposal.id);
-}
-

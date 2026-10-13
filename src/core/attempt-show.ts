@@ -17,7 +17,9 @@
 // A purged trace (spec §3) shows its tombstone and nothing else.
 import { GrimoireError } from '../errors';
 import { runGit } from '../git/run';
+import { proposalStates, readSkills, type ProposalStatus } from '../knowledge';
 import { activeQuarantine } from '../knowledge/chores/quarantine';
+import type { SecretScanner } from '../scanner';
 import { parseSessionRecord } from '../capture/session-record';
 import { type AttemptRecord, type TrackerView } from '../tracker';
 import { outcomeFile } from '../tracker/layout';
@@ -25,6 +27,7 @@ import { parseOutcome } from '../tracker/attempt';
 import { logEntries, readBlobs } from './activity';
 import { parseHandle } from './attempts';
 import { traceCapture, type CaptureEntry } from './capture';
+import { citingPages, citingProposals } from './citing';
 import { derivations } from './derive';
 import { define, oneLine } from './op';
 import { s } from './schema';
@@ -101,7 +104,7 @@ export interface AttemptShowResult {
     /** Observed commits (each context's, with its key) and referenced ones (`end.md`'s). */
     commits: Record<string, unknown>[];
   };
-  knowledge: { pages: { slug: string; title: string; kind: string }[]; proposals: { id: string; skill: string; action: string; at: string }[] };
+  knowledge: { pages: { slug: string; title: string; kind: string }[]; proposals: { id: string; skill: string; action: string; at: string; status: ProposalStatus }[] };
   quarantine: { by: string; at: string; reason: string } | null;
 }
 
@@ -178,14 +181,12 @@ function commitsOf(contexts: readonly ShownContext[], referenced: readonly unkno
   return out;
 }
 
-async function knowledgeOf(view: TrackerView, handle: string): Promise<AttemptShowResult['knowledge']> {
-  const pages = (await view.wiki.pages())
-    .filter((page) => page.sources.includes(handle))
-    .map((page) => ({ slug: page.slug, title: page.title, kind: page.kind }))
-    .sort((x, y) => (x.slug < y.slug ? -1 : x.slug > y.slug ? 1 : 0));
-  const proposals = (await view.proposals.records())
-    .filter((proposal) => proposal.traces.some((trace) => trace.trace === handle))
-    .map((proposal) => ({ id: proposal.id, skill: proposal.skill, action: proposal.action, at: proposal.at }));
+/** What cites the trace: exactly what purge_trace names (one reading), each proposal with its status. */
+async function knowledgeOf(view: TrackerView, handle: string, scanner: SecretScanner): Promise<AttemptShowResult['knowledge']> {
+  const pages = (await citingPages(view, handle)).map((page) => ({ slug: page.slug, title: page.title, kind: page.kind }));
+  const citing = await citingProposals(view, handle);
+  const states = citing.length === 0 ? [] : proposalStates(citing, (await readSkills(view, scanner)).skills);
+  const proposals = states.map(({ record, status }) => ({ id: record.id, skill: record.skill, action: record.action, at: record.at, status }));
   return { pages, proposals };
 }
 
@@ -197,11 +198,11 @@ export const attemptShow = define({
   policy: 'human-read',
   replay: 'none',
   input: s.object({ attempt: s.string({ ...oneLine, description: 'the attempt handle (at-…)' }) }),
-  async run(input, { tracker }): Promise<AttemptShowResult> {
+  async run(input, { tracker, scanner }): Promise<AttemptShowResult> {
     const handle = parseHandle(input.attempt);
     const view = await tracker.read();
     const record = view.attempt(handle);
-    const knowledge = await knowledgeOf(view, handle);
+    const knowledge = await knowledgeOf(view, handle, scanner);
     if (!record) {
       const tombstone = view.tracePurge(handle);
       if (!tombstone) throw new GrimoireError('NOT_FOUND', `there is no attempt ${handle}`, { field: 'attempt', ref: handle });

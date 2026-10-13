@@ -272,7 +272,7 @@ export interface AttemptShowResult {
   };
   readonly knowledge: {
     readonly pages: readonly { readonly slug: string; readonly title: string; readonly kind: string }[];
-    readonly proposals: readonly { readonly id: string; readonly skill: string; readonly action: string; readonly at: string }[];
+    readonly proposals: readonly { readonly id: string; readonly skill: string; readonly action: string; readonly at: string; readonly status: string }[];
   };
   readonly quarantine: { readonly by: string; readonly at: string; readonly reason: string } | null;}
 
