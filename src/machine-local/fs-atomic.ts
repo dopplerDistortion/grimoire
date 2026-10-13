@@ -27,15 +27,25 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | null)?.code;
 }
 
-/** Runs `fn`, retrying the transient Windows sharing failures within a budget. */
-export async function retryTransient<T>(fn: () => Promise<T>): Promise<T> {
-  const deadline = Date.now() + RETRY_BUDGET_MS;
+export interface RetryOptions {
+  /** How long to keep retrying, in milliseconds (default 3 s): the calling operation's own budget. */
+  readonly budgetMs?: number;
+  /** The platform whose sharing failures count as transient (default this one's): a test seam. */
+  readonly platform?: NodeJS.Platform;
+}
+
+/**
+ * Runs `fn` (a rename, unlink, rmdir or read), retrying the transient Windows
+ * sharing failures with a short backoff, until the budget runs out.
+ */
+export async function retryTransient<T>(fn: () => Promise<T>, options: RetryOptions = {}): Promise<T> {
+  const deadline = Date.now() + (options.budgetMs ?? RETRY_BUDGET_MS);
+  const windows = (options.platform ?? process.platform) === 'win32';
   for (let delay = 5; ; delay = Math.min(delay * 2, 100)) {
     try {
       return await fn();
     } catch (error) {
-      const transient =
-        process.platform === 'win32' && TRANSIENT_WINDOWS_CODES.has(errorCode(error) ?? '');
+      const transient = windows && TRANSIENT_WINDOWS_CODES.has(errorCode(error) ?? '');
       if (!transient || Date.now() >= deadline) throw error;
       await sleep(delay + Math.random() * delay);
     }
@@ -61,7 +71,7 @@ export async function writeFileAtomic(file: string, data: string): Promise<void>
   try {
     await retryTransient(() => rename(temp, file));
   } catch (error) {
-    await unlink(temp).catch(() => {});
+    await retryTransient(() => unlink(temp)).catch(() => {});
     throw error;
   }
 }

@@ -53,6 +53,8 @@ export const CUT_BUDGET_MS = 10_000;
 /** How long the calling context waits for its ending call to reach its transcript (spec §14: 2 s). */
 export const FLUSH_WAIT_MS = 2_000;
 const FLUSH_POLL_MS = 100;
+/** What a facts scan the deadline overtook gives, as against one that failed. */
+const OVERTAKEN = Symbol('overtaken');
 
 const READER_VERSION = { 'claude-code': CLAUDE_CODE_READER_VERSION, codex: CODEX_READER_VERSION } as const;
 
@@ -494,14 +496,17 @@ class ContextCut {
   }
 
   async once(): Promise<SessionRecord> {
-    const { record, callIds, stamp } = await this.cutOnce();
+    const { record, callIds, stamp, overtaken } = await this.cutOnce();
+    // A cut whose facts scan the deadline overtook is no finished cut: the one before it stands. (The scan's
+    // deadline timer can fire before the caller's, so this cut must not displace it after the fact.)
+    if (overtaken && this.latest !== null) return this.latest;
     this.latest = record;
     this.callIds = callIds;
     this.stamp = stamp ?? null;
     return record;
   }
 
-  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null; stamp?: TranscriptStamp }> {
+  private async cutOnce(): Promise<{ record: SessionRecord; callIds: readonly string[] | null; stamp?: TranscriptStamp; overtaken?: true }> {
     const { input, target } = this;
     const family = clientFamily(target.client);
     if (input.mode === 'none') return { record: this.factsOnly('off'), callIds: null };
@@ -509,8 +514,10 @@ class ContextCut {
     try {
       const { cut, roots, source, subagents } = family === 'claude-code' ? await this.cutClaude() : await this.cutCodex();
       if (isChoresContext(cut)) this.chores = true;
-      const facts = cut.window === null || this.chores ? null : await beforeDeadline(this.scanFacts(cut, subagents), this.deadline, null);
-      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}) };
+      const scanned = cut.window === null || this.chores ? null : await beforeDeadline(this.scanFacts(cut, subagents).catch(() => null), this.deadline, OVERTAKEN);
+      const facts = scanned === OVERTAKEN ? null : scanned;
+      const overtaken = scanned === OVERTAKEN ? { overtaken: true as const } : {};
+      return { record: this.fromCut(cut, source, roots, facts), callIds: cut.callIds, ...(cut.stamp ? { stamp: cut.stamp } : {}), ...overtaken };
     } catch {
       // A reader that throws is one grimoire can't trust on this transcript.
       const identity = { client: { name: family, version: null }, reader: { version: READER_VERSION[family] }, session: target.session ?? '', context: target.context ?? '' };
