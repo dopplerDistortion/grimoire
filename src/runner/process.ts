@@ -16,6 +16,8 @@ export interface ProcessRun {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  /** The process was killed because `signal` fired. */
+  readonly aborted?: boolean;
   /** Why the process never started (ENOENT, EACCES), when it didn't. */
   readonly spawnError?: string;
 }
@@ -26,12 +28,31 @@ export interface ProcessOptions {
   /** Written to stdin, which is then closed. */
   readonly input?: string;
   readonly timeoutMs: number;
+  /** Kills the process tree and settles at once when it fires (the runner stopping). */
+  readonly signal?: AbortSignal;
+  /** How long output may keep coming after the process exits (default 2 s). */
+  readonly drainMs?: number;
 }
 
-/** Runs `binary` with `args` and collects its output. Never throws for the child's own failure. */
+/** How long a process's pipes may stay open after it exits: a process it left behind may hold them. */
+export const DRAIN_MS = 2_000;
+
+/**
+ * Runs `binary` with `args` and collects its output. Never throws for the
+ * child's own failure, and always settles: once the process exits, its output
+ * gets `drainMs` to end; then whatever it left holding the pipes is killed and
+ * the pipes are closed. On POSIX the process leads its own process group, so a
+ * kill (the timeout, `signal`, a leftover after the drain) takes everything it
+ * started, even after it exited itself. On Windows, a kill while it runs takes
+ * its tree (taskkill /T); a process it left behind after exiting is no longer
+ * in its tree, and only loses the pipes.
+ */
 export function runProcess(binary: string, args: readonly string[], options: ProcessOptions): Promise<ProcessRun> {
   return new Promise((resolve) => {
-    const child = spawn(binary, [...args], { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    const posix = process.platform !== 'win32';
+    const drainMs = options.drainMs ?? DRAIN_MS;
+    if (options.signal?.aborted) return resolve({ code: null, stdout: '', stderr: '', timedOut: false, aborted: true });
+    const child = spawn(binary, [...args], { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, detached: posix });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let sizes = [0, 0];
@@ -43,21 +64,58 @@ export function runProcess(binary: string, args: readonly string[], options: Pro
     child.stdout.on('data', keep(out, 0));
     child.stderr.on('data', keep(err, 1));
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killTree(child);
-    }, options.timeoutMs);
+    let aborted = false;
+    let exited = false;
+    let exitCode: number | null = null;
     let settled = false;
+    const timers: NodeJS.Timeout[] = [];
+    const kill = () => killTree(child, { group: posix });
     const finish = (run: ProcessRun) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      for (const timer of timers) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
       resolve(run);
     };
-    child.on('error', (error: NodeJS.ErrnoException) => finish({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: error.code ?? error.message }));
-    child.on('close', (code) =>
-      finish({ code: timedOut ? null : code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut }),
+    const collected = (): ProcessRun => ({
+      code: timedOut || aborted ? null : exitCode,
+      stdout: Buffer.concat(out).toString('utf8'),
+      stderr: Buffer.concat(err).toString('utf8'),
+      timedOut,
+      ...(aborted ? { aborted } : {}),
+    });
+    /** Settles without waiting for the pipes: whatever still holds them is killed, and they are closed. */
+    const settleNow = () => {
+      if (settled) return;
+      kill();
+      for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
+      finish(collected());
+    };
+    /** Kills the tree, then settles once the pipes close, or after the drain at the latest. */
+    const stop = () => {
+      kill();
+      if (exited) return settleNow();
+      timers.push(setTimeout(settleNow, drainMs));
+    };
+    const onAbort = () => {
+      if (settled) return;
+      aborted = true;
+      stop();
+    };
+    timers.push(
+      setTimeout(() => {
+        if (!exited) timedOut = true;
+        stop();
+      }, options.timeoutMs),
     );
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    child.on('error', (error: NodeJS.ErrnoException) => finish({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: error.code ?? error.message }));
+    child.on('exit', (code) => {
+      exited = true;
+      exitCode = code;
+      timers.push(setTimeout(settleNow, drainMs));
+    });
+    child.on('close', () => finish(collected()));
     // The child may exit before reading its stdin; its exit code tells the story.
     child.stdin.on('error', () => {});
     child.stdin.end(options.input ?? '');
