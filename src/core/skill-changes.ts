@@ -424,6 +424,15 @@ export const skillEject = define({
     const version = state.version;
     const text = await book.text(version);
     if (text === null) throw invalid({ name: `the text of ${input.name}'s current version is missing from the tracker` });
+    // The ejected files are ordinary files agents read: only a version agents may be served goes out.
+    if (state.withheld.has(version)) {
+      throw invalid({
+        name: `${input.name}'s current version is withheld by a contested decision with a suspicious reject, so it is served nowhere; settle it with skill acknowledge before ejecting`,
+      });
+    }
+    if (state.served?.version !== version) throw invalid({ name: `${input.name}'s current version fails this clone's content checks, so it is served nowhere and can't be ejected` });
+    scanned(scanner, text);
+    servable(text);
     const files = CLIENT_FOLDERS.map((folder) => `${folder}/${input.name}/SKILL.md`);
     for (const folder of CLIENT_FOLDERS) {
       const target = path.join(worktree, ...folder.split('/'), input.name);

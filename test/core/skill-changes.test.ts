@@ -225,6 +225,29 @@ describe('eject', () => {
   });
 });
 
+describe('eject of a version served nowhere', () => {
+  test('eject refuses the withheld version of a suspicious-contested accept and writes nothing', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const { proposal } = ok(await submit(p, patchResult(p)));
+    await share(world);
+    ok(await p.core.call('proposal_reject', { id: proposal, reason: 'suspicious', quarantine: false }, human(agentContext(world.b))));
+    const accepted = ok(await p.core.call('proposal_accept', { id: proposal }, human(grimoire.ctx)));
+    await exchange(world);
+    const shown = ok(await p.core.call('skill_show', { name: SKILL }, human(grimoire.ctx))).skills[0]!;
+    expect(shown.current).toBe(accepted.version);
+    expect(await servedIn(p.core, grimoire.ctx, SKILL)).toBe(p.base);
+
+    const tip = await trackerTip(world.a);
+    expect(await p.core.call('skill_eject', { name: SKILL, base: accepted.version }, human(grimoire.ctx))).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID', details: { fields: { name: expect.stringContaining('acknowledge') } } },
+    });
+    expect(await existsIn(world.a, `.claude/skills/${SKILL}`)).toBe(false);
+    expect(await existsIn(world.a, `.agents/skills/${SKILL}`)).toBe(false);
+    expect(await trackerTip(world.a)).toBe(tip);
+  });
+});
+
 /** Clone b takes a's tracker as its own, so the two write apart from here until they fold. */
 async function share(world: GitWorld): Promise<void> {
   await pushTracker(world.a);
