@@ -20,6 +20,7 @@ import { agentContext, initializeTracker } from '../../core/support';
 import { installed } from '../../upkeep/support';
 import { runHook } from '../../../src/surfaces/hooks/run-hook';
 import { sessionStart, sessionStartClient, sessionStartOutput } from '../../../src/surfaces/hooks/session-start';
+import { lateWork } from '../../../src/surfaces/hooks/late';
 import { putMachineSetting } from '../../../src/core/settings';
 import { sessionLine } from '../../../src/knowledge/chores/offering';
 import { randomProposalId } from '../../../src/tracker';
@@ -278,6 +279,32 @@ describe('the session line, by priority (spec §12)', () => {
 
     expect(await hook(root, CLAUDE[0]!, 0)).toEqual({ code: 0, output: '' });
     expect(await hook(root, CLAUDE[0]!)).toEqual({ code: 0, output: `${ASK}\n` });
+  });
+
+  gitTest('a chore-facts read that started and overran the budget: the hook answers at the budget without the chore line, and leaves the read as late work its process won’t wait for', async ({ world }) => {
+    const root = await setUp(world);
+    await choreDue(world);
+    let finish!: (facts: null) => void;
+    const read = new Promise<null>((resolve) => (finish = resolve));
+    let started = false;
+
+    const output = await sessionStart(readFixture(CLAUDE[0]!), {
+      startDir: root,
+      fastPathBudgetMs: 1_500,
+      readKnowledge: () => {
+        started = true;
+        return read;
+      },
+    });
+
+    expect(started).toBe(true);
+    expect(output).toBe('');
+    const left = lateWork();
+    expect(left).toBeGreaterThanOrEqual(1);
+    finish(null);
+    await read;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateWork()).toBeLessThan(left);
   });
 
   /** This test process, recorded as a `grimoire mcp` of `client` serving `worktree` on `pin` (as a server started before a pull records itself). */

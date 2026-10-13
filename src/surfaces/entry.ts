@@ -4,6 +4,7 @@
 // verb's code is a dynamic import, so it loads only for that verb.
 import { VERSION } from '../version';
 import { hookFailed } from './hooks/debug';
+import { lateWork } from './hooks/late';
 
 export interface EntryOptions {
   /** The path of `grimoire.mjs`: the detached sync child runs it. */
@@ -63,9 +64,14 @@ export async function runEntry(argv: readonly string[], options: EntryOptions): 
   return runCli(withFrom(rest), { bin: options.bin, ...(options.startDir === undefined ? {} : { startDir: options.startDir }) });
 }
 
-/** Ends the process with `code` once everything settles; a handle left open by mistake can't keep it alive. */
+/**
+ * Ends the process with `code` once everything settles; a handle left open by
+ * mistake can't keep it alive. A hook that left work running past its budget
+ * has said all it will (its output is flushed): the process ends at once, so
+ * that work can't run it into the clients' 10 s hook timeout.
+ */
 export function exitWith(code: number | null): void {
   if (code === null) return;
   process.exitCode = code;
-  setTimeout(() => process.exit(), 5_000).unref();
+  setTimeout(() => process.exit(), lateWork() > 0 ? 0 : 5_000).unref();
 }

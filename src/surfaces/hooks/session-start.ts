@@ -15,6 +15,7 @@
 import { strayEditNotice } from '../../generated/stray';
 import { SESSION_LINE_MAX, sessionLine, type Pickup } from '../../knowledge/chores/offering';
 import { hookFailed } from './debug';
+import { leftRunning } from './late';
 
 /** Which client ran the hook. */
 export type HookClient = 'claude-code' | 'codex';
@@ -48,6 +49,8 @@ export interface SessionStartContext {
   readonly startDir: string;
   /** How long into the hook the fast path may start work (default FAST_PATH_BUDGET_MS); a test seam. */
   readonly fastPathBudgetMs?: number;
+  /** What reads the chore facts (default: the tracker, as knowledgeFacts does); a test seam. */
+  readonly readKnowledge?: () => Promise<KnowledgeFacts | null>;
 }
 
 export { SESSION_LINE_MAX };
@@ -114,7 +117,7 @@ async function compose(payload: unknown, ctx: SessionStartContext): Promise<Sess
     }),
     byDeadline(
       () =>
-        knowledgeFacts(store, root).catch((error: unknown) => {
+        (ctx.readKnowledge?.() ?? knowledgeFacts(store, root)).catch((error: unknown) => {
           hookFailed(error);
           return null;
         }),
@@ -168,7 +171,11 @@ async function pinMismatchNotice(store: import('../../machine-local').MachineLoc
   return null;
 }
 
-/** `work`'s value, or null once `deadline` (epoch ms) passes first; past it already, the work never starts. */
+/**
+ * `work`'s value, or null once `deadline` (epoch ms) passes first; past it
+ * already, the work never starts. Work still running at the deadline is left
+ * running (./late.ts): the hook's process ends without waiting for it.
+ */
 async function byDeadline<T>(work: () => Promise<T | null>, deadline: number): Promise<T | null> {
   if (!Number.isFinite(deadline)) return work();
   if (Date.now() >= deadline) return null;
@@ -176,21 +183,30 @@ async function byDeadline<T>(work: () => Promise<T | null>, deadline: number): P
   const late = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
   });
+  const running = work();
   try {
-    return await Promise.race([work(), late]);
+    const value = await Promise.race([running.then((result) => ({ result })), late]);
+    if (value === null) {
+      leftRunning(running);
+      return null;
+    }
+    return value.result;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Whether a chore is due here and how this machine picks it up, and how many skill proposals wait for a person. */
+export interface KnowledgeFacts {
+  readonly choreDue: Pickup | null;
+  readonly proposalsPending: number;
 }
 
 /**
  * Whether a chore is due here now, and how this machine picks it up; and how
  * many skill proposals wait for a person. Null without a tracker to read.
  */
-async function knowledgeFacts(
-  store: import('../../machine-local').MachineLocalStore,
-  root: string,
-): Promise<{ choreDue: Pickup | null; proposalsPending: number } | null> {
+async function knowledgeFacts(store: import('../../machine-local').MachineLocalStore, root: string): Promise<KnowledgeFacts | null> {
   const [{ openTracker }, { dueChoresIn }, { machineSetting }, { proposalSignals }] = await Promise.all([
     import('../../tracker'),
     import('../../core/chores'),
