@@ -8,10 +8,22 @@
 // a human-only call whose subject can't be found asks for the verb instead.
 import type { CallContext, Core, OpDescriptor } from '../../core';
 import { parseHandle } from '../../core/attempts';
+import { GrimoireError } from '../../errors';
 import { terminalOn } from './wiki';
 
+/**
+ * A confirmation that shows the person something first: `notice` goes to
+ * stderr before the prompt, and `input` adds fields to the call (what the
+ * person was shown, such as the version a restore checks its base against).
+ */
+export interface ShownConfirmation {
+  readonly subject: string;
+  readonly notice?: string;
+  readonly input?: Record<string, unknown>;
+}
+
 /** Decides what a call's person must type, or null when the call needs no confirmation. */
-export type Confirmation = (input: Record<string, unknown>, ctx: CallContext, core: Pick<Core, 'call'>) => Promise<string | null>;
+export type Confirmation = (input: Record<string, unknown>, ctx: CallContext, core: Pick<Core, 'call'>) => Promise<string | ShownConfirmation | null>;
 
 /** The fields that name a human-only op's subject, in the order they are looked for, with what a person calls each. */
 const SUBJECT_FIELDS = [
@@ -81,6 +93,82 @@ const strayEditSkill: Confirmation = async (input, ctx, core) => {
 };
 const STRAY_HELP = 'a person runs it at an interactive terminal, with no agent marker set, and types the skill’s name to confirm (`all` with all: true)';
 
+/** A version as a confirmation names it. */
+const short = (version: string | null) => (version === null ? 'none' : version.slice(0, 12));
+
+/** Only a diff's changed lines, indented: what a confirmation lists. */
+function changedLines(diff: readonly string[], indent: string): string[] {
+  const changed = diff.filter((line) => line.startsWith('+ ') || line.startsWith('- '));
+  return changed.length === 0 ? [`${indent}(no change)`] : changed.map((line) => `${indent}${line}`);
+}
+
+/**
+ * A restore (spec §18) lists and diffs what it undoes and drops before the
+ * person confirms with the skill's name, and commits only while the version
+ * they were shown is still current. A restore that can't be made is refused
+ * before anything is asked.
+ */
+const skillRestore: Confirmation = async (input, ctx, core) => {
+  const name = typeof input.name === 'string' ? input.name.trim() : '';
+  if (name === '' || typeof input.version !== 'string') return name === '' ? 'skill restore' : name;
+  const shown = await core.call('skill_show', { name, restore: input.version }, ctx);
+  if (!shown.ok) throw new GrimoireError(shown.error.code, shown.error.message, shown.error.details);
+  const plan = shown.result.restore!;
+  const lines = [`grimoire skill restore: ${name} goes from ${short(plan.current)} back to ${short(plan.version)}.`];
+  if (plan.undone) lines.push(`Undone, which counts as negative evidence: the ${plan.undone.kind} to ${short(plan.undone.version)} (${plan.undone.by}, ${plan.undone.at}).`);
+  if (plan.dropped.length > 0) {
+    lines.push('Dropped along the way, which is no negative evidence and may be proposed again:');
+    for (const dropped of plan.dropped) {
+      lines.push(`  the ${dropped.kind} to ${short(dropped.version)} (${dropped.by}, ${dropped.at}), against the restored text:`);
+      lines.push(...changedLines(dropped.diff, '    '));
+    }
+  }
+  lines.push('The current text against the restored one:', ...changedLines(plan.diff, '  '));
+  if (plan.lifts_block) lines.push(`This lifts the block on the name ${name}, and counts against the cap like a create (${plan.active} of ${plan.cap} active).`);
+  lines.push('Pending proposals on the skill go stale.');
+  return { subject: name, notice: lines.join('\n'), ...(input.base === undefined ? { input: { base: plan.current } } : {}) };
+};
+
+/** The skill `name` as `skill_show` gives it, or the core's error. */
+async function shownSkill(name: string, ctx: CallContext, core: Pick<Core, 'call'>) {
+  const shown = await core.call('skill_show', { name }, ctx);
+  if (!shown.ok) throw new GrimoireError(shown.error.code, shown.error.message, shown.error.details);
+  return shown.result.skills[0]!;
+}
+
+/**
+ * A delete (spec §18) names the version it removes before the person
+ * confirms with the skill's name, and commits only while that version is
+ * still current.
+ */
+const skillDelete: Confirmation = async (input, ctx, core) => {
+  const name = typeof input.name === 'string' ? input.name.trim() : '';
+  if (name === '') return 'skill delete';
+  const skill = await shownSkill(name, ctx, core);
+  const notice = [
+    `grimoire skill delete: ${name} at ${short(skill.current)} goes, with its copies and stubs in every worktree.`,
+    'Its text joins the repeat check, and the name stays blocked until `grimoire skill unblock`.',
+  ].join('\n');
+  return { subject: name, notice, ...(input.base === undefined ? { input: { base: skill.current } } : {}) };
+};
+
+/**
+ * An eject (spec §15, §18) shows the text it writes out as ordinary files
+ * before the person confirms with the skill's name, and commits only while
+ * that version is still current.
+ */
+const skillEject: Confirmation = async (input, ctx, core) => {
+  const name = typeof input.name === 'string' ? input.name.trim() : '';
+  if (name === '') return 'skill eject';
+  const skill = await shownSkill(name, ctx, core);
+  const notice = [
+    `grimoire skill eject: ${name} at ${short(skill.current)} is written into .claude/skills/${name}/ and .agents/skills/${name}/ as ordinary files to commit, and its name is blocked.`,
+    'From then on it is a hand-written skill grimoire never touches. The text:',
+    ...(skill.text ?? '').split('\n').map((line) => `  ${line}`),
+  ].join('\n');
+  return { subject: name, notice, ...(input.base === undefined ? { input: { base: skill.current } } : {}) };
+};
+
 /** Ops whose confirmation isn't the human-only default. */
 const CONFIRMATIONS = new Map<string, CustomConfirmation>([
   [
@@ -94,6 +182,27 @@ const CONFIRMATIONS = new Map<string, CustomConfirmation>([
   ['unquarantine', { confirm: quarantineTarget, help: QUARANTINE_HELP }],
   ['skill_record', { confirm: strayEditSkill, help: STRAY_HELP }],
   ['skill_discard', { confirm: strayEditSkill, help: STRAY_HELP }],
+  [
+    'skill_restore',
+    {
+      confirm: skillRestore,
+      help: 'a person runs it at an interactive terminal, with no agent marker set, sees what the restore undoes and drops (each diffed), and types the skill’s name to confirm',
+    },
+  ],
+  [
+    'skill_delete',
+    {
+      confirm: skillDelete,
+      help: 'a person runs it at an interactive terminal, with no agent marker set, sees the version it deletes, and types the skill’s name to confirm',
+    },
+  ],
+  [
+    'skill_eject',
+    {
+      confirm: skillEject,
+      help: 'a person runs it at an interactive terminal, with no agent marker set, sees the version and the text it writes out, and types the skill’s name to confirm',
+    },
+  ],
 ]);
 
 /** Registers how a later slice's verb confirms. */
@@ -108,7 +217,7 @@ export async function confirmationFor(
   input: Record<string, unknown>,
   ctx: CallContext,
   core: Pick<Core, 'call'>,
-): Promise<string | null> {
+): Promise<string | ShownConfirmation | null> {
   const custom = CONFIRMATIONS.get(op.name);
   if (custom) return custom.confirm(input, ctx, core);
   if (op.policy !== 'human-only') return null;

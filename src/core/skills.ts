@@ -6,6 +6,7 @@ import {
   normalizeSkillText,
   parseSkillText,
   readSkills,
+  restoreFates,
   serializeSkillText,
   skillNameProblem,
   skillVersionOf,
@@ -14,6 +15,7 @@ import {
   targetedPatterns,
   writeSkillChange,
   type LedgerEntry,
+  type RestoreFate,
   type ServedSkill,
   type SkillParts,
   type SkillStatus,
@@ -30,6 +32,7 @@ import { decodeCursor, encodeCursor, jsonBytes, longestPrefix, RESULT_BUDGET } f
 import { define, oneLine, writer, type OpEnv } from './op';
 import { s } from './schema';
 import { storeSetting } from './settings';
+import { restorePlan, type RestorePlan } from './skill-changes';
 
 /** The machine-local records kind of pending `skill_read` events (spec §6). */
 export const SKILL_READS = 'skill-reads';
@@ -216,7 +219,7 @@ export interface ShownSkill {
   /** With `name`: the current version's text. */
   text?: string | null;
   /** With `name`: every record of the skill, each after the ones it follows. */
-  history?: (ShownChange & { from: string | null; origin: SkillOrigin; proposal?: string; reason?: string })[];
+  history?: (ShownChange & { from: string | null; origin: SkillOrigin; proposal?: string; reason?: string; fate?: RestoreFate })[];
 }
 
 export interface SkillShowResult {
@@ -227,6 +230,8 @@ export interface SkillShowResult {
   /** More skills are active than the cap allows: creates past it after a merge are allowed, and flagged here. */
   over_cap: boolean;
   delivery: 'on' | 'off';
+  /** With `name` and `restore`: what restoring that version would do, the confirmation a person sees before `skill restore`. */
+  restore?: RestorePlan;
 }
 
 function shownChange(record: LedgerEntry): ShownChange {
@@ -270,13 +275,18 @@ export const skillShow = define({
   kind: 'read',
   policy: 'human-read',
   replay: 'none',
-  input: s.object({ name: s.optional(s.string({ ...oneLine, description: 'show only this skill, with its text and history' })) }),
+  input: s.object({
+    name: s.optional(s.string({ ...oneLine, description: 'show only this skill, with its text and history' })),
+    restore: s.optional(s.string({ ...oneLine, description: 'with name: a version to restore; shows what the restore would undo and drop, each diffed' })),
+  }),
   async run(input, { tracker, scanner }): Promise<SkillShowResult> {
     const view = await tracker.read();
     const book = await readSkills(view, scanner);
     if (input.name !== undefined && !book.skills.has(input.name)) {
       throw new GrimoireError('NOT_FOUND', `the skill ledger has no evolved skill named ${input.name}`, { skill: input.name });
     }
+    if (input.restore !== undefined && input.name === undefined) throw invalid({ restore: 'goes with name: the skill to restore' });
+    const plan = input.restore !== undefined ? await restorePlan(view, scanner, book, input.name!, input.restore) : undefined;
     const states = [...book.skills.values()].filter((state) => input.name === undefined || state.name === input.name);
     // No tag yet means no record was made here; a tag that can't be read means this clone can't tell.
     const local = await new MachineLocalStore(tracker.location.commonDir).records.read<string>('clone', 'tag').then(
@@ -324,12 +334,14 @@ export const skillShow = define({
       shown.attention = [...(shown.scorecards.find((card) => card.version === state.version)?.attention ?? [])];
       if (input.name !== undefined) {
         shown.text = state.version === null ? null : await book.text(state.version);
+        const fates = restoreFates(state.records);
         shown.history = state.records.map((record) => ({
           ...shownChange(record),
           from: record.from,
           origin: origin(record),
           ...(record.proposal !== undefined ? { proposal: record.proposal } : {}),
           ...(record.reason !== undefined ? { reason: record.reason } : {}),
+          ...(fates.has(record.id) ? { fate: fates.get(record.id)! } : {}),
         }));
       }
       skills.push(shown);
@@ -341,6 +353,7 @@ export const skillShow = define({
       cap,
       over_cap: book.active > cap,
       delivery: deliveryOn(view) ? 'on' : 'off',
+      ...(plan ? { restore: plan } : {}),
     };
   },
 });

@@ -130,7 +130,13 @@ async function call(command: Command, input: Record<string, unknown>, ctx: CallC
   checkSurface(op, ctx);
   const session = SESSIONS[op.name];
   if (humanSurface(ctx) && !session) {
-    const subject = await confirmationFor(op, command.verb, input, ctx, core);
+    const asked = await confirmationFor(op, command.verb, input, ctx, core);
+    const shown: { subject: string | null; notice?: string; input?: Record<string, unknown> } =
+      typeof asked === 'string' || asked === null ? { subject: asked } : asked;
+    const subject = shown.subject;
+    // What the person is shown before typing, on stderr (stdout stays one JSON object).
+    if (shown.notice !== undefined) io.stderr.write(`${shown.notice}\n`);
+    Object.assign(input, shown.input ?? {});
     if (subject !== null && !(await confirmTyped(io, command.verb, subject))) {
       throw new GrimoireError('INVALID', `${command.verb} was not confirmed: type ${subject} exactly to run it; nothing changed`, {
         fields: { confirmation: `must be ${subject}` },

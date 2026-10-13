@@ -18,6 +18,7 @@ import { resolve } from './resolve';
 import { settingsGet, settingsSet } from './settings';
 import { skillEdit, skillList, skillRead, skillShow } from './skills';
 import { skillDiscard, skillRecord, skillStrays } from './stray-edits';
+import { skillAcknowledge, skillDelete, skillEject, skillRestore, skillUnblock } from './skill-changes';
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
 import { purgeSession, purgeTrace } from './purge';
@@ -198,6 +199,11 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   skillStrays,
   skillRecord,
   skillDiscard,
+  skillRestore,
+  skillDelete,
+  skillEject,
+  skillAcknowledge,
+  skillUnblock,
   wikiList,
   wikiShow,
   wikiEdit,
