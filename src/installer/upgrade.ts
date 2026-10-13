@@ -99,7 +99,8 @@ export function planMarker(marker: MarkerName, reading: MarkerReading | null, ra
     throw new GrimoireError(
       'UPGRADE_REQUIRED',
       `grimoire ${running} can't run against this ${marker === 'install' ? 'checkout’s install_format' : `${marker} marker`} (compat ${compat}${requires ? `, which needs grimoire ${requires} or later` : ''}); nothing changed`,
-      { marker, why: 'newer', running, pin, requires, remedies: [] },
+      // What was met; the caller completes the details (upgradeRequiredDetails: running, pin and the ordered remedies).
+      { marker, why: 'newer', running, pin, requires },
     );
   }
   const verdict: MarkerVerdict = compat === null || compat < range.J ? 'compat-raise' : format !== null && format < range.K ? 'rises' : 'stays';

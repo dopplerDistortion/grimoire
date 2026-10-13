@@ -8,7 +8,10 @@ import { describe, expect } from 'vitest';
 import type { CallContext, Core } from '../../src/core';
 import { CLAUDE_AGENT, claudeCall, created, DEBRIEF, MAIN_CALL, sessionRecords, SUBAGENT_CALL, test as captureTest } from './capture-support';
 import { Clock, codexRoot, CODEX_ROOT_SESSION, putPage, terminal, workPair } from './chore-support';
-import { coreTest as test, T0, type Grimoire } from './support';
+import { patchResult, proposer, SKILL, submit } from './proposer-support';
+import { bobPublishes, bobTracksRemote, shared, T1 } from './folds-support';
+import { commitToTracker, coreTest as test, fetchTracker, pushTracker, T0, trackerFile, trackerTip, type Grimoire } from './support';
+import { parseProposal, serializeProposal } from '../../src/tracker';
 import { ok } from './sync-support';
 
 const dashboard = (ctx: CallContext): CallContext => ({ ...ctx, surface: 'dashboard', client: null, evidence: {} });
@@ -110,6 +113,55 @@ describe('attempt_show', () => {
     expect(marked.quarantine).toMatchObject({ by: grimoire.ctx.person.email, reason: 'misleading' });
     expect(gone).toMatchObject({ attempt: purged, state: 'purged', purged: { by: grimoire.ctx.person.email, reason: 'a secret' }, start: null, end: null, issue: null });
     expect(unknown).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+  });
+
+  test('the pages and proposals citing the trace are the ones purge_trace names, each proposal with its status', async ({ world, grimoire }) => {
+    const p = await proposer(grimoire, world);
+    const proposal = (await ok(submit(p, patchResult(p)))).proposal!;
+    const pass = p.passes[0]!;
+    // A second record that cites the pass only by one of its excerpts: purge_trace counts it as citing the trace.
+    const parsed = parseProposal(proposal, Buffer.from(await trackerFile(world.a, (await trackerTip(world.a))!, `knowledge/proposals/${proposal}.md`)));
+    const other = 'pp-0123456789';
+    await commitToTracker(world.a, { [`knowledge/proposals/${other}.md`]: serializeProposal({ ...parsed, id: other, traces: [], citations: [`excerpt:${pass}/main`] }).toString('utf8') });
+    const human = dashboard(grimoire.ctx);
+
+    const shown = await ok(p.core.call('attempt_show', { attempt: pass }, human));
+
+    const statuses = await Promise.all([other, proposal].map(async (id) => [id, (await ok(p.core.call('proposal_show', { id }, human))).status]));
+    expect(shown.knowledge.proposals.map((entry) => [entry.id, entry.status]).sort()).toEqual(statuses.sort());
+    expect(shown.knowledge.proposals.find((entry) => entry.id === proposal)).toMatchObject({ skill: SKILL, action: 'patch', status: 'pending' });
+    const purged = await ok(p.core.call('purge_trace', { attempt: pass, reason: 'a secret' }, human));
+    expect(purged.cited_by.proposals.sort()).toEqual(shown.knowledge.proposals.map((entry) => entry.id).sort());
+    expect(purged.cited_by.pages.map((page) => page.slug)).toEqual(shown.knowledge.pages.map((page) => page.slug));
+  });
+
+  test('the outcome history reads both tips of a fold: the other clone’s override is in it, and last, before and after a write folds it in', async ({ world, grimoire }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const { id } = await ok(core.call('create', { title: 'Shared work' }, alice));
+    const { attempt } = await ok(core.call('claim', { id }, alice));
+    await ok(core.call('close', { id, attempt, reason: 'done', debrief: DEBRIEF }, alice));
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+    await bobTracksRemote(world);
+    await ok(core.call('comment', { id, body: 'a local note' }, alice));
+    // Bob overrides the verdict on clone b and publishes it; a fetches: its local and fetched tips diverge.
+    await ok(grimoire.makeCore({ clock: () => T1 }).call('outcome_set', { attempt, verdict: 'fail', reason: 'it broke the build' }, dashboard(bob)));
+    await bobPublishes(world);
+    const verdicts = (shown: { outcome_history: { verdict: string; set_by: string }[] }) => shown.outcome_history.map((entry) => [entry.verdict, entry.set_by]);
+    const expected = [
+      ['pass', 'grimoire'],
+      ['fail', `human:${world.b.identity.email}`],
+    ];
+
+    const before = await ok(core.call('attempt_show', { attempt }, dashboard(alice)));
+    expect(before.outcome).toMatchObject({ verdict: 'fail' });
+    expect(verdicts(before)).toEqual(expected);
+
+    // A write of a's folds Bob's override in (a commit with both tips as parents).
+    await ok(core.call('comment', { id, body: 'noted' }, alice));
+    const after = await ok(core.call('attempt_show', { attempt }, dashboard(alice)));
+    expect(verdicts(after)).toEqual(expected);
   });
 
   test('is for people: an agent surface gets HUMAN_ONLY', async ({ grimoire }) => {

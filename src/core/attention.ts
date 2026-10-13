@@ -22,6 +22,10 @@
 //
 // Runner trouble (backoff, a refused preflight) is this machine's, read by
 // `start` beside the ops: the dashboard adds that item itself.
+//
+// It fails closed: a section that can't be read (the stray edits, the
+// knowledge items) is named in `unreadable`, so the queue never reads
+// "Nothing needs you" while it may hide something; the rest still shows.
 import { proposalStates, readSkills, type LedgerEntry } from '../knowledge';
 import { activeQuarantine, flaggedPages } from '../knowledge/chores';
 import type { SecretScanner } from '../scanner';
@@ -39,6 +43,7 @@ import { acknowledgeable } from './skill-changes';
 import { staleCutoff } from './stale';
 import { skillStrays, type ShownStrayEdit } from './stray-edits';
 import { syncFix, syncStatus, type SyncStatusResult } from './sync';
+import { GrimoireError } from '../errors';
 
 /** One sync failure as Attention shows it. */
 export interface SyncFailureItem {
@@ -103,9 +108,19 @@ export type KnowledgeItem =
   | { kind: 'set_aside'; pair: string; trace: string; issue: string; outcome: string; strikes: number }
   | { kind: 'flagged_page'; slug: string; title: string; flagged_by: string[] };
 
+/** A section of the queue that couldn't be read: its items may be missing. */
+export interface UnreadableSection {
+  section: 'stray_edits' | 'knowledge';
+  /** The error's code (INTERNAL for one grimoire didn't expect) and message. */
+  code: string;
+  message: string;
+}
+
 export interface AttentionResult {
-  /** What needs a person, most pressing first; empty when nothing does. */
+  /** What needs a person, most pressing first; empty when nothing does (and `unreadable` is empty). */
   items: AttentionItem[];
+  /** The sections that couldn't be read: while one is listed, the queue may hide what needs a person. */
+  unreadable: UnreadableSection[];
   /** The quick views' sizes, for the tiles linking to them. */
   counts: { ready: number; claimed: number; stale: number; blocked: number; conflicts: number };
 }
@@ -244,12 +259,21 @@ export const attention = define({
     }
 
     const status = await syncStatus.run({}, env);
-    // A stray-edit store or skill book that can't be read hides those items, never the rest of the queue.
-    const strays = (await skillStrays.run({}, env).catch(() => ({ stray_edits: [] }))).stray_edits.map((stray): AttentionItem => ({ kind: 'stray_edit', stray }));
-    // The knowledge layer failing to read hides its items, never the rest of the queue.
-    const knowledge = await knowledgeItems(view, tracker, ctx, env.scanner).catch(() => ({ first: [], rest: [] }));
+    // A section that can't be read never hides the rest of the queue, and is named, never shown as empty.
+    const unreadable: UnreadableSection[] = [];
+    const unread = (section: UnreadableSection['section']) => (error: unknown) => {
+      unreadable.push({
+        section,
+        code: error instanceof GrimoireError ? error.code : 'INTERNAL',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    };
+    const knowledge = (await knowledgeItems(view, tracker, ctx, env.scanner).catch(unread('knowledge'))) ?? { first: [], rest: [] };
+    const strays = ((await skillStrays.run({}, env).catch(unread('stray_edits')))?.stray_edits ?? []).map((stray): AttentionItem => ({ kind: 'stray_edit', stray }));
     return {
       items: [...syncItems(status), ...knowledge.first, ...collisionItems(view), ...conflicts, ...doubles, ...stale, ...strays, ...knowledge.rest],
+      unreadable,
       counts,
     };
   },

@@ -9,10 +9,10 @@
 // rewritten, and every purge says so. Both ops are human-only.
 import { GrimoireError, invalid } from '../errors';
 import { parseSessionRecord, serializeSessionRecord } from '../capture/session-record';
-import { type PurgedFacts, type PurgeTombstone, type TrackerView, type UnpushedDrop } from '../tracker';
+import { type PurgedFacts, type PurgeTombstone, type UnpushedDrop } from '../tracker';
 import { parseHandle } from './attempts';
 import { define, oneLine, writer } from './op';
-import { citingProposals } from './proposals';
+import { citingPages, citingProposals } from './citing';
 import { s } from './schema';
 
 /** What a purge did to history: the unpushed segment rewritten, pushed history kept. */
@@ -82,12 +82,6 @@ function historyOf(drop: UnpushedDrop | undefined): PurgeHistory {
   return { unpushed_rewritten: done.rewritten, pushed: done.pushed, note: historyNote(done) };
 }
 
-/** The wiki pages whose sources cite the trace `handle`. */
-async function citingPages(view: TrackerView, handle: string): Promise<CitingPage[]> {
-  const pages = await view.wiki.pages();
-  return pages.filter((page) => page.sources.includes(handle)).map((page) => ({ slug: page.slug, edit: `grimoire wiki edit ${page.slug}` }));
-}
-
 const attemptInput = s.string({ ...oneLine, description: 'the attempt handle (at-…)' });
 const reasonInput = s.string({ nonBlank: true, description: 'why it is purged (required)' });
 
@@ -118,7 +112,10 @@ export const purgeTrace = define({
       }
       draft.purgeTrace(handle, { by: author.email, reason });
       const tombstone = draft.tracePurge(handle)!;
-      const cited_by = { pages: await citingPages(draft, handle), proposals: await citingProposals(draft, handle) };
+      const cited_by = {
+        pages: (await citingPages(draft, handle)).map((page) => ({ slug: page.slug, edit: `grimoire wiki edit ${page.slug}` })),
+        proposals: (await citingProposals(draft, handle)).map((proposal) => proposal.id),
+      };
       const result = { attempt: handle, issue: record?.issue ?? null, purged: true as const, changed: !stored, ...tombstoneFields(tombstone), cited_by };
       return record ? { result, issue: record.issue } : { result };
     });

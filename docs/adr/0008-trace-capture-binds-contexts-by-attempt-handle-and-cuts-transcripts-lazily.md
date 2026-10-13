@@ -2,7 +2,7 @@
 
 ADR 0001 gives each trace excerpts cut from the transcripts of the agent work behind it, on the machine where that work ran. Grimoire has no daemon, and its MCP server can't tell which session called (ADR 0003). Both clients' session-end hooks get one to three seconds, and neither documents what happens on a crash. So capture never waits for a session to end. Grimoire observes every binding call, and cuts transcripts at two points: in the call that ends the attempt, and in sweeps its own processes run.
 
-**Binding is by handle.** A context binds to an attempt only through a write that carries the attempt's handle: the claim, the ending call, or an `update` or `comment` that names it. An abandoned release recovers a dead claim and binds nothing. Every other write on the issue is activity. A matching person is not enough, because a developer's parallel sessions share one git identity, and ADR 0004 tells them apart only by handle.
+**Binding is by handle.** A context binds to an attempt only through a write that carries the attempt's handle: the claim, the ending call, or an `update` or `comment` that names it. An abandoned release recovers a stale claim and binds nothing. Every other write on the issue is activity. A matching person is not enough, because a developer's parallel sessions share one git identity, and ADR 0004 tells them apart only by handle.
 
 **Each excerpt comes from the context that did the work.** That is the context that made the binding calls, so a subagent's own transcript is cut when a subagent did the work. This amends ADR 0001's "one excerpt per session" and Traces' "main session only".
 

@@ -193,8 +193,16 @@ export type KnowledgeItem =
   | ({ readonly kind: 'set_aside' } & SetAsidePair)
   | { readonly kind: 'flagged_page'; readonly slug: string; readonly title: string; readonly flagged_by: readonly string[] };
 
+/** A section of the queue the core couldn't read: its items may be missing. */
+export interface UnreadableSection {
+  readonly section: 'stray_edits' | 'knowledge';
+  readonly code: string;
+  readonly message: string;
+}
+
 export interface AttentionResult {
   readonly items: readonly AttentionItem[];
+  readonly unreadable: readonly UnreadableSection[];
   readonly counts: { readonly ready: number; readonly claimed: number; readonly stale: number; readonly blocked: number; readonly conflicts: number };
 }
 
@@ -272,7 +280,7 @@ export interface AttemptShowResult {
   };
   readonly knowledge: {
     readonly pages: readonly { readonly slug: string; readonly title: string; readonly kind: string }[];
-    readonly proposals: readonly { readonly id: string; readonly skill: string; readonly action: string; readonly at: string }[];
+    readonly proposals: readonly { readonly id: string; readonly skill: string; readonly action: string; readonly at: string; readonly status: string }[];
   };
   readonly quarantine: { readonly by: string; readonly at: string; readonly reason: string } | null;}
 

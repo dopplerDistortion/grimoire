@@ -4,19 +4,19 @@
 // live activity feed (the core's `activity`): person, "via client · session",
 // verb, issue link, age. Every live update refetches both in place; new feed
 // entries flash. The empty state reads "Nothing needs you. Agents are working
-// through the frontier."
+// through the frontier.", and only when every section was read: one the core
+// couldn't read is an error item (attention-queue.ts).
 import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, read, runner as readRunner, write } from './api';
+import { emptyState, queueSize, unreadableTitle } from './attention-queue';
 import { showWhole, useLiveRefetch } from './data';
 import { ago, short } from './format';
 import { releaseAbandoned, resolveConflict } from './issue';
 import { acknowledgeDialog } from './skills';
 import { quarantineDialog } from './trace-actions';
-import type { ActivityEntry, ActivityResult, AttentionItem, AttentionResult, RunnerInfo, ShownStrayEdit } from './types';
+import type { ActivityEntry, ActivityResult, AttentionItem, AttentionResult, RunnerInfo, ShownStrayEdit, UnreadableSection } from './types';
 import { ActorName, errorText, openDialog, toast, Version } from './ui';
-
-const EMPTY = 'Nothing needs you. Agents are working through the frontier.';
 
 const TILES = [
   ['ready', 'Ready'],
@@ -64,7 +64,8 @@ export function AttentionScreen() {
   if (!result) return <p class="mute">{error ?? 'Loading…'}</p>;
   const reload = refetch;
   const trouble = runnerTrouble(runner);
-  const count = result.items.length + (trouble ? 1 : 0);
+  const count = queueSize(result, Boolean(trouble));
+  const empty = emptyState(result, Boolean(trouble));
   return (
     <div class="attention-screen">
       <div class="row between">
@@ -75,7 +76,10 @@ export function AttentionScreen() {
       </div>
       {error ? <div class="banner bad">{error}</div> : null}
       <div class="panel attention-items">
-        {count === 0 ? <div class="pad mute attention-empty">{EMPTY}</div> : null}
+        {empty !== null ? <div class="pad mute attention-empty">{empty}</div> : null}
+        {(result.unreadable ?? []).map((section) => (
+          <UnreadableRow key={`unreadable:${section.section}`} section={section} />
+        ))}
         {result.items.map((item) => (
           <Item key={itemKey(item)} item={item} reload={reload} />
         ))}
@@ -435,6 +439,23 @@ function runnerTrouble(runner: RunnerInfo | null): string | null {
   if (runner.paused_until && Date.parse(runner.paused_until) > Date.now()) return `paused until ${runner.paused_until} after ${runner.consecutive_failures ?? 2} failed runs in a row`;
   if (runner.trigger?.preflight) return `its preflight was refused: ${runner.trigger.message ?? 'see grimoire status'}`;
   return null;
+}
+
+function UnreadableRow({ section }: { section: UnreadableSection }) {
+  return (
+    <Row
+      kind="unreadable"
+      tone="bad"
+      icon="!"
+      title={unreadableTitle(section.section)}
+      detail={
+        <>
+          <code>{section.code}</code>: {section.message}
+        </>
+      }
+      actions={null}
+    />
+  );
 }
 
 function RunnerRow({ runner, trouble }: { runner: RunnerInfo; trouble: string }) {

@@ -23,7 +23,7 @@ import type { CliIo } from './run';
 import { agentMarkersIn } from './shell';
 import { terminalOn } from './wiki';
 
-const BOOLEAN_FLAGS = new Set(['--yes', '--json', '--new-tracker', '--adapter', '--upgrade', '--help']);
+const BOOLEAN_FLAGS = new Set(['--yes', '--json', '--new-tracker', '--adapter', '--upgrade', '--from-node-modules', '--help']);
 const VALUE_FLAGS = new Set(['--clients', '--excerpts', '--from']);
 
 interface InitCommand {
@@ -66,6 +66,7 @@ export function parseInitArgs(argv: readonly string[]): InitCommand {
     newTracker: booleans.has('--new-tracker'),
     adapter: booleans.has('--adapter'),
     upgrade: booleans.has('--upgrade'),
+    fromNodeModules: booleans.has('--from-node-modules'),
   };
   if (flags.newTracker && flags.upgrade) throw new UsageError('init --upgrade moves the pin and never mints a tracker: run --new-tracker on its own', 'init');
   if (flags.newTracker && flags.yes) throw new UsageError('init --new-tracker is interactive only: it never runs with --yes', 'init');
@@ -75,7 +76,7 @@ export function parseInitArgs(argv: readonly string[]): InitCommand {
 function initHelp(): Record<string, unknown> {
   return {
     verb: 'init',
-    usage: 'npx @goksening/grimoire@<version> init [--yes] [--upgrade] [--clients claude-code,codex] [--excerpts excerpts|facts|none] [--new-tracker] [--adapter] [--json]',
+    usage: 'npx @goksening/grimoire@<version> init [--yes] [--upgrade] [--clients claude-code,codex] [--excerpts excerpts|facts|none] [--new-tracker] [--adapter] [--from-node-modules] [--json]',
     description:
       'Installs grimoire into this host repo, or joins this clone to the version its checkout pins: the tracker, this machine’s version copy and launcher, and the pointer files agent clients read. Shows the plan, the grants and the excerpt disclosure, then asks once.',
     gate: 'a person runs it with no agent marker set; without an interactive terminal it needs --yes (safe defaults: excerpt mode facts, adapter declined, changed permission entries never restored); --new-tracker is interactive and asks for a typed confirmation',
@@ -86,6 +87,7 @@ function initHelp(): Record<string, unknown> {
       '--new-tracker': 'mint a new tracker root instead of adopting the one this repo has',
       '--upgrade': 'move this checkout to <version> (an upgrade or a downgrade): writes only this worktree’s files, never commits, and is finished by running it again; --yes never raises compat',
       '--adapter': 'ask again about making grimoire the tracker in docs/agents/issue-tracker.md after a decline',
+      '--from-node-modules': 'take this machine’s version copy from the repo’s own devDependency (node_modules/@goksening/grimoire), which must be the version init installs',
       '--json': 'alone: print the plan as JSON and write nothing (no terminal needed); with --yes: run, printing only the JSON report',
     },
     output: 'one JSON object: the report (plan, what was written, next steps), or {"error": …}',

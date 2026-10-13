@@ -4,7 +4,9 @@
 // the fields it changed. The issue timeline reads it for one issue.
 import { describe, expect } from 'vitest';
 import type { CallContext } from '../../src/core';
+import { bobPublishes, shared, sharedIssue } from './folds-support';
 import { coreTest as test } from './support';
+import { ok } from './sync-support';
 
 const human = (ctx: CallContext): CallContext => ({ ...ctx, surface: 'dashboard', client: null, evidence: {} });
 
@@ -51,6 +53,59 @@ describe('activity', () => {
     // The third create, then the tracker's own init commit.
     expect(rest.result.entries.map((entry) => entry.op)).toEqual(['create', 'init']);
     expect(rest.result.cursor).toBeNull();
+  });
+
+  test('reads the fold of both tips, and credits a write made on a fold only with the fields it changed', async ({ grimoire, world }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const id = await sharedIssue(world, core, alice, { title: 'Shared', labels: ['a'] });
+    // Bob retitles on clone b and publishes it; a fetches: a's local and fetched tips diverge.
+    await ok(core.call('update', { id, title: 'Bob’s title' }, bob));
+    await bobPublishes(world);
+
+    const before = await ok(core.call('activity', { issue: id }, human(alice)));
+    // The view is the fold of both tips: Bob's write is in the feed before any write of a's folds it in.
+    expect(before.entries.map((entry) => [entry.op, entry.person, entry.fields ?? null])).toEqual([
+      ['update', world.b.identity.email, ['title']],
+      ['create', world.a.identity.email, null],
+    ]);
+
+    // Alice's label update folds Bob's retitle in: she changed the labels, not the title.
+    await ok(core.call('update', { id, labels_add: ['b'] }, alice));
+    const after = await ok(core.call('activity', { issue: id }, human(alice)));
+    expect(after.entries.map((entry) => [entry.op, entry.person, entry.fields ?? null])).toEqual([
+      ['update', world.a.identity.email, ['labels']],
+      ['update', world.b.identity.email, ['title']],
+      ['create', world.a.identity.email, null],
+    ]);
+  });
+
+  test('a write on a fold is compared with the folded parent state: both sides’ set adds are not its change', async ({ grimoire, world }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    const id = await sharedIssue(world, core, alice, { title: 'Shared', labels: ['a'] });
+    // Alice adds y and doesn't publish; Bob adds x and publishes; a fetches.
+    await ok(core.call('update', { id, labels_add: ['y'] }, alice));
+    await ok(core.call('update', { id, labels_add: ['x'] }, bob));
+    await bobPublishes(world);
+
+    // The fold holds {a, x, y}: unlike either tip's labels, yet not the retitle's change.
+    await ok(core.call('update', { id, title: 'Shared, retitled' }, alice));
+    const read = await ok(core.call('activity', { issue: id }, human(alice)));
+    expect(read.entries[0]).toMatchObject({ op: 'update', person: world.a.identity.email, fields: ['title'] });
+  });
+
+  test('a write on a fold to an issue only the other clone held names the fields it changed', async ({ grimoire, world }) => {
+    const { core } = grimoire;
+    const { alice, bob } = await shared(world, grimoire);
+    // a diverges with a write of its own; Bob creates an issue and publishes it.
+    await ok(core.call('create', { title: 'Alice’s' }, alice));
+    const created = await ok(core.call('create', { title: 'Bob’s', labels: ['a'] }, bob));
+    await bobPublishes(world);
+
+    await ok(core.call('update', { id: created.id, title: 'Bob’s, retitled' }, alice));
+    const read = await ok(core.call('activity', { issue: created.id }, human(alice)));
+    expect(read.entries[0]).toMatchObject({ op: 'update', person: world.a.identity.email, fields: ['title'] });
   });
 
   test('is for people: an agent surface gets HUMAN_ONLY', async ({ grimoire }) => {

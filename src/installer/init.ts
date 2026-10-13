@@ -34,6 +34,7 @@ import path from 'node:path';
 import type { Identity } from '../core/context';
 import { disclosureLines, putMachineSetting, seedStoreSettings, storeExcerptMode, type ExcerptMode } from '../core/settings';
 import { syncNow } from '../core/sync';
+import { upgradeRequiredDetails, type UpgradePlace } from '../core/upgrade';
 import { GrimoireError, type ErrorBody } from '../errors';
 import { findGitDirs, MachineLocalStore, readTextIfExists } from '../machine-local';
 import { openTracker, type Person } from '../tracker';
@@ -65,6 +66,7 @@ import { holdWorktreeLease, operationInProgress, runUpkeep, upgradeInProgress, u
 import { nodeMajor, readClientRuntimes } from './client-runtime';
 import { codexHookState } from './codex-trust';
 import { compareSemver } from './semver';
+import { nodeModulesPackage } from './source';
 import { worktreePins } from './worktrees';
 import {
   claimUpgradeRecord,
@@ -95,6 +97,8 @@ export interface InitFlags {
   readonly adapter: boolean;
   /** `--upgrade`: move this checkout's pin to the running version (spec §21). */
   readonly upgrade?: boolean;
+  /** `--from-node-modules`: the version copy comes from the host repo's devDependency at that version (spec §11). */
+  readonly fromNodeModules?: boolean;
 }
 
 /** An upgrade step done (spec §21): 2 after the copy, launcher and join record; 5 after the checkout files. */
@@ -433,8 +437,25 @@ function upgradeLines(upgrade: UpgradeReport, formats: ReleaseFormats): string[]
   return lines;
 }
 
-/** Runs init; refusals throw before anything is written. */
+/**
+ * Runs init; refusals throw before anything is written. Whichever marker a
+ * step meets (the tracker's on a join or adopt, the machine store's, the
+ * install's), UPGRADE_REQUIRED leaves in the one details shape the core gives
+ * (spec §5, §9): marker, why, running, pin, requires and the ordered remedies.
+ */
 export async function runInit(o: InitOptions): Promise<InitReport> {
+  try {
+    return await initSteps(o);
+  } catch (error) {
+    if (!(error instanceof GrimoireError) || error.code !== 'UPGRADE_REQUIRED' || Array.isArray(error.details.remedies)) throw error;
+    const dirs = await findGitDirs(o.root).catch(() => null);
+    const existing = await readInstallConfig(o.root).catch(() => null);
+    const place: UpgradePlace = { root: o.root, pin: existing?.version ?? null, commonDir: dirs?.commonDir ?? null, running: o.version };
+    throw new GrimoireError('UPGRADE_REQUIRED', error.message, { ...(await upgradeRequiredDetails(error.details, place)) });
+  }
+}
+
+async function initSteps(o: InitOptions): Promise<InitReport> {
   const { root, flags, version, prompter, say } = o;
   const dirs = await findGitDirs(root);
   if (!dirs) throw new GrimoireError('NO_REPO', `no git repository at ${root}`, { root });
@@ -488,6 +509,9 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
       { pin: existing.version, running: version, command },
     );
   }
+
+  // --from-node-modules: the host's devDependency, which must be the version installed here (refused otherwise, before anything is written).
+  const source = flags.fromNodeModules === true ? await nodeModulesPackage(root, version) : o.source;
 
   const warnings: InitReport['warnings'] = [];
   const warn = (code: string, message: string) => warnings.push({ code, message });
@@ -604,6 +628,8 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     }
     const formats = o.formats ?? RELEASE_FORMATS;
     const from = inProgress && inProgress.to === version ? inProgress.from : existing!.version!;
+    // A marker's UPGRADE_REQUIRED leaves through runInit, which completes its details.
+    const place = { root, pin: existing!.version, commonDir: dirs.commonDir, running: version };
     const markers = [
       planMarker('store', await readStoreMarker(root, [tips.local, tips.remote]), formats.store, version, existing!.version),
       planMarker('machine', (await store.marker.read()) ?? null, formats.machine, version, existing!.version),
@@ -624,13 +650,10 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
         });
       }
       // Steps 3 and 4 are empty slots in v1: no release of this line ships the migration a compat raise runs.
+      // The data is older than this release runs against: the release that understands it is the one its marker names, else the pin.
+      const raised = raises[0]!;
       throw new GrimoireError('UPGRADE_REQUIRED', `grimoire ${version} ships no migration for ${which}; nothing changed`, {
-        marker: raises[0]!.marker,
-        why: 'older',
-        running: version,
-        pin: existing!.version,
-        requires: null,
-        remedies: [],
+        ...(await upgradeRequiredDetails({ marker: raised.marker, why: 'older', requires: raised.requires ?? existing!.version }, place)),
       });
     }
     const own = await worktreeKey(root);
@@ -899,7 +922,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     const finalConfig: InstallConfig = { ...config, tracker_root: tracker.root! };
 
     // 5. The version copy, the launcher and the join record.
-    const copy = await installCopy(store, version, o.source);
+    const copy = await installCopy(store, version, source);
     const launched = await installLauncher(store);
     const record: JoinRecord = { ...joinRecord, excerpt_mode: mode ?? 'unknown' };
     const joinWrite: MachineResult['join_record'] =

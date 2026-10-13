@@ -22,7 +22,7 @@ import { skillAcknowledge, skillDelete, skillEject, skillRestore, skillUnblock }
 import { wikiEdit, wikiList, wikiShow } from './wiki';
 import { quarantine, unquarantine } from './quarantine';
 import { purgeList, purgeSession, purgeTrace } from './purge';
-import { proposalAccept, proposalDismiss, proposalList, proposalPurge, proposalReconsider, proposalReject, proposalShow } from './proposals';
+import { proposalAccept, proposalDismiss, proposalList, proposalReconsider, purgeProposal, proposalReject, proposalShow } from './proposals';
 import { choreAbandon, choreRead, choreStart, exposedActor, refuseChoreContext, withContextLock } from './chores';
 import { choreSubmit } from './chore-submit';
 import { activity } from './activity';
@@ -74,7 +74,7 @@ export type {
   ProposalAcceptResult,
   ProposalDecisionResult,
   ProposalListResult,
-  ProposalPurgeResult,
+  PurgeProposalResult,
   ProposalRejectResult,
   ProposalShowResult,
   ShownLedgerRecord,
@@ -222,7 +222,7 @@ const REGISTRY: readonly OpDefinition<unknown, unknown>[] = [
   proposalReject,
   proposalDismiss,
   proposalReconsider,
-  proposalPurge,
+  purgeProposal,
   choreStart,
   choreRead,
   choreSubmit,

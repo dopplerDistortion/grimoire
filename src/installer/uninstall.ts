@@ -30,6 +30,7 @@ import { lstat } from 'node:fs/promises';
 import { actorOf, type CallContext } from '../core/context';
 import { createCore, type CaptureOptions } from '../core';
 import { autoSyncOn, EXPLICIT_STEP_TIMEOUT_MS } from '../core/sync';
+import { upgradeRequiredDetails } from '../core/upgrade';
 import { GrimoireError } from '../errors';
 import { comparablePath, readPathList, sharedScanner } from '../generated';
 import { runGit } from '../git/run';
@@ -281,14 +282,16 @@ export async function runUninstall(options: UninstallOptions): Promise<Uninstall
   if (plan.unknown.length > 0) {
     const release = capableRelease(config?.version ?? null);
     const command = `npx @goksening/grimoire@${release} uninstall`;
-    throw new GrimoireError('UPGRADE_REQUIRED', `${MANIFEST_PATH} names what grimoire ${VERSION} doesn't know (${plan.unknown.join(', ')}), so it removes nothing: run \`${command}\`, a release that knows it; nothing changed`, {
-      marker: 'manifest',
-      why: `unknown: ${plan.unknown.join(', ')}`,
-      running: VERSION,
-      pin: config?.version ?? null,
-      requires: null,
-      remedies: [command],
-    });
+    // The manifest is part of the install (spec §5, marker `install`): a newer release wrote what this one doesn't know.
+    const details = await upgradeRequiredDetails(
+      { marker: 'install', why: 'newer', requires: release === 'latest' ? null : release },
+      { root, pin: config?.version ?? null, commonDir, verb: 'uninstall' },
+    );
+    throw new GrimoireError(
+      'UPGRADE_REQUIRED',
+      `${MANIFEST_PATH} names what grimoire ${VERSION} doesn't know (${plan.unknown.join(', ')}), so it removes nothing: run \`${command}\`, a release that knows it; nothing changed`,
+      { ...details },
+    );
   }
   const { worktrees, unreachable } = await registeredWorktrees(commonDir);
   const stillInstalled: string[] = [];

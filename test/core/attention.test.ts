@@ -10,6 +10,8 @@ import { setAsideStrayEdit } from '../../src/generated/stray';
 import { MachineLocalStore } from '../../src/machine-local';
 import { agentContext, coreTest as test, fetchTracker, pushTracker, suffixQueue, T0 } from './support';
 import { ok, REJECTING_HOOK } from './sync-support';
+import { terminal } from './chore-support';
+import { skillText } from './proposer-support';
 
 const dashboard = (ctx: CallContext): CallContext => ({ ...ctx, surface: 'dashboard', client: null, evidence: {} });
 const HOUR = 3_600_000;
@@ -155,6 +157,43 @@ describe('attention', () => {
       { kind: 'stray_edit', stray: { id: saved.id, skill: 'webhook-retries', text: 'Retry with backoff.\n', path: '.claude/skills/grimoire-webhook-retries/SKILL.md' } },
     ]);
     expect(after.items).toEqual([]);
+  });
+
+  test('a section that can’t be read is named as unreadable, never hidden behind an empty queue; the rest of the queue still shows', async ({ grimoire, world }) => {
+    const { core, ctx } = grimoire;
+    await ok(core.call('skill_edit', { name: 'webhook-retries', text: skillText('webhook-retries', 'Retrying webhooks.', 'Retry with backoff.\n'), base: null }, terminal(ctx)));
+    await setAsideStrayEdit(new MachineLocalStore(path.join(world.a.dir, '.git')), {
+      skill: 'webhook-retries',
+      worktree: world.a.dir,
+      path: '.claude/skills/grimoire-webhook-retries/SKILL.md',
+      text: 'Retry twice.\n',
+      base: null,
+      served: null,
+    });
+    const id = await create(core, ctx, 'Forgotten');
+    await ok(core.call('claim', { id }, ctx));
+    // The skill book can't be read: both the stray edits and the knowledge items depend on it.
+    const broken = grimoire.makeCore({
+      clock: () => new Date(T0.getTime() + 25 * HOUR),
+      scanner: {
+        scan: () => {
+          throw new Error('the scanner broke');
+        },
+        redact: () => {
+          throw new Error('the scanner broke');
+        },
+      },
+    });
+
+    const seen = await ok(broken.call('attention', {}, dashboard(ctx)));
+
+    expect(seen.items.map((item) => item.kind)).toEqual(['stale_claim']);
+    expect(seen.unreadable).toEqual([
+      { section: 'knowledge', code: 'INTERNAL', message: expect.stringContaining('the scanner broke') },
+      { section: 'stray_edits', code: 'INTERNAL', message: expect.stringContaining('the scanner broke') },
+    ]);
+    // A quiet, readable queue says so.
+    expect((await ok(core.call('attention', {}, dashboard(ctx)))).unreadable).toEqual([]);
   });
 
   test('is for people: an agent surface gets HUMAN_ONLY', async ({ grimoire }) => {

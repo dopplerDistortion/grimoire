@@ -679,7 +679,7 @@ export const proposalReconsider = define({
     }),
 });
 
-export interface ProposalPurgeResult {
+export interface PurgeProposalResult {
   id: string;
   purged: true;
   /** False when it was purged already: only what was left of it went. */
@@ -690,15 +690,15 @@ export interface ProposalPurgeResult {
   history: { unpushed_rewritten: number; pushed: boolean };
 }
 
-export const proposalPurge = define({
-  name: 'proposal_purge',
+export const purgeProposal = define({
+  name: 'purge_proposal',
   description:
     'Purge a skill proposal, with a reason: its record goes in one commit, a tombstone {by, at, reason} stays and dominates every fold, and unpushed commits are rewritten without it (pushed history keeps it). Its ledger decisions stay: a rejected change stays refused when proposed again with the exact text, but its text is gone, so a near-identical rewording is no longer caught. Human-only.',
   kind: 'write',
   policy: 'human-only',
   replay: 'none',
   input: s.object({ id: idInput, reason: s.string({ nonBlank: true, description: 'why it is purged (required)' }) }),
-  async run(input, { ctx, tracker, actor, requestSync }): Promise<ProposalPurgeResult> {
+  async run(input, { ctx, tracker, actor, requestSync }): Promise<PurgeProposalResult> {
     const author = writer(ctx);
     const id = input.id.trim().toLowerCase();
     const reason = input.reason.trim();
@@ -713,12 +713,4 @@ export const proposalPurge = define({
     return { ...write.result, history: { unpushed_rewritten: drop?.rewritten ?? 0, pushed: drop?.pushed ?? false } };
   },
 });
-
-/** The live proposals that cite the trace `handle` (purge_trace's cited_by). */
-export async function citingProposals(view: TrackerView, handle: string): Promise<string[]> {
-  const citing = (proposal: ProposalRecord) =>
-    proposal.traces.some((trace) => trace.trace === handle) ||
-    proposal.citations.some((item) => item === `trace:${handle}` || item === `issue:${handle}` || item === `debrief:${handle}` || item.startsWith(`excerpt:${handle}/`));
-  return (await view.proposals.records()).filter(citing).map((proposal) => proposal.id);
-}
 
