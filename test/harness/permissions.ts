@@ -16,7 +16,9 @@ async function chmodTree(dir: string, dirMode: number, fileMode: number): Promis
 }
 
 function icacls(args: string[]): void {
-  const run = spawnSync('icacls', args, { encoding: 'utf8', windowsHide: true });
+  // Bounded: icacls runs synchronously, so a stall must not block the worker past every vitest timeout.
+  const run = spawnSync('icacls', args, { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+  if (run.error !== undefined) throw new Error(`icacls ${args.join(' ')} did not finish: ${run.error.message}`);
   if (run.status !== 0) throw new Error(`icacls ${args.join(' ')} failed: ${run.stdout}${run.stderr}`);
 }
 
