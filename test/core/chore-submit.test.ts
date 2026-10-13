@@ -6,14 +6,15 @@
 // reason codes and exactly one fix-up; a second failure ends the run `failed`.
 // Committed records carry no LLM free text.
 import { createHash } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, vi } from 'vitest';
 import type { CallContext, ChoreBrief, ChoreReadResult, Core } from '../../src/core';
-import { readRun, servedLog, writeRun } from '../../src/knowledge/chores';
+import { keepInvalidResult, readRun, servedLog, writeRun } from '../../src/knowledge/chores';
 import { Locks, MachineLocalStore } from '../../src/machine-local';
 import type { Clone, GitWorld } from '#harness';
 import { openTracker } from '../../src/tracker';
-import { choreAgent, Clock, commitChoreRun, compileRecord, DEBRIEF, putPage, terminal } from './chore-support';
+import { choreAgent, Clock, commitChoreRun, compileRecord, dashboard, DEBRIEF, putPage, terminal } from './chore-support';
 import {
   agentContext,
   commitToTracker,
@@ -351,6 +352,67 @@ describe('chore_submit: the fail-closed guards', () => {
     ok(await d.core.call('chore_submit', { run: brief.run, result }, d.chores));
     const kept = await store(world).records.list<{ text?: string; reasons: string[] }>('chore-results');
     expect(kept.map((entry) => entry.value)).toMatchObject([{ reasons: ['missing_pair'], text: JSON.stringify(result) }]);
+  });
+
+  test('a secret in a result refused early (a bad shape, a bad slug) keeps no text either, and chore_runs never shows kept text that matched rules', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const token = ['ghp', 'R7xK2mQ9vL4tB8nW3pZ6cY1hJ5sD0fG2aE9u'].join('_');
+
+    // The shape is wrong (an unknown field), and the unknown field holds the secret.
+    const badShape = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: allTo(brief, 'x'), notes: `use ${token}` } }, d.chores));
+    expect(badShape).toMatchObject({ result: 'invalid', reasons: expect.arrayContaining(['secret', 'shape']) });
+    expect(JSON.stringify(badShape)).not.toContain(token);
+    // The slug is bad, so the page op is skipped before its body would be checked.
+    const badSlug = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [create('Not A Slug', `Push with ${token}.\n`)], consumption: allTo(brief, 'x') } }, d.chores));
+    expect(badSlug).toMatchObject({ result: 'failed', reasons: expect.arrayContaining(['secret', 'bad_slug']) });
+    expect(JSON.stringify(badSlug)).not.toContain(token);
+
+    const kept = await store(world).records.list<Record<string, unknown>>('chore-results');
+    expect(kept.map((entry) => entry.value)).toEqual([
+      { run: brief.run, at: expect.any(String), reasons: expect.arrayContaining(['secret', 'shape']), rules: ['github-pat'] },
+      { run: brief.run, at: expect.any(String), reasons: expect.arrayContaining(['secret', 'bad_slug']), rules: ['github-pat'] },
+    ]);
+    expect(JSON.stringify(kept)).not.toContain(token);
+
+    // An older record that kept text despite matched rules: the reader shows none of it.
+    await keepInvalidResult(store(world), 3, { run: brief.run, at: T0.toISOString(), reasons: ['shape'], rules: ['github-pat'], problems: {}, text: `use ${token}` });
+    const shown = ok(await d.core.call('chore_runs', { run: brief.run }, dashboard(grimoire.ctx)));
+    expect(shown.runs[0]!.kept.map((row) => [row.n, row.text_kept, row.text])).toEqual([
+      [1, false, null],
+      [2, false, null],
+      [3, false, null],
+    ]);
+    expect(JSON.stringify(shown)).not.toContain(token);
+  });
+
+  test('a secret in a field name of a refused result is kept nowhere on this machine: not in the problems, the open run or the ended run', async ({ world, grimoire }) => {
+    const d = await due(grimoire, { fails: 1, passes: 0 });
+    const brief = await startAndRead(d);
+    const token = ['ghp', 'R7xK2mQ9vL4tB8nW3pZ6cY1hJ5sD0fG2aE9u'].join('_');
+
+    // The unknown field's name is the secret, and the value under it holds it too.
+    const first = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: allTo(brief, 'x'), [token]: `use ${token}` } }, d.chores));
+    expect(first).toMatchObject({ result: 'invalid', reasons: expect.arrayContaining(['secret', 'shape']) });
+    expect(JSON.stringify(first)).not.toContain(token);
+    expect(JSON.stringify(await readRun(store(world), brief.run))).not.toContain(token);
+    // The second refusal ends the run; its outcome is kept with the ended run.
+    const second = ok(await d.core.call('chore_submit', { run: brief.run, result: { pages: [], consumption: [{ pair: brief.pairs[0]!.pair, [token]: 1 }] } }, d.chores));
+    expect(second).toMatchObject({ result: 'failed', reasons: expect.arrayContaining(['secret', 'shape']) });
+    expect(JSON.stringify(second)).not.toContain(token);
+
+    const files = await readdir(path.join(world.a.dir, '.git', 'grimoire'), { recursive: true, withFileTypes: true });
+    const held: string[] = [];
+    for (const file of files.filter((entry) => entry.isFile())) {
+      const at = path.join(file.parentPath, file.name);
+      if ((await readFile(at, 'utf8')).includes(token)) held.push(at);
+    }
+    expect(held).toEqual([]);
+
+    // An older record that kept problems beside matched rules: the reader shows none of them.
+    await keepInvalidResult(store(world), 3, { run: brief.run, at: T0.toISOString(), reasons: ['shape'], rules: ['github-pat'], problems: { [`result.${token}`]: 'is not a known field' } });
+    const shown = ok(await d.core.call('chore_runs', { run: brief.run }, dashboard(grimoire.ctx)));
+    expect(JSON.stringify(shown)).not.toContain(token);
   });
 });
 

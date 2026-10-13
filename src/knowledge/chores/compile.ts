@@ -93,25 +93,62 @@ interface MapEntry {
 const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === 'string';
 
+const SECRET_CODES: readonly string[] = ['secret', 'unscanned'];
+
 /** Reason codes and problems as a check collects them. */
 export class Problems {
   readonly reasons = new Set<string>();
   readonly problems: Record<string, string> = {};
   readonly rules = new Set<string>();
+  /** The secret scan's own problems: where it found something, in grimoire's words. */
+  private readonly secretProblems: Record<string, string> = {};
 
   add(code: string, field: string, message: string): void {
     this.reasons.add(code);
     this.problems[field] ??= message;
+    if (SECRET_CODES.includes(code)) this.secretProblems[field] ??= message;
   }
 
   get empty(): boolean {
     return this.reasons.size === 0;
   }
 
+  /**
+   * After a secret-scan failure only the scan's own problems are given: the
+   * others may name a field after the result's own key or echo its values, and
+   * a refusal is kept on this machine and handed to the fix-up.
+   */
   rejection(): Rejection {
     const reasons = [...this.reasons].sort();
-    return { reasons, problems: this.problems, rules: [...this.rules].sort(), secret: reasons.includes('secret') || reasons.includes('unscanned') };
+    const secret = reasons.some((code) => SECRET_CODES.includes(code));
+    return { reasons, problems: secret ? this.secretProblems : this.problems, rules: [...this.rules].sort(), secret };
   }
+}
+
+/**
+ * The secret scan over every string the raw result holds, field names
+ * included, whatever its shape. Every chore check runs it before any check may
+ * return or skip: whatever else refuses the result, a secret still marks the
+ * rejection, so no result text is kept (spec §16 Failures).
+ */
+export function scanRaw(value: unknown, field: string, p: Problems, scanner: SecretScanner): void {
+  /** Whether `text` scanned clean. */
+  const scan = (text: string, at: string): boolean => {
+    const found = scanner.scan(text);
+    if (found.status !== 'scanned') return (p.add('unscanned', at, 'could not be scanned for secrets'), false);
+    if (found.hits.length === 0) return true;
+    for (const hit of found.hits) p.rules.add(hit.rule);
+    p.add('secret', at, `holds what looks like a secret (${sortedUnique(found.hits.map((hit) => hit.rule)).join(', ')})`);
+    return false;
+  };
+  if (typeof value === 'string') return void scan(value, field === '' ? 'result' : field);
+  if (Array.isArray(value)) return value.forEach((item, i) => scanRaw(item, `${field}[${i}]`, p, scanner));
+  if (!isObject(value)) return;
+  Object.entries(value).forEach(([key, item], i) => {
+    // A field name that isn't plainly clean is named by its position, never by itself.
+    const name = scan(key, field === '' ? 'result' : field) ? key : `(field ${i + 1})`;
+    scanRaw(item, field === '' ? name : `${field}.${name}`, p, scanner);
+  });
 }
 
 /** The result's shape, as the output schema gives it; null (with `shape` problems) when it isn't. */
@@ -185,6 +222,8 @@ function scanText(text: string, field: string, p: Problems, scanner: SecretScann
 export async function checkCompile(result: unknown, cx: CompileContext): Promise<CompileCheck> {
   const p = new Problems();
   const shape = shapeOf(result, p);
+  // After the shape (which judges an empty Problems), before every check that may return or skip.
+  scanRaw(result, '', p, cx.scanner);
   if (!shape) return { ok: false, rejection: p.rejection() };
   const { draft, run, scanner } = cx;
   const served = new Set(cx.served.items.map((entry) => entry.item));
