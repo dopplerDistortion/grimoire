@@ -210,13 +210,18 @@ export function describeProcess(entry: LiveProcess): string {
   return `${entry.client ?? 'grimoire'} ${entry.role} (pid ${entry.pid}${entry.worktree ? `, ${entry.worktree}` : ''})`;
 }
 
-/** Why leave can't go on (`after`: what that means at this point), or null when nothing runs. */
-export function busyText(check: ProcessCheck, after: string): string | null {
+/**
+ * Why leave (or `scope.verb`, for processes in `scope.where`) can't go on
+ * (`after`: what that means at this point), or null when nothing runs.
+ */
+export function busyText(check: ProcessCheck, after: string, scope: { readonly verb?: string; readonly where?: string } = {}): string | null {
+  const verb = scope.verb ?? 'leave';
+  const where = scope.where ?? 'this clone';
   if (check.live === null) {
-    return `grimoire can’t tell whether grimoire processes run in this clone: it can’t read ${check.unreadable}, so it won’t remove the store under them. Make that readable (or remove it once no grimoire process runs), then run leave again; ${after}`;
+    return `grimoire can’t tell whether grimoire processes run in ${where}: it can’t read ${check.unreadable}, so it won’t remove anything under them. Make that readable (or remove it once no grimoire process runs), then run ${verb} again; ${after}`;
   }
   if (check.live.length === 0) return null;
-  return `grimoire processes still run in this clone: ${check.live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run leave again; ${after}`;
+  return `grimoire processes still run in ${where}: ${check.live.map(describeProcess).join('; ')}. End those sessions (and stop \`grimoire start\`), then run ${verb} again; ${after}`;
 }
 
 /** Throws BUSY while grimoire processes run in the clone, or when leave can't tell. */
@@ -242,7 +247,7 @@ export interface UnsavedStray {
   readonly text: string;
 }
 
-interface Preflight {
+export interface Preflight {
   readonly tracker: TrackerStore;
   readonly view: TrackerView | null;
   readonly localTip: string | null;
@@ -283,7 +288,7 @@ export async function unsavedStrays(worktree: string, served: ServedSet): Promis
   return found;
 }
 
-async function preflight(root: string, commonDir: string, store: MachineLocalStore, ctx: CallContext): Promise<Preflight> {
+export async function preflight(root: string, commonDir: string, store: MachineLocalStore, ctx: CallContext): Promise<Preflight> {
   const warnings: string[] = [];
   const tracker = await openTracker(root);
   const localTip = await localTipOf(root);
@@ -551,7 +556,7 @@ export async function performLeave(options: LeaveOptions, plan: LeavePlan, hooks
 }
 
 /** Sets aside every unsaved stray edit, so `skill record` can take it; the ids of all of them. */
-async function saveStrays(store: MachineLocalStore, pre: Preflight, report: LeaveReport): Promise<string[]> {
+export async function saveStrays(store: MachineLocalStore, pre: Pick<Preflight, 'saved' | 'unsaved' | 'served'>, report: { readonly problems: string[] }): Promise<string[]> {
   const ids = pre.saved.map((edit) => edit.id);
   for (const edit of pre.unsaved) {
     const served = pre.served?.skills.find((skill) => skill.name === edit.skill)?.version ?? null;
@@ -604,7 +609,7 @@ async function settleAttempts(
 }
 
 /** The final sync: a push when allowed, else a fetch only. Null when there is no local tracker, or it failed. */
-async function finalSync(tracker: TrackerStore, ctx: CallContext, push: boolean, report: LeaveReport): Promise<SyncOutcome | null> {
+export async function finalSync(tracker: TrackerStore, ctx: CallContext, push: boolean, report: { sync: LeaveReport['sync']; readonly problems: string[] }): Promise<SyncOutcome | null> {
   if ((await localTipOf(tracker.location.root)) === null) return null;
   try {
     const outcome = push
