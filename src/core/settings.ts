@@ -294,6 +294,15 @@ export function readMachineSetting(commonDir: string, key: string): Promise<unkn
   return new MachineLocalStore(commonDir).records.read(MACHINE_SETTINGS, key);
 }
 
+/** A machine setting's value for this clone: the one set when it is valid for this release, else its default. */
+export async function machineSetting(commonDir: string, key: string): Promise<unknown> {
+  const spec = SETTINGS.get(key);
+  if (!spec || spec.scope !== 'machine') throw new Error(`${key} is not a machine setting`);
+  const set = await readMachineSetting(commonDir, key).catch(() => undefined);
+  const value = set === undefined ? undefined : spec.parse(set);
+  return value === undefined ? spec.fallback(commonDir) : value;
+}
+
 /**
  * A store setting's value in `view`: the one set when it is valid for this
  * release, else its default.

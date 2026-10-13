@@ -5,6 +5,8 @@
 import path from 'node:path';
 import {
   CLIENT_INFO_META_KEY,
+  ProtocolError,
+  ProtocolErrorCode,
   Server,
   type CallToolRequest,
   type CallToolResult,
@@ -16,10 +18,14 @@ import type { CallContext, ClientInfo, Core } from '../../core';
 import { findHostRoot, readCheckoutConfig, readPerson } from '../../core/host';
 import { GrimoireError, invalid } from '../../errors';
 import { SERVER_INSTRUCTIONS } from '../../instructions';
+import { CHORES_PROMPT_DESCRIPTION, CHORES_PROMPT_TEXT } from '../../knowledge/chores/offering';
 import { errorBodyOf } from '../internal';
 import { VERSION } from '../../version';
 import { metaIds, takeHint } from './hint';
 import { toolResult } from './result';
+
+/** The one MCP prompt grimoire serves. */
+const CHORES_PROMPT = 'chores';
 
 /** What the surface needs from the core. */
 export type McpCore = Pick<Core, 'ops' | 'call'>;
@@ -64,7 +70,7 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
   return ({ era }) => {
     const server = new Server(
       { name: 'grimoire', version: VERSION },
-      { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
+      { capabilities: { tools: {}, prompts: {} }, instructions: SERVER_INSTRUCTIONS },
     );
 
     server.oninitialized = () => deps.onOpened?.();
@@ -83,6 +89,19 @@ export function grimoireServerFactory(deps: McpDeps): McpServerFactory {
           annotations: { ...op.annotations },
         }));
       return { tools };
+    });
+
+    // The one prompt (spec §8, §16 Carriers): the chore procedure, for generic MCP clients.
+    server.setRequestHandler('prompts/list', async () => {
+      deps.onOpened?.();
+      return { prompts: [{ name: CHORES_PROMPT, description: CHORES_PROMPT_DESCRIPTION }] };
+    });
+    server.setRequestHandler('prompts/get', async (request) => {
+      deps.onOpened?.();
+      if (request.params.name !== CHORES_PROMPT) {
+        throw new ProtocolError(ProtocolErrorCode.InvalidParams, `there is no grimoire prompt named ${request.params.name}; the one prompt is ${CHORES_PROMPT}`);
+      }
+      return { description: CHORES_PROMPT_DESCRIPTION, messages: [{ role: 'user', content: { type: 'text', text: CHORES_PROMPT_TEXT } }] };
     });
 
     /** The connecting client, from `initialize` (2025 era) or the request envelope (2026-07-28). */

@@ -4,7 +4,10 @@
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import { makeTempDir, removeDir } from '#harness';
+import { makeTempDir, removeDir, type GitWorld } from '#harness';
+import { skillVersionOf } from '../../src/knowledge';
+import { openTracker, randomProposalId, randomRunId } from '../../src/tracker';
+import { commitChoreRun, compileRecord, terminal, workPair } from '../core/chore-support';
 import { putMachineSetting } from '../../src/core/settings';
 import { codexHookHash } from '../../src/installer';
 import { noteClientRuntime } from '../../src/installer/client-runtime';
@@ -19,6 +22,42 @@ async function ok<T>(outcome: Promise<{ ok: true; result: T } | { ok: false; err
   const settled = await outcome;
   if (!settled.ok) throw new Error(`call failed: ${JSON.stringify(settled.error)}`);
   return settled.result;
+}
+
+/** A create proposal pending human review, made at `at`, as a Skill Proposer run writes it. */
+async function proposalAt(world: GitWorld, at: Date): Promise<void> {
+  const tracker = await openTracker(world.a.dir, { clock: () => at });
+  try {
+    await tracker.transact({ op: 'propose', author: { name: world.a.identity.name, email: world.a.identity.email }, actor: { kind: 'agent', client: 'test', nonce: 'n' } }, async (draft) => {
+      const text = '---\nname: port-picking\ndescription: Pick free ports in tests.\n---\nBind port 0.\n';
+      await draft.proposals.add({
+        id: randomProposalId(),
+        action: 'create',
+        skill: 'port-picking',
+        base: null,
+        after: [],
+        version: skillVersionOf(text),
+        ops: [],
+        citations: [],
+        served: [],
+        pages: [],
+        traces: [],
+        claims: { rationale: 'PROPOSAL-RATIONALE', failures: [], expected_signal: 'PROPOSAL-RATIONALE', provenance: 'PROPOSAL-RATIONALE' },
+        flags: [],
+        tokens: [],
+        run: 'cr-test',
+        origin: 'session',
+        isolation: 'claude-chore-agent',
+        unverified: { client: null, model: null },
+        actor: { kind: 'agent' },
+        at: at.toISOString(),
+        text,
+      });
+      return { result: null };
+    });
+  } finally {
+    await tracker.close();
+  }
 }
 
 async function pinned(root: string): Promise<void> {
@@ -69,6 +108,63 @@ describe('status', () => {
       this_process: { node: process.version, path_source: path.dirname(process.execPath) },
       clients: [expect.objectContaining({ client: 'codex-mcp-client', node: process.version, path_source: path.dirname(process.execPath), live: false, supported: true })],
     });
+  });
+
+  test('the knowledge facts: what is due or why not, the paused loop, a pending proposal and its age, set-aside pairs and active skills with flags', async ({
+    world,
+    grimoire,
+  }) => {
+    const root = world.a.dir;
+    const { core, ctx } = grimoire;
+    const facts = STATUS_FACTS.filter((fact) => fact.key === 'knowledge');
+    const at = (hours: number) => new Date(T0.getTime() + hours * 3_600_000);
+
+    const idle = await readStatus({ root, facts, now: at(1) });
+    expect(idle.report.knowledge).toMatchObject({
+      loop: 'on',
+      pickup: 'ask',
+      next: null,
+      chores: { 'wiki-maintainer': { due: false, why: 'no uncompiled settled traces' }, 'skill-proposer': { due: false } },
+      pending_proposals: [],
+      set_aside: [],
+      skills: [],
+    });
+    expect(idle.lines).toContain('Chores: none due (Wiki Maintainer: no uncompiled settled traces; Skill Proposer: 0 failing traces in compiles not yet proposed from, below the threshold)');
+
+    await ok(core.call('settings_set', { key: 'chores.compile_pairs', value: 1 }, terminal(ctx)));
+    const fail = await workPair(core, ctx, 'fail');
+    const due = await readStatus({ root, facts, now: at(25) });
+    expect(due.report.knowledge).toMatchObject({ next: 'wiki-maintainer', chores: { 'wiki-maintainer': { due: true, why: '1 uncompiled traces, 1 failing' } } });
+    expect(due.lines).toContain('Chores: the Wiki Maintainer is due (1 uncompiled traces, 1 failing)');
+
+    // Two failed compile runs set the pair aside: shown, never offered.
+    for (const id of [randomRunId(), randomRunId()]) {
+      await commitChoreRun(world.a, world.a, { ...compileRecord(id, at(26).toISOString(), []), result: 'failed', reasons: ['too_big'], pairs: [`${fail}@fail`] });
+    }
+    await ok(core.call('skill_edit', { name: 'release-notes', text: '---\nname: release-notes\ndescription: Use when noting a change.\n---\nWrite it down.\n', base: null }, terminal(ctx)));
+    await proposalAt(world, at(27));
+    await ok(core.call('settings_set', { key: 'knowledge.loop', value: 'paused' }, terminal(ctx)));
+    await putMachineSetting(path.join(root, '.git'), 'knowledge.pickup', 'manual');
+
+    const later = await readStatus({ root, facts, now: at(30) });
+    const knowledge = later.report.knowledge as Record<string, any>;
+    expect(knowledge).toMatchObject({
+      loop: 'paused',
+      pickup: 'manual',
+      next: null,
+      chores: { 'wiki-maintainer': { due: false, why: 'the knowledge loop is paused' } },
+      set_aside: [{ pair: `${fail}@fail`, strikes: 2 }],
+      skills: [{ name: 'release-notes', version: expect.any(String), attention: [] }],
+    });
+    expect(knowledge.pending_proposals).toEqual([{ id: expect.stringMatching(/^pp-/), skill: 'port-picking', action: 'create', at: at(27).toISOString(), age_hours: 3, flags: [] }]);
+    expect(later.lines).toEqual(
+      expect.arrayContaining([
+        'Chores: none due: the knowledge loop is paused',
+        `Skill proposal ${knowledge.pending_proposals[0].id} (create port-picking) awaits human review, 3 h old`,
+        `Set aside after 2 failed compiles: ${fail}@fail`,
+      ]),
+    );
+    expect(later.lines.join('\n')).not.toContain('PROPOSAL-RATIONALE');
   });
 
   test('a clone without the tracker still gets every fact, the ones that need it saying why not', async ({ world }) => {

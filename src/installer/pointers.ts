@@ -3,6 +3,7 @@
 // the manifest records. Pure: the writer (./writer.ts) compares them with the
 // checkout and writes what differs.
 import { MCP_ENTRY_ARGS, claudeHookArgs, codexHookCommand } from './bootstrap';
+import { CHORE_CARRIERS, claudeChoreAgentText, claudeChoreSkillText, codexChoreRoleText, codexChoreSkillText } from './carriers';
 import { canonicalJson, sha256, type ClientName, type EntryKind } from './manifest';
 import { SHIM_PATH, shimText } from './shim';
 import {
@@ -201,6 +202,8 @@ export function desiredEntries(options: PointerOptions): DesiredEntry[] {
       { path: '.claude/settings.json', kind: 'json-array-item', key: ['hooks', 'PreToolUse'], hook: 'pre-tool-use', value: claudeHookGroup('pre-tool-use'), client },
       { path: '.claude/settings.json', kind: 'json-array-item', key: ['hooks', 'SessionStart'], hook: 'session-start', value: claudeHookGroup('session-start'), client },
       { path: '.claude/rules/grimoire.md', kind: 'file', text: instructionRulesText(), content: true, client },
+      { path: CHORE_CARRIERS.claudeSkill, kind: 'file', text: claudeChoreSkillText(), content: true, client },
+      { path: CHORE_CARRIERS.claudeAgent, kind: 'file', text: claudeChoreAgentText(), content: true, client },
     );
   }
   if (options.clients.includes('codex')) {
@@ -215,6 +218,8 @@ export function desiredEntries(options: PointerOptions): DesiredEntry[] {
         client,
       },
       { path: 'AGENTS.md', kind: 'marker-block', marker: AGENTS_MARKER, body: agentsBlockBody(), placement: 'end', content: true, client },
+      { path: CHORE_CARRIERS.codexSkill, kind: 'file', text: codexChoreSkillText(), content: true, client },
+      { path: CHORE_CARRIERS.codexRole, kind: 'file', text: codexChoreRoleText(), content: true, client },
     );
   }
   if (options.adapter !== 'none') {
