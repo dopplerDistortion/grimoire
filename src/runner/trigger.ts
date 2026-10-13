@@ -44,8 +44,8 @@ export interface RunnerTriggerOptions {
   readonly tips: () => Promise<TrackerTips>;
   /** Whether a runner is configured on this machine now. */
   readonly configured: () => Promise<boolean>;
-  /** One evaluation: `runChores({…, due: true})`. */
-  readonly run: () => Promise<ChoreRunReport>;
+  /** One evaluation: `runChores({…, due: true, signal})`; `signal` fires when the trigger stops. */
+  readonly run: (signal: AbortSignal) => Promise<ChoreRunReport>;
   /** What to tell the person (start's stderr). */
   readonly log?: (line: string) => void;
   readonly everyMs?: number;
@@ -55,7 +55,10 @@ export interface RunnerTriggerOptions {
 export interface RunnerTrigger {
   /** Evaluates now (or once more after the evaluation under way). */
   poke(): void;
-  /** Stops the timers; waits up to `waitMs` for an evaluation under way. */
+  /**
+   * Stops the timers and aborts an evaluation under way (its child is killed
+   * at once); waits up to `waitMs` for it to wind down (abandon its run).
+   */
   stop(waitMs?: number): Promise<void>;
 }
 
@@ -76,6 +79,7 @@ const sameTips = (x: TrackerTips, y: TrackerTips) => x.local === y.local && x.re
 export function startRunnerTrigger(options: RunnerTriggerOptions): RunnerTrigger {
   const log = options.log ?? (() => {});
   let stopped = false;
+  const stopping = new AbortController();
   let running: Promise<void> | null = null;
   let again = false;
   let lastSaid: string | null = null;
@@ -89,7 +93,7 @@ export function startRunnerTrigger(options: RunnerTriggerOptions): RunnerTrigger
   const evaluateOnce = async () => {
     if (!(await options.configured().catch(() => false))) return;
     try {
-      const report = await options.run();
+      const report = await options.run(stopping.signal);
       if (report.runs.length > 0) {
         lastSaid = null;
         log(report.summary);
@@ -145,6 +149,7 @@ export function startRunnerTrigger(options: RunnerTriggerOptions): RunnerTrigger
       stopped = true;
       clearInterval(checkTimer);
       clearInterval(everyTimer);
+      stopping.abort();
       const current = running;
       if (current) await Promise.race([current, new Promise((resolve) => setTimeout(resolve, waitMs).unref())]);
     },

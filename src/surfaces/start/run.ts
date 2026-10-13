@@ -424,10 +424,11 @@ async function serve(clone: Clone, command: StartCommand, io: CliIo, tty: boolea
     root,
     tips: async () => (await tracker).tips(),
     configured: async () => (await readRunnerConfig(store)) !== null,
-    run: async () => {
+    // Stopping aborts a run under way: its child is killed at once and the run abandoned before the core closes.
+    run: async (signal) => {
       const at = new Date().toISOString();
       try {
-        const report = await runChores({ root, core, env: io.env, due: true });
+        const report = await runChores({ root, core, env: io.env, due: true, signal });
         lastTrigger = { at, outcome: report.runs.length > 0 ? 'ran' : 'nothing due', message: report.summary };
         return report;
       } catch (error) {
