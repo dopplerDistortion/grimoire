@@ -148,7 +148,8 @@ export const attention = define({
     }
 
     const status = await syncStatus.run({}, env);
-    const strays = (await skillStrays.run({}, env)).stray_edits.map((stray): AttentionItem => ({ kind: 'stray_edit', stray }));
+    // A stray-edit store or skill book that can't be read hides those items, never the rest of the queue.
+    const strays = (await skillStrays.run({}, env).catch(() => ({ stray_edits: [] }))).stray_edits.map((stray): AttentionItem => ({ kind: 'stray_edit', stray }));
     return { items: [...syncItems(status), ...collisionItems(view), ...conflicts, ...doubles, ...stale, ...strays], counts };
   },
 });

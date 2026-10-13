@@ -329,51 +329,51 @@ export function resolveConflict(issue: IssueDetail, reload: () => Promise<void>)
   const fields = conflict.fields.filter((field) => field !== 'open_attempts');
   const kept = (field: string): unknown => (field in issue ? (issue as unknown as Record<string, unknown>)[field] : null);
   openDialog({
-      title: `Resolve the conflict on ${issue.id}`,
-      humanOnly: true,
-      ok: 'Resolve',
-      body: (
-        <>
-          <p class="mute small">
-            The same operation as <code>grimoire resolve</code>: for each field, say whose value stands. The conflict records go in one commit.
-          </p>
-          {fields.map((field) => (
-            <fieldset key={field} class="resolve-field">
-              <legend>{FIELD_NAMES[field] ?? field}</legend>
-              <label class="row top-al">
-                <input type="radio" name={`take:${field}`} value="kept" defaultChecked />
-                <span>
-                  <b class="pre">{shown(kept(field))}</b>
-                  <br />
-                  <span class="mute small">kept by the fold (what the issue shows)</span>
-                </span>
-              </label>
-              <label class="row top-al">
-                <input type="radio" name={`take:${field}`} value="theirs" />
-                <span>
-                  <b class="pre">{shown(conflict.theirs[field])}</b>
-                  <br />
-                  <span class="mute small">set aside by the fold</span>
-                </span>
-              </label>
-              <div class="mute small">
-                Before both changes: <span class="pre">{shown(conflict.base[field])}</span>
-              </div>
-            </fieldset>
-          ))}
-        </>
-      ),
-      run: async (values: FormValues) => {
-        const picked: Record<string, string> = {};
-        for (const field of fields) picked[field] = values[`take:${field}`] ?? 'kept';
-        const known = ['title', 'status', 'parent', 'body', 'deleted'];
-        const input: Record<string, unknown> = { id: issue.id, fields: Object.fromEntries(Object.entries(picked).filter(([field]) => known.includes(field))) };
-        if (fields.some((field) => !known.includes(field))) input.take = 'kept';
-        await write('resolve', input);
-        toast(`Resolved the conflict on ${issue.id}.`);
-        await reload();
-      },
-    });
+    title: `Resolve the conflict on ${issue.id}`,
+    humanOnly: true,
+    ok: 'Resolve',
+    body: (
+      <>
+        <p class="mute small">
+          The same operation as <code>grimoire resolve</code>: for each field, say whose value stands. The conflict records go in one commit.
+        </p>
+        {fields.map((field) => (
+          <fieldset key={field} class="resolve-field">
+            <legend>{FIELD_NAMES[field] ?? field}</legend>
+            <label class="row top-al">
+              <input type="radio" name={`take:${field}`} value="kept" defaultChecked />
+              <span>
+                <b class="pre">{shown(kept(field))}</b>
+                <br />
+                <span class="mute small">kept by the fold (what the issue shows)</span>
+              </span>
+            </label>
+            <label class="row top-al">
+              <input type="radio" name={`take:${field}`} value="theirs" />
+              <span>
+                <b class="pre">{shown(conflict.theirs[field])}</b>
+                <br />
+                <span class="mute small">set aside by the fold</span>
+              </span>
+            </label>
+            <div class="mute small">
+              Before both changes: <span class="pre">{shown(conflict.base[field])}</span>
+            </div>
+          </fieldset>
+        ))}
+      </>
+    ),
+    run: async (values: FormValues) => {
+      const picked: Record<string, string> = {};
+      for (const field of fields) picked[field] = values[`take:${field}`] ?? 'kept';
+      const known = ['title', 'status', 'parent', 'body', 'deleted'];
+      const input: Record<string, unknown> = { id: issue.id, fields: Object.fromEntries(Object.entries(picked).filter(([field]) => known.includes(field))) };
+      if (fields.some((field) => !known.includes(field))) input.take = 'kept';
+      await write('resolve', input);
+      toast(`Resolved the conflict on ${issue.id}.`);
+      await reload();
+    },
+  });
 }
 
 function ConflictBanners({ issue, reload }: { issue: IssueDetail; reload: () => Promise<void> }) {
