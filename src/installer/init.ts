@@ -37,6 +37,7 @@ import { syncNow } from '../core/sync';
 import { GrimoireError, type ErrorBody } from '../errors';
 import { findGitDirs, MachineLocalStore, readTextIfExists } from '../machine-local';
 import { openTracker, type Person } from '../tracker';
+import { remoteTrackerRef } from '../tracker/layout';
 import { MCP_ENTRY_ARGS, joinCommand } from './bootstrap';
 import { CONFIG_PATH, INSTALL_FORMAT, readInstallConfig, sameInstall, serializeInstallConfig, type AdapterDecision, type InstallConfig } from './config';
 import { installCopy, listCopies, type CopySource } from './copies';
@@ -501,7 +502,23 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     if (!listing.reachable) failure = listing.failure;
     else if (listing.tracker !== null) failure = await fetchTracker(root, remote.name, remotes);
   }
-  const tips = await trackerTips(root, remote.name);
+  let tips = await trackerTips(root, remote.name);
+  if (remote.name !== null && listing?.reachable && listing.tracker === null && tips.remote !== null) {
+    // The remote holds no tracker, but this clone still tracks one: someone deleted it. Adopted, or folded in by
+    // a sync, it would come back; the stale ref goes (as `git fetch --prune` drops it) while it holds what was read.
+    // Not dropped (a fetch, gc or pack-refs elsewhere holds its lock), it is never adopted: the tracker store would
+    // still read it, so init stops before it writes anything.
+    const stale = tips.remote;
+    await dropStaleRemoteTracker(root, remote.name, stale);
+    tips = await trackerTips(root, remote.name);
+    if (tips.remote === stale) {
+      const ref = remoteTrackerRef(remote.name);
+      throw new GrimoireError('BUSY', `${remote.name} holds no grimoire tracker, but init couldn't drop the stale ${ref} (another git may hold its lock); nothing changed`, {
+        ref,
+        remedy: 'rerun init once no other git runs here',
+      });
+    }
+  }
   const named = existing?.tracker_root ?? null;
 
   let trackerPlan: TrackerPlan;

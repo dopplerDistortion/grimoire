@@ -304,6 +304,50 @@ describe('the tracker root R', () => {
     expect(existsSync(path.join(world.b.dir, '.git', 'grimoire', 'pkg'))).toBe(false);
   });
 
+  gitTest('a first install never adopts a tracker deleted from the remote: the stale remote-tracking ref goes, and a new tracker is minted', async ({ world }) => {
+    expect((await init(world.a.dir)).code).toBe(0);
+    const deletedRoot = await world.a.git(['rev-list', '--max-parents=0', 'refs/grimoire/tracker']);
+    await world.b.git(['fetch', '--quiet', 'origin', '+refs/heads/grimoire/tracker:refs/remotes/origin/grimoire/tracker']);
+    await world.a.git(['push', '--quiet', 'origin', ':refs/heads/grimoire/tracker']);
+
+    const run = await init(world.b.dir);
+
+    expect(run.code, run.stdout + run.stderr).toBe(0);
+    expect(run.json.tracker).toMatchObject({ action: 'minted' });
+    const minted = await world.b.git(['rev-list', '--max-parents=0', 'refs/grimoire/tracker']);
+    expect(minted).not.toBe(deletedRoot);
+    const remoteTip = (await world.b.git(['ls-remote', 'origin', 'refs/heads/grimoire/tracker'])).split('\t')[0]!;
+    expect(await world.b.git(['rev-list', '--max-parents=0', remoteTip])).toBe(minted);
+    const tracking = await world.b.gitResult(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/grimoire/tracker']);
+    if (tracking.code === 0) expect(await world.b.git(['rev-list', '--max-parents=0', tracking.stdout.trim()])).toBe(minted);
+  });
+
+  gitTest('a first install never adopts a tracker deleted from the remote, a stale ref that can’t be dropped (its lock is held) is BUSY, and nothing changes', async ({ world }) => {
+    expect((await init(world.a.dir)).code).toBe(0);
+    const deletedRoot = await world.a.git(['rev-list', '--max-parents=0', 'refs/grimoire/tracker']);
+    await world.b.git(['fetch', '--quiet', 'origin', '+refs/heads/grimoire/tracker:refs/remotes/origin/grimoire/tracker']);
+    await world.a.git(['push', '--quiet', 'origin', ':refs/heads/grimoire/tracker']);
+    const lock = path.join(world.b.dir, '.git', 'refs', 'remotes', 'origin', 'grimoire', 'tracker.lock');
+    await writeFile(lock, '');
+
+    let run;
+    try {
+      run = await init(world.b.dir);
+    } finally {
+      await rm(lock, { force: true });
+    }
+
+    expect(run.code, run.stdout + run.stderr).not.toBe(0);
+    expect(run.json.error).toMatchObject({ code: 'BUSY', details: { ref: 'refs/remotes/origin/grimoire/tracker' } });
+    expect((await world.b.gitResult(['rev-parse', '--verify', '--quiet', 'refs/grimoire/tracker'])).code).not.toBe(0);
+    expect(await changedPaths(world.b)).toEqual([]);
+    // Once the lock is gone, init drops it and mints.
+    const again = await init(world.b.dir);
+    expect(again.code, again.stdout + again.stderr).toBe(0);
+    expect(again.json.tracker).toMatchObject({ action: 'minted' });
+    expect(await world.b.git(['rev-list', '--max-parents=0', 'refs/grimoire/tracker'])).not.toBe(deletedRoot);
+  });
+
   gitTest('a remote init can’t reach is never taken for one without a tracker: nothing is minted', async ({ world }) => {
     await world.a.git(['remote', 'set-url', 'origin', path.join(world.root, 'gone.git')]);
 

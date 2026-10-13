@@ -37,3 +37,19 @@ export async function makeUnwritable(dir: string): Promise<() => Promise<void>> 
   await chmodTree(dir, 0o555, 0o444);
   return () => chmodTree(dir, 0o755, 0o644);
 }
+
+/**
+ * Makes `dir` itself unlistable for this user: reading its entries fails
+ * (EPERM on Windows, EACCES elsewhere) while the folder still exists, the way
+ * an ACL, a sandbox or a full handle table refuses a listing. Returns the undo.
+ */
+export async function makeUnlistable(dir: string): Promise<() => Promise<void>> {
+  if (process.platform === 'win32') {
+    // List folder (read data) only, on the folder itself: not inherited, so its files stay readable.
+    const user = os.userInfo().username;
+    icacls([dir, '/deny', `${user}:(RD)`]);
+    return async () => icacls([dir, '/remove:d', user]);
+  }
+  await chmod(dir, 0o300);
+  return () => chmod(dir, 0o755);
+}

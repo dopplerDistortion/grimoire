@@ -7,7 +7,7 @@
 // reports the plan and `doctor --fix` applies it.
 import path from 'node:path';
 import { readTextIfExists } from '../machine-local';
-import { safeWrite, type SafeWriteSkip } from '../safe-write';
+import { keptNote, safeWrite, type SafeWriteSkip } from '../safe-write';
 import { CLIENTS, entryIdentity, normalizedText, readManifest, type ManifestEntry } from './manifest';
 import { desiredEntries, isContentEntry, type DesiredEntry, type PointerOptions } from './pointers';
 import { ADAPTER_DOC, ADAPTER_MARKER, adapterBlockBody, markdownMarkers } from './texts';
@@ -89,7 +89,7 @@ function skipWhy(relative: string, skip: SafeWriteSkip): string {
     case 'link':
       return `${skip.at} is a symlink or junction; grimoire never writes through one`;
     case 'changed':
-      return `${relative} changed while grimoire refreshed it`;
+      return `${relative} changed while grimoire refreshed it${keptNote(skip)}`;
     case 'not-a-file':
       return `${relative} is not a file`;
   }

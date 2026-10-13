@@ -6,7 +6,7 @@ import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:f
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { describe, expect } from 'vitest';
-import { git, gitTest } from '#harness';
+import { git, gitTest, makeUnlistable, permissionsApply } from '#harness';
 import {
   copyDir,
   installCopy,
@@ -238,6 +238,21 @@ describe('pruning copies', () => {
     });
     expect(await pkgListing(store)).toEqual(['.trash', '1.0.0', '1.5.0', '2.0.0', '3.0.0']);
     expect(await readdir(path.join(store.dir, 'pkg', '.trash'))).toEqual([]);
+  });
+
+  gitTest.runIf(permissionsApply)('removes nothing when the process records can’t be listed: a live process may run any copy', async ({ world }) => {
+    const store = new MachineLocalStore(path.join(world.a.dir, '.git'));
+    await installAll(store, world.root, ['1.0.0', '2.0.0', '3.0.0']);
+    await writeConfig(world.a.dir, '3.0.0');
+    const running = await store.processes.register({ role: 'mcp', client: null, worktree: world.a.dir, pin: '1.0.0', pathSource: null });
+    const undo = await makeUnlistable(path.join(store.dir, 'processes'));
+    try {
+      await expect(pruneCopies(store)).rejects.toMatchObject({ code: expect.stringMatching(/^(EPERM|EACCES)$/) });
+    } finally {
+      await undo();
+      await running.unregister();
+    }
+    expect(await pkgListing(store)).toEqual(expect.arrayContaining(['1.0.0', '2.0.0', '3.0.0']));
   });
 
   gitTest('keeps both sides of an upgrade in progress, and what the caller asks to keep', async ({ world }) => {

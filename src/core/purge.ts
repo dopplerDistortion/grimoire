@@ -62,13 +62,15 @@ export interface PurgeSessionResult {
 }
 
 /** The words every purge says about history (spec §3: pushed history is never rewritten). */
-function historyNote({ pushed, rewritten, reflogExpired }: UnpushedDrop): string {
+function historyNote({ pushed, unsure, rewritten, reflogExpired }: UnpushedDrop): string {
   const reflog = reflogExpired
     ? 'and their reflog entries expired.'
     : 'but their reflog entries could not be expired, so the old commits may stay reachable through the tracker reflog until it expires them.';
   const unpushed =
     rewritten > 0 ? `${rewritten} unpushed tracker commit${rewritten === 1 ? ' was' : 's were'} rewritten without it, ${reflog}` : 'No unpushed tracker commit held it.';
-  const kept = pushed
+  const kept = unsure
+    ? 'It may have been pushed: grimoire couldn’t tell whether pushed history holds it, so take it that it does; grimoire never rewrites pushed history or runs gc, so the remote and every clone that fetched it may keep it.'
+    : pushed
     ? 'Pushed history still holds it: grimoire never rewrites pushed history or runs gc, so the remote and every clone that fetched it keep it.'
     : 'It was never pushed; grimoire never rewrites pushed history or runs gc.';
   return `${unpushed} ${kept}`;
@@ -103,7 +105,9 @@ export const purgeTrace = define({
     const author = writer(ctx);
     const handle = parseHandle(input.attempt);
     const reason = input.reason.trim();
-    const write = await tracker.transact<Omit<PurgeTraceResult, 'cited_by' | 'history'>>({ op: 'purge', author, actor }, (draft) => {
+    // What cites the trace is read from the draft (a purge changes no page or proposal): once the write has landed,
+    // nothing is left that could fail and turn it into an error that says nothing changed.
+    const write = await tracker.transact<Omit<PurgeTraceResult, 'history'>>({ op: 'purge', author, actor }, async (draft) => {
       const record = draft.attempt(handle);
       const stored = draft.tracePurge(handle);
       if (!record && !stored) throw new GrimoireError('NOT_FOUND', `there is no trace ${handle}`, { field: 'attempt', ref: handle });
@@ -114,12 +118,11 @@ export const purgeTrace = define({
       }
       draft.purgeTrace(handle, { by: author.email, reason });
       const tombstone = draft.tracePurge(handle)!;
-      const result = { attempt: handle, issue: record?.issue ?? null, purged: true as const, changed: !stored, ...tombstoneFields(tombstone) };
+      const cited_by = { pages: await citingPages(draft, handle), proposals: await citingProposals(draft, handle) };
+      const result = { attempt: handle, issue: record?.issue ?? null, purged: true as const, changed: !stored, ...tombstoneFields(tombstone), cited_by };
       return record ? { result, issue: record.issue } : { result };
     });
-    const history = historyOf(write.history);
-    const view = await tracker.read();
-    return { ...write.result, cited_by: { pages: await citingPages(view, handle), proposals: await citingProposals(view, handle) }, history };
+    return { ...write.result, history: historyOf(write.history) };
   },
 });
 

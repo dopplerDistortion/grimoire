@@ -50,7 +50,11 @@ export function reconcileNotices(report: ReconcileReport, where: string | null):
   const at = where ? ` in ${where}` : '';
   return [
     ...report.unplaced.map((entry) => `evolved skill ${entry.skill} reaches agents${at} only through skill_list and skill_read: ${entry.path}: ${entry.why}`),
-    ...report.movedAside.map((entry) => `grimoire moved ${entry.path}${at} to ${entry.to}: the grimoire- prefix is reserved for grimoire's skill stubs`),
+    ...report.movedAside.map((entry) =>
+      entry.partial
+        ? `grimoire copied ${entry.path}${at} whole to ${entry.to}, but part of it is still there: ${entry.partial}; delete what is left once nothing holds it open (the grimoire- prefix is reserved for grimoire's skill stubs)`
+        : `grimoire moved ${entry.path}${at} to ${entry.to}: the grimoire- prefix is reserved for grimoire's skill stubs`,
+    ),
     ...report.strayEdits.map((entry) => strayEditNotice(entry.skill, where)),
     ...report.left.map((entry) => `grimoire left ${entry.path}${at} alone: ${entry.why}`),
   ];

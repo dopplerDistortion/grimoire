@@ -15,7 +15,7 @@
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import { readTextIfExists } from '../machine-local';
-import { linkedComponent, readCheckoutText, safeWrite } from '../safe-write';
+import { keptNote, linkedComponent, readCheckoutText, safeWrite } from '../safe-write';
 import {
   MANIFEST_PATH,
   canonicalJson,
@@ -502,7 +502,7 @@ export async function writePlanned(root: string, write: PlannedWrite): Promise<s
     case 'link':
       return `${skip.at} is a symlink; grimoire never writes through one`;
     case 'changed':
-      return `${write.path} changed while init ran`;
+      return `${write.path} changed while init ran${keptNote(skip)}`;
     case 'not-a-file':
       return `${write.path} is not a file`;
   }
