@@ -61,6 +61,16 @@ export function proposalStates(proposals: readonly ProposalRecord[], skills: Rea
     if (accept) {
       if (skill?.contested.some((contest) => contest.proposal === record.id)) return decided('contested', accept);
       if (skill && [...skill.superseded, ...skill.lost].some((loser) => loser.id === accept.id)) return decided('superseded', accept);
+      // A human who acknowledged another version over a contested accept sided with its reject.
+      const reject = decisions.find((entry) => entry.kind === 'reject');
+      const sided =
+        reject &&
+        records.some((entry) => {
+          if (entry.kind !== 'acknowledge' || entry.to === accept.to) return false;
+          const before = held(records, entry.after);
+          return decisions.every((decision) => decision.kind !== 'accept' && decision.kind !== 'reject' ? true : before.has(decision.id));
+        });
+      if (sided) return decided('rejected', reject);
       const undone = records.some(
         (entry) => entry.kind === 'restore' && accept.to !== null && entry.from === accept.to && held(records, entry.after).has(accept.id),
       );

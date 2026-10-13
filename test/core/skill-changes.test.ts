@@ -5,11 +5,12 @@
 // record. Seam 1: the core against real git in temp repos.
 import path from 'node:path';
 import { describe, expect } from 'vitest';
-import type { CallContext } from '../../src/core';
+import type { CallContext, Core } from '../../src/core';
+import type { GitWorld } from '#harness';
 import { terminal } from './chore-support';
 import { createResult, manualRun, ok, patchResult, proposer, SKILL, SKILL_V1, skillText, submit } from './proposer-support';
-import { coreTest as test, TRACKER_REF, trackerTip } from './support';
-import { existsIn, expectNoOutput, fileIn, gitStatus, NOTES, pinAndCommit, writeInto } from '../generated/support';
+import { agentContext, coreTest as test, fetchTracker, fetchTrackerFrom, pushTracker, TRACKER_REF, trackerTip } from './support';
+import { existsIn, expectNoOutput, fileIn, gitStatus, NOTES, NOTES_DESCRIPTION, pinAndCommit, writeInto } from '../generated/support';
 
 const SEEDS = '\n## Seeds\n\nPrint the seed on failure so the run can be repeated exactly.\n';
 const TIMEOUTS = '\n## Timeouts\n\nRaise a timeout only after finding what the test waits on.\n';
@@ -190,5 +191,104 @@ describe('eject', () => {
     expect(ok(await next.call('skill_list', {}, grimoire.ctx)).skills.map((skill) => skill.name)).toEqual(['free-ports']);
     // A hand-written skill from now on: grimoire won't restore over it.
     expect(await next.call('skill_restore', { name: 'release-notes', version: notes.version }, cli)).toMatchObject({ ok: false, error: { code: 'INVALID' } });
+  });
+});
+
+/** Clone b takes a's tracker as its own, so the two write apart from here until they fold. */
+async function share(world: GitWorld): Promise<void> {
+  await pushTracker(world.a);
+  await fetchTracker(world.b);
+  await world.b.git(['update-ref', TRACKER_REF, 'refs/remotes/origin/grimoire/tracker']);
+}
+
+/** Each clone fetches the other's tracker: both now read the fold of the two. */
+async function exchange(world: GitWorld): Promise<void> {
+  await fetchTrackerFrom(world.a, world.b);
+  await fetchTrackerFrom(world.b, world.a);
+}
+
+/** What `ctx`'s clone serves agents of a skill: the version, or the error code. */
+async function servedIn(core: Core, ctx: CallContext, name = 'release-notes'): Promise<string> {
+  const read = await core.call('skill_read', { name }, ctx);
+  return read.ok ? read.result.version : read.error.code;
+}
+
+describe('acknowledge', () => {
+  test('a fork of two creates across two clones is resolved by acknowledging the chosen version, on both clones', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    await share(world);
+    const bob = agentContext(world.b);
+    const texts = [skillText('release-notes', NOTES_DESCRIPTION, '# Alice’s way\n'), skillText('release-notes', NOTES_DESCRIPTION, '# Bob’s way\n')];
+    ok(await core.call('skill_edit', { name: 'release-notes', text: texts[0], base: null }, human(ctx)));
+    ok(await core.call('skill_edit', { name: 'release-notes', text: texts[1], base: null }, human(bob)));
+    await exchange(world);
+    const shown = ok(await core.call('skill_show', { name: 'release-notes' }, human(ctx))).skills[0]!;
+    const lower = shown.current!;
+    const higher = shown.superseded[0]!.version!;
+    expect(lower < higher).toBe(true);
+    expect(await servedIn(core, bob)).toBe(lower);
+
+    // Not a side of the fork: refused.
+    expect(await core.call('skill_acknowledge', { name: 'release-notes', version: 'f'.repeat(64) }, human(ctx))).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID', details: { fields: { version: expect.stringContaining(higher) } } },
+    });
+    const acked = ok(await core.call('skill_acknowledge', { name: 'release-notes', version: higher }, human(ctx)));
+    expect(acked).toMatchObject({ name: 'release-notes', version: higher, from: lower, superseded: [lower], settled: [] });
+    expect(await world.a.git(['log', '-1', '--format=%(trailers:key=Grimoire-Op,valueonly,unfold)', TRACKER_REF])).toBe('acknowledge');
+    await pushTracker(world.a);
+    await fetchTracker(world.b);
+
+    for (const on of [ctx, bob]) {
+      expect(await servedIn(core, on)).toBe(higher);
+      const after = ok(await core.call('skill_show', { name: 'release-notes' }, human(on))).skills[0]!;
+      expect(after).toMatchObject({ current: higher, superseded: [] });
+      expect(after.history!.at(-1)).toMatchObject({ kind: 'acknowledge', version: higher, by: world.a.identity.email });
+    }
+    // Nothing left to acknowledge.
+    expect(await core.call('skill_acknowledge', { name: 'release-notes', version: higher }, human(ctx))).toMatchObject({ ok: false, error: { code: 'INVALID' } });
+  });
+
+  test('a suspicious-contested accept is served nowhere until acknowledged; siding with the reject keeps the previous version and reads the proposal rejected', async ({
+    world,
+    grimoire,
+  }) => {
+    const p = await proposer(grimoire, world);
+    const { proposal } = ok(await submit(p, patchResult(p)));
+    await share(world);
+    const bob = agentContext(world.b);
+    ok(await p.core.call('proposal_reject', { id: proposal, reason: 'suspicious', quarantine: false }, human(bob)));
+    const accepted = ok(await p.core.call('proposal_accept', { id: proposal }, human(grimoire.ctx)));
+    await exchange(world);
+    expect(await servedIn(p.core, grimoire.ctx, SKILL)).toBe(p.base);
+    const contested = ok(await p.core.call('skill_show', { name: SKILL }, human(grimoire.ctx))).skills[0]!;
+    expect(contested.contested).toEqual([{ proposal, accepted: [accepted.version], rejected: ['suspicious'], withheld: true }]);
+
+    const acked = ok(await p.core.call('skill_acknowledge', { name: SKILL, version: p.base }, human(bob)));
+    expect(acked).toMatchObject({ version: p.base, settled: [proposal], superseded: [] });
+    await exchange(world);
+    for (const on of [grimoire.ctx, bob]) {
+      expect(await servedIn(p.core, on, SKILL)).toBe(p.base);
+      expect(ok(await p.core.call('skill_show', { name: SKILL }, human(on))).skills[0]).toMatchObject({ current: p.base, contested: [] });
+      expect(ok(await p.core.call('proposal_show', { id: proposal }, human(on)))).toMatchObject({ status: 'rejected', decision: { kind: 'reject', reason: 'suspicious' } });
+    }
+  });
+
+  test('every one of these ops from an agent surface gives HUMAN_ONLY', async ({ world, grimoire }) => {
+    const { core, ctx } = grimoire;
+    const v1 = ok(await core.call('skill_edit', { name: 'release-notes', text: NOTES, base: null }, human(ctx))).version;
+    const tip = await trackerTip(world.a);
+    const marked: CallContext = { ...human(ctx), evidence: { agentMarkers: ['CLAUDECODE'] } };
+    const calls: [string, Record<string, unknown>][] = [
+      ['skill_restore', { name: 'release-notes', version: v1 }],
+      ['skill_delete', { name: 'release-notes' }],
+      ['skill_eject', { name: 'release-notes' }],
+      ['skill_acknowledge', { name: 'release-notes', version: v1 }],
+      ['skill_unblock', { name: 'release-notes' }],
+    ];
+    for (const [op, input] of calls) {
+      for (const on of [ctx, marked]) expect(await core.call(op, input, on), `${op} ${on.surface}`).toMatchObject({ ok: false, error: { code: 'HUMAN_ONLY' } });
+    }
+    expect(await trackerTip(world.a)).toBe(tip);
   });
 });
