@@ -34,18 +34,32 @@ setTimeout(() => {
 
 /**
  * Puts a git answering `delayMs` late in place of the next `times` gits the
- * core runs whose arguments match `command`. The first writes `doneFile` when
- * it finishes, the n-th `<doneFile>.<n>`: `doneFiles` lists those started.
+ * core runs whose arguments match `command`, after letting the first `skip`
+ * of those run as they are. The first writes `doneFile` when it finishes, the
+ * n-th `<doneFile>.<n>`: `doneFiles` lists those started. `settled` waits
+ * until each has written its done file or been killed.
  */
-function slowNextGit(command: RegExp, delayMs: number, doneFile: string, times = 1): { restore(): void; doneFiles(): string[] } {
+function slowNextGit(command: RegExp, delayMs: number, doneFile: string, times = 1, skip = 0): { restore(): void; doneFiles(): string[]; settled(): Promise<void> } {
   const started: string[] = [];
+  const children: childProcess.ChildProcess[] = [];
+  let skipped = 0;
   vi.mocked(childProcess.spawn).mockImplementation(((name: string, args: readonly string[], options: childProcess.SpawnOptions) => {
     if (name !== 'git' || started.length === times || !command.test(args.join(' '))) return realSpawn(name, args, options);
+    if (skipped < skip) {
+      skipped += 1;
+      return realSpawn(name, args, options);
+    }
     const done = started.length === 0 ? doneFile : `${doneFile}.${started.length + 1}`;
     started.push(done);
-    return realSpawn(process.execPath, ['-e', SLOW_GIT, '--', String(delayMs), done, '::git', ...args], options);
+    const child = realSpawn(process.execPath, ['-e', SLOW_GIT, '--', String(delayMs), done, '::git', ...args], options);
+    children.push(child);
+    return child;
   }) as unknown as typeof childProcess.spawn);
-  return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn), doneFiles: () => [...started] };
+  const settled = async () => {
+    const over = (i: number) => existsSync(started[i]!) || children[i]!.exitCode !== null || children[i]!.signalCode !== null;
+    for (let i = 0; i < started.length; i++) for (let waited = 0; !over(i) && waited < delayMs + 5_000; waited += 100) await sleep(100);
+  };
+  return { restore: () => vi.mocked(childProcess.spawn).mockImplementation(realSpawn), doneFiles: () => [...started], settled };
 }
 describe('capture problems are statuses, never errors', () => {
   test('a cut over its budget gives status budget, and the close completes without waiting for it', async ({ world, grimoire, capture }) => {
@@ -424,6 +438,69 @@ describe('a reopen superseding several attempts', () => {
       slow.restore();
       // The slow gits still run in the repo: let them finish before the repo goes.
       for (const done of slow.doneFiles()) for (let waited = 0; !existsSync(done) && waited < gitDelayMs + 5_000; waited += 100) await sleep(100);
+    }
+  });
+});
+
+/** The reflog read (`git log -g`) a context's facts scan starts with, for its observed commits. */
+const REFLOG_READ = / log -g /;
+
+describe('the hard budget, overtaking a facts scan', () => {
+  test('a cut that reaches further than the one before it stands though the deadline overtook its facts scan', async ({ world, grimoire, capture }) => {
+    // Until the comment call lands, no transcript holds it (not_found, nothing scanned); the cut that finds it scans
+    // with a reflog read that answers only after the budget has run out.
+    const budgetMs = 4_000;
+    const plain = await plainFlushedToComment();
+    const flush = flushOnceCutStarts(plain.file, plain.rest, FLUSH_DELAY_MS);
+    const slow = slowNextGit(REFLOG_READ, 2 * budgetMs, path.join(world.root, 'slow-git-done'));
+    try {
+      const core = capture.makeCore({ capture: { claudeConfigDir: plain.configDir, budgetMs, flushWaitMs: 3 * budgetMs } });
+      capture.at('2026-10-11T03:30:00.000Z');
+      const id = await created(core, grimoire.ctx, 'Overtaken scan');
+      capture.at('2026-10-11T03:30:40.051Z');
+      const ctx = plainCall(grimoire.ctx, { era: 'modern', hint: null, meta: { 'claudecode/toolUseId': PLAIN_COMMENT } });
+
+      const started = Date.now();
+      const closed = await core.call('close', { id, reason: 'done', debrief: DEBRIEF }, ctx);
+      const took = Date.now() - started;
+
+      if (!closed.ok) throw new Error(JSON.stringify(closed.error));
+      expect(slow.doneFiles()).toHaveLength(1);
+      expect(took).toBeLessThan(2 * budgetMs);
+      const [record] = await sessionRecords(world.a, id, closed.result.attempt);
+      expect(record!.fields).toMatchObject({ session: PLAIN_SESSION, context: 'main', excerpt: 'cut', excerpt_notes: [] });
+      // Partial, unless git's own stall limit (the same deadline) killed the reflog read just before the scan was overtaken.
+      expect(['partial', 'scanned']).toContain(record!.fields.facts);
+      expect(record!.body).toContain('tool mcp__grimoire__comment');
+    } finally {
+      slow.restore();
+      flush.stop();
+      await slow.settled();
+      await removeDir(plain.configDir);
+    }
+  });
+
+  test('a cut that reaches no further than the one before it does not displace it when the deadline overtakes its facts scan', async ({ world, grimoire, capture }) => {
+    // The ending call never lands: every cut reaches as far as the first, whose facts scan finished; the second's
+    // reflog read answers only after the budget has run out.
+    const budgetMs = 4_000;
+    const core = capture.makeCore({ capture: { budgetMs, flushWaitMs: 3 * budgetMs } });
+    const id = await created(core, grimoire.ctx, 'Overtaken again');
+    const attempt = await claimed(core, grimoire.ctx, id);
+    capture.at('2026-10-11T03:27:20.300Z');
+    await core.call('update', { id, labels_add: ['shown'], attempt }, claudeCall(grimoire.ctx, SUBAGENT_CALL, CLAUDE_AGENT));
+    capture.at('2026-10-11T03:27:30.000Z');
+    const slow = slowNextGit(REFLOG_READ, 2 * budgetMs, path.join(world.root, 'slow-git-done'), 1, 1);
+    try {
+      const closed = await core.call('close', { id, reason: 'done', attempt, debrief: DEBRIEF }, claudeCall(grimoire.ctx, 'toolu_close'));
+
+      expect(closed).toMatchObject({ ok: true, result: { ended: 'done' } });
+      expect(slow.doneFiles()).toHaveLength(1);
+      const records = await sessionRecords(world.a, id, attempt);
+      expect(records.find((r) => r.fields.context === 'main')!.fields).toMatchObject({ excerpt: 'cut', excerpt_notes: ['tail_unflushed'], facts: 'scanned' });
+    } finally {
+      slow.restore();
+      await slow.settled();
     }
   });
 });
