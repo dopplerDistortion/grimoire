@@ -37,4 +37,6 @@ export interface UpgradeRecord {
   readonly to: string;
   /** Epoch ms. */
   readonly started_at: number;
+  /** Which run wrote it (random): a run only ever undoes or clears its own record (additive; other pins ignore it). */
+  readonly token?: string;
 }

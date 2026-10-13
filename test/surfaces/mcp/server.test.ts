@@ -254,6 +254,43 @@ describe('result layout', () => {
   });
 });
 
+describe('the Codex hook announcement', () => {
+  gitTest('a Codex session whose SessionStart hook left no mark hears once that the hook awaits approval in `/hooks`; a marked session hears nothing', async ({ world }) => {
+    await initializeTracker(world.a, world.a);
+    const { params } = readFixtureJson<{ params: { _meta: Record<string, unknown> } }>('codex/meta/tools-call.json');
+    const session = (params._meta['x-codex-turn-metadata'] as { session_id: string }).session_id;
+    const marked = 'marked-session-0001';
+    const { recordRevealedRoot } = await import('../../../src/capture/transcript-roots');
+    await recordRevealedRoot(new MachineLocalStore(path.join(world.a.dir, '.git')), {
+      client: 'codex',
+      session: marked,
+      transcriptPath: path.join(world.root, 'codex-home', 'sessions', '2026', '10', '12', `rollout-${marked}.jsonl`),
+    });
+    const served = await serve(world.a, 'legacy');
+    try {
+      const first = await served.client.callTool({ name: 'labels', arguments: {}, _meta: params._meta });
+      const second = await served.client.callTool({ name: 'labels', arguments: {}, _meta: params._meta });
+      const markedCall = await served.client.callTool({
+        name: 'labels',
+        arguments: {},
+        _meta: { ...params._meta, sessionId: marked, 'x-codex-turn-metadata': { session_id: marked } },
+      });
+
+      expect(first.structuredContent).toEqual({
+        labels: [],
+        notices: [
+          'Codex will skip grimoire’s hook until you approve it in `/hooks`, once per clone of this repo; Codex runs the main checkout’s .codex/ in every linked worktree',
+        ],
+      });
+      expect(second.structuredContent).toEqual({ labels: [] });
+      expect(markedCall.structuredContent).toEqual({ labels: [] });
+      expect(session).not.toBe(marked);
+    } finally {
+      await served.close();
+    }
+  });
+});
+
 describe('lazy per-call checks', () => {
   gitTest('the format checks run per call, so a running server notices a newer store or install format', async ({
     world,
