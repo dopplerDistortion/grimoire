@@ -34,6 +34,7 @@ import path from 'node:path';
 import type { Identity } from '../core/context';
 import { disclosureLines, putMachineSetting, seedStoreSettings, storeExcerptMode, type ExcerptMode } from '../core/settings';
 import { syncNow } from '../core/sync';
+import { upgradeRequiredDetails, type UpgradePlace } from '../core/upgrade';
 import { GrimoireError, type ErrorBody } from '../errors';
 import { findGitDirs, MachineLocalStore, readTextIfExists } from '../machine-local';
 import { openTracker, type Person } from '../tracker';
@@ -217,6 +218,16 @@ type TrackerPlan =
 const DOCS = ['https://www.npmjs.com/package/@goksening/grimoire'];
 
 /** The canceled answer: a refusal before anything was written. */
+/** Runs `step`; an UPGRADE_REQUIRED it throws leaves with its details completed at `place` (the remedies, in order). */
+async function completingUpgrade<T>(place: UpgradePlace, step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (!(error instanceof GrimoireError) || error.code !== 'UPGRADE_REQUIRED') throw error;
+    throw new GrimoireError('UPGRADE_REQUIRED', error.message, { ...(await upgradeRequiredDetails(error.details, place)) });
+  }
+}
+
 function canceled(what: string): GrimoireError {
   return new GrimoireError('INVALID', `init was canceled at ${what}; nothing changed`, { fields: { confirmation: 'not given' } });
 }
@@ -587,7 +598,9 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
     }
     const formats = o.formats ?? RELEASE_FORMATS;
     const from = inProgress && inProgress.to === version ? inProgress.from : existing!.version!;
-    const markers = [
+    // UPGRADE_REQUIRED here has the one details shape the core gives (spec §5, §9), with its ordered remedies.
+    const place = { root, pin: existing!.version, commonDir: dirs.commonDir, running: version };
+    const markers = await completingUpgrade(place, async () => [
       planMarker('store', await readStoreMarker(root, [tips.local, tips.remote]), formats.store, version, existing!.version),
       planMarker('machine', (await store.marker.read()) ?? null, formats.machine, version, existing!.version),
       planMarker(
@@ -597,7 +610,7 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
         version,
         existing!.version,
       ),
-    ];
+    ]);
     const raises = markers.filter((marker) => marker.verdict === 'compat-raise');
     if (raises.length > 0) {
       const which = raises.map((marker) => describeMarker(marker, formats[marker.marker])).join('; ');
@@ -607,13 +620,10 @@ export async function runInit(o: InitOptions): Promise<InitReport> {
         });
       }
       // Steps 3 and 4 are empty slots in v1: no release of this line ships the migration a compat raise runs.
+      // The data is older than this release runs against: the release that understands it is the one its marker names, else the pin.
+      const raised = raises[0]!;
       throw new GrimoireError('UPGRADE_REQUIRED', `grimoire ${version} ships no migration for ${which}; nothing changed`, {
-        marker: raises[0]!.marker,
-        why: 'older',
-        running: version,
-        pin: existing!.version,
-        requires: null,
-        remedies: [],
+        ...(await upgradeRequiredDetails({ marker: raised.marker, why: 'older', requires: raised.requires ?? existing!.version }, place)),
       });
     }
     const own = await worktreeKey(root);

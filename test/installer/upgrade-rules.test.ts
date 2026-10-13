@@ -318,6 +318,22 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
     expect(await store.coordination.list(UPGRADE_RECORDS)).toEqual([]);
   });
 
+  gitTest('at a terminal, a compat raise refuses with UPGRADE_REQUIRED in the one details shape: v1 ships no migration', async ({ world }) => {
+    await installOld(world.a);
+    const later = { store: { J: 2, K: 2 }, machine: { J: 1, K: 1 }, install: { J: 1, K: 1 } };
+
+    const refused = initAt(world.a.dir, NEW, { flags: { upgrade: true }, answers: [], extra: { formats: later } });
+
+    await expect(refused).rejects.toMatchObject({ code: 'UPGRADE_REQUIRED', message: expect.stringContaining('ships no migration') });
+    const details = ((await refused.catch((error: { details: Record<string, unknown> }) => error)) as { details: Record<string, unknown> }).details;
+    expect(Object.keys(details).sort()).toEqual(['marker', 'pin', 'remedies', 'requires', 'running', 'why']);
+    expect(details).toMatchObject({ marker: 'store', why: 'older', running: NEW, pin: OLD, requires: expect.any(String) });
+    // `older`: a human-run init here, at the current pin.
+    expect(details.remedies).toEqual([{ kind: 'init', command: `npx @goksening/grimoire@${OLD} init`, text: expect.any(String) }]);
+    expect(await pinOf(world.a.dir)).toBe(OLD);
+    expect(await changedPaths(world.a)).toEqual([]);
+  });
+
   gitTest('a merge that conflicts in config.yml: init names the higher pin’s file to take whole; that pin’s init then rebuilds a conflicted manifest from disk', async ({ world }) => {
     await installOld(world.a);
     const MID = '1.0.0-test.3';
@@ -368,6 +384,12 @@ describe('init --upgrade', { timeout: 240_000 }, () => {
 
     const refused = initAt(world.a.dir, OLD, { flags: { upgrade: true }, extra: { formats: older } });
     await expect(refused).rejects.toMatchObject({ code: 'UPGRADE_REQUIRED', details: { marker: 'store', why: 'newer', running: OLD, pin: NEW } });
+    // One details shape (spec §5, §9): `requires` names a release, and the remedies are the core's ordered objects.
+    const details = ((await refused.catch((error: { details: Record<string, unknown> }) => error)) as { details: Record<string, unknown> }).details;
+    expect(Object.keys(details).sort()).toEqual(['marker', 'pin', 'remedies', 'requires', 'running', 'why']);
+    expect(details.requires).toEqual(expect.any(String));
+    expect(details.remedies).toContainEqual({ kind: 'upgrade', command: `npx @goksening/grimoire@${details.requires as string} init --upgrade`, text: expect.any(String) });
+    for (const remedy of details.remedies as Record<string, unknown>[]) expect(remedy).toMatchObject({ kind: expect.stringMatching(/^(rebase|upgrade|join|init|restart)$/), text: expect.any(String) });
     expect(await pinOf(world.a.dir)).toBe(NEW);
 
     const { report } = await initAt(world.a.dir, OLD, { flags: { upgrade: true } });

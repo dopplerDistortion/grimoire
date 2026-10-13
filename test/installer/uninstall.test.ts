@@ -314,7 +314,15 @@ describe('what uninstall refuses, changing nothing', () => {
 
     await expect(uninstall(world.a, [])).rejects.toMatchObject({
       code: 'UPGRADE_REQUIRED',
-      details: { marker: 'manifest', remedies: [`npx @goksening/grimoire@${newer} uninstall`] },
+      details: {
+        // The manifest belongs to the install: the one UPGRADE_REQUIRED details shape (spec §5, §9).
+        marker: 'install',
+        why: 'newer',
+        running: VERSION,
+        pin: newer,
+        requires: newer,
+        remedies: [{ kind: 'upgrade', command: `npx @goksening/grimoire@${newer} uninstall`, text: expect.any(String) }],
+      },
     });
     expect(await differences(world.a, installed)).toEqual(['.grimoire/config.yml', '.grimoire/manifest.yml']);
   });
